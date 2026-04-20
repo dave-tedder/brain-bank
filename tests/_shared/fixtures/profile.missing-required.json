@@ -1,0 +1,20 @@
+{
+  "operator": {
+    "emails": ["test@example.com"]
+  },
+  "example_domain": "example.com",
+  "example_projects": ["Test Project"],
+  "example_person_name": "Alex Rivera",
+  "persona": {
+    "digest": "a knowledge worker",
+    "compile_pages": "a personal knowledge base"
+  },
+  "domain": {
+    "singular_noun": "client session",
+    "plural_noun": "client sessions",
+    "vocabulary": ["work", "project", "client"]
+  },
+  "event_types": ["event", "meeting"],
+  "client_event_types": ["client_session"],
+  "mechanical_capture_prefixes": []
+}
