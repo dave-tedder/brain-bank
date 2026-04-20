@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { loadProfile } from "../_shared/profile.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -148,14 +149,14 @@ async function compilePage(
     const isNewPage = !page.content || page.content.trim() === "";
 
     const systemPrompt = isNewPage
-      ? `You are maintaining a wiki-style reference page for a tattoo artist's knowledge base. Create a new reference page for "${page.title}" (type: ${page.page_type}).
+      ? `You are maintaining a wiki-style reference page for ${loadProfile().persona.compile_pages}. Create a new reference page for "${page.title}" (type: ${page.page_type}).
 
 Write a well-organized markdown document that synthesizes all the information into a coherent reference. Structure it with clear sections. Include all factual details from the source material. Write in third person for client pages, neutral reference style for topics/projects.
 
 At the end, on a new line, output BACKLINKS: followed by a comma-separated list of page slugs from the available pages list that this page should cross-reference. If none are relevant, output BACKLINKS: none.
 
-Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`
-      : `You are maintaining a wiki-style reference page for a tattoo artist's knowledge base. Update the existing page for "${page.title}" (type: ${page.page_type}) by integrating new information.
+Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical). No em dashes. No emojis.`
+      : `You are maintaining a wiki-style reference page for ${loadProfile().persona.compile_pages}. Update the existing page for "${page.title}" (type: ${page.page_type}) by integrating new information.
 
 Rules:
 - Preserve all existing information that is still accurate
@@ -167,7 +168,7 @@ Rules:
 
 At the end, on a new line, output BACKLINKS: followed by a comma-separated list of page slugs from the available pages list that this page should cross-reference. If none are relevant, output BACKLINKS: none.
 
-Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
+Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical). No em dashes. No emojis.`;
 
     const userContent = isNewPage
       ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
