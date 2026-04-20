@@ -48,6 +48,7 @@ yarn-error.log*
 profile.json
 profile.*.json
 !profile.example.json
+!tests/_shared/fixtures/profile.*.json
 
 # Handoff scratch files
 HANDOFF-*.md
