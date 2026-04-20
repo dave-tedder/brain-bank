@@ -5,6 +5,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { loadProfile } from "../_shared/profile.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -13,6 +14,14 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+function titleCase(s: string): string {
+  return s.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^\w\s-]/g, "").replace(/\s+/g, "-");
+}
 
 async function contentHash(text: string): Promise<string> {
   const data = new TextEncoder().encode(text.trim());
@@ -65,7 +74,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
         {
           role: "system",
           content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned by full name when possible, e.g. "Lauren Tedder" not just "Lauren" (empty if none)
+- "people": array of people mentioned by full name when possible, e.g. "${loadProfile().example_person_name}" (use full name when possible) (empty if none)
 - "action_items": array of FUTURE to-dos the user still needs to do. STRICT RULES:
     * Only include items phrased as future work: "need to X", "should X", "TODO: X", an imperative about something not yet done, or an explicit open question.
     * NEVER include work described in past tense. If the note says "I updated X", "fixed Y", "shipped Z", "changed the ratio to 3px/1px", "replaced the background", those are DONE and must be excluded.
@@ -73,9 +82,9 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
     * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "tattoo" not "Tattoo", "project management" not "Project Management" (always at least one)
+- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one)
 - "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
-- "project": the project or system this note is ABOUT, e.g. "Open Brain", "UFO Pipeline", "Gmail Bridge", "tedderfamilytattooing.com". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
+- "project": the project or system this note is ABOUT, e.g. ${loadProfile().example_projects.map((p) => `"${p}"`).join(", ")}, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
 - "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
 
 Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or MEETING:, use that to inform the type field (decision->observation, CLIENT->person_note, IDEA->idea, MEETING->observation) and extract structured fields accordingly.
@@ -892,7 +901,7 @@ server.registerTool(
       preferred_styles: z
         .array(z.string())
         .optional()
-        .describe("Style preferences, e.g. ['american traditional', 'japanese']"),
+        .describe("Style preferences"),
       notes: z.string().optional().describe("Any initial notes about this client"),
     },
   },
@@ -991,7 +1000,7 @@ server.registerTool(
   {
     title: "Client Context",
     description:
-      "Get full context on a client: profile, session history, and related brain thoughts. Use before a tattoo session or when a client reaches out.",
+      `Get full context on a client: profile, session history, and related brain thoughts. Use before a ${loadProfile().domain.singular_noun} or when a client reaches out.`,
     inputSchema: {
       client_id: z.string().optional().describe("Client UUID (if known)"),
       name: z.string().optional().describe("Client name (used if client_id not provided)"),
@@ -1128,17 +1137,17 @@ server.registerTool(
 server.registerTool(
   "log_session",
   {
-    title: "Log Tattoo Session",
+    title: `Log ${titleCase(loadProfile().domain.singular_noun)}`,
     description:
-      "Record a tattoo session for a client. Updates the client's last_contact date automatically.",
+      `Record a ${loadProfile().domain.singular_noun} for a client. Updates the client's last_contact date automatically.`,
     inputSchema: {
       client_id: z.string().optional().describe("Client UUID (if known)"),
       client_name: z.string().optional().describe("Client name (used if client_id not provided)"),
       session_date: z.string().optional().describe("Date of session YYYY-MM-DD (defaults to today)"),
       duration_hours: z.number().optional().describe("Session duration in hours"),
-      piece_description: z.string().optional().describe("What was tattooed"),
+      piece_description: z.string().optional().describe("Description of the work performed"),
       placement: z.string().optional().describe("Body placement"),
-      style: z.string().optional().describe("Style of the piece"),
+      style: z.string().optional().describe("Style"),
       status: z
         .enum(["scheduled", "completed", "cancelled", "no-show"])
         .optional()
@@ -1225,8 +1234,8 @@ server.registerTool(
       content_type: z
         .enum(["photo", "video", "flash_sheet", "portfolio_piece", "blog_post"])
         .describe("Type of content"),
-      subject: z.string().optional().describe("What the content shows, e.g. 'koi half-sleeve progress'"),
-      client_id: z.string().optional().describe("Client UUID if content features a specific client's piece"),
+      subject: z.string().optional().describe("What the content shows, e.g. 'in-progress work'"),
+      client_id: z.string().optional().describe("Client UUID if content features a specific client's work"),
       stage: z
         .enum(["captured", "edited", "scheduled", "published", "archived"])
         .optional()
@@ -1838,7 +1847,7 @@ server.registerTool(
     description:
       "Read a pre-synthesized wiki page by slug or by name and type. Compiled pages are persistent reference documents maintained by the digest engine. Use this for client context, topic overviews, or project summaries instead of searching raw thoughts.",
     inputSchema: {
-      slug: z.string().optional().describe("Page slug, e.g. 'client/shane-briggs' or 'topic/japanese-irezumi'"),
+      slug: z.string().optional().describe(`Page slug, e.g. 'client/${slugify(loadProfile().example_person_name)}' or 'topic/${slugify(loadProfile().domain.vocabulary[0])}'`),
       name: z.string().optional().describe("Page title to search for (used if slug not provided)"),
       page_type: z.string().optional().describe("Filter by type: client, topic, project (used with name search)"),
     },

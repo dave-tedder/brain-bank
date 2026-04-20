@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { loadProfile } from "../_shared/profile.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -44,6 +45,10 @@ async function verifySlackSignature(
 
 // --- Shared Utilities ---
 
+function titleCase(s: string): string {
+  return s.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 async function contentHash(text: string): Promise<string> {
   const data = new TextEncoder().encode(text.trim());
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -82,7 +87,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
         {
           role: "system",
           content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned by full name when possible, e.g. "Lauren Tedder" not just "Lauren" (empty if none)
+- "people": array of people mentioned by full name when possible, e.g. "${loadProfile().example_person_name}" (use full name when possible) (empty if none)
 - "action_items": array of FUTURE to-dos the user still needs to do. STRICT RULES:
     * Only include items phrased as future work: "need to X", "should X", "TODO: X", an imperative about something not yet done, or an explicit open question.
     * NEVER include work described in past tense. If the note says "I updated X", "fixed Y", "shipped Z", "changed the ratio to 3px/1px", "replaced the background", those are DONE and must be excluded.
@@ -90,9 +95,9 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
     * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "tattoo" not "Tattoo", "project management" not "Project Management" (always at least one)
+- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one)
 - "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
-- "project": the project or system this note is ABOUT, e.g. "Open Brain", "UFO Pipeline", "Gmail Bridge", "tedderfamilytattooing.com". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
+- "project": the project or system this note is ABOUT, e.g. ${loadProfile().example_projects.map((p) => `"${p}"`).join(", ")}, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
 - "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
 
 Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or MEETING:, use that to inform the type field (decision->observation, CLIENT->person_note, IDEA->idea, MEETING->observation) and extract structured fields accordingly.
