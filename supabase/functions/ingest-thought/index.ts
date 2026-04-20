@@ -249,7 +249,7 @@ function normalizeActionText(s: string): string {
 // "this source never resolves action items."
 // TODO(3.7): read additional operator-specific bridge prefixes from
 // loadProfile().mechanical_capture_prefixes and merge into this list.
-// Structural prefixes below are universal — any operator wants them.
+// Structural prefixes below are universal; any operator wants them.
 const MECHANICAL_CAPTURE_PREFIXES = [
   "[Calendar Sync]",
   "[Notion Sync]",
