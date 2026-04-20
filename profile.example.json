@@ -1,0 +1,21 @@
+{
+  "operator": {
+    "name": "Your Name",
+    "emails": ["you@example.com"]
+  },
+  "example_domain": "yourbusiness.com",
+  "example_projects": ["Side Project", "Daily Log", "Client CRM"],
+  "example_person_name": "Alex Rivera",
+  "persona": {
+    "digest": "a knowledge worker",
+    "compile_pages": "a personal knowledge base"
+  },
+  "domain": {
+    "singular_noun": "client session",
+    "plural_noun": "client sessions",
+    "vocabulary": ["work", "project", "client"]
+  },
+  "event_types": ["event", "meeting", "travel", "maintenance"],
+  "client_event_types": ["client_session", "consultation", "business"],
+  "mechanical_capture_prefixes": []
+}
