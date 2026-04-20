@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { loadProfile } from "../_shared/profile.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -158,7 +159,7 @@ async function synthesizeDigest(
 
   const systemPrompt =
     mode === "weekly"
-      ? `You are a personal knowledge assistant generating a weekly brain digest for a tattoo artist and business owner. Today is ${todayDate}. Review all thoughts captured in the past week, plus any business context and week-over-week comparison data provided, and provide:
+      ? `You are a personal knowledge assistant generating a weekly brain digest for ${loadProfile().persona.digest}. Today is ${todayDate}. Review all thoughts captured in the past week, plus any business context and week-over-week comparison data provided, and provide:
 
 1. A narrative summary of the key themes and what's been on his mind (2-4 sentences, conversational tone)
 2. Week-over-week shifts: what's new this week vs last week, what dropped off, what's gaining momentum. Use the comparison data provided. If volume changed significantly, note it.
@@ -170,7 +171,7 @@ async function synthesizeDigest(
 8. All open action items that still need attention (as a checklist). These are pre-verified as genuinely open, so list them all.
 
 Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Write like a knowledgeable friend giving a weekly recap.`
-      : `You are a personal knowledge assistant generating a daily morning briefing for a tattoo artist and business owner. Today is ${todayDate}. This digest is delivered first thing in the morning. The thoughts below are from YESTERDAY (the previous 24 hours), not today. Frame everything in past tense referring to yesterday, not "today."
+      : `You are a personal knowledge assistant generating a daily morning briefing for ${loadProfile().persona.digest}. Today is ${todayDate}. This digest is delivered first thing in the morning. The thoughts below are from YESTERDAY (the previous 24 hours), not today. Frame everything in past tense referring to yesterday, not "today."
 
 Review all thoughts captured yesterday, plus any business context provided (upcoming events, recent sessions, content pipeline status, client context), and provide:
 
@@ -178,7 +179,7 @@ Review all thoughts captured yesterday, plus any business context provided (upco
 2. Any connections between yesterday's thoughts that might not be obvious
 3. Pre-appointment briefing: if there are appointments labeled "TODAY" in the business context, lead with them. For each, include the client name, what the session is (piece, placement, style), and any relevant context from the brain (previous conversations, preferences, notes). This is the most actionable part of the digest. If no events are labeled "TODAY", say so clearly (e.g., "No appointments on the books today.").
 4. IMPORTANT: Do NOT present events from future dates as today's appointments. Events labeled "LATER THIS WEEK" are NOT today. Only events explicitly labeled "TODAY" are today's appointments.
-5. List ALL upcoming tattoo appointments and consultations later this week individually, with client name, date, and what the session is. Do NOT collapse individual appointments into broader events (e.g., a guest spot spanning multiple days does not replace listing individual client sessions happening during that span)
+5. List ALL upcoming ${loadProfile().domain.plural_noun} and consultations later this week individually, with client name, date, and what the session is. Do NOT collapse individual appointments into broader events (e.g., a multi-day event does not replace listing individual ${loadProfile().domain.plural_noun} happening during that span)
 6. If there are related Notion intake submissions for today's clients, mention any relevant details
 7. Open action items that still need attention (as a short checklist, only if any exist). These are pre-verified as genuinely open, so list them all.
 
@@ -435,7 +436,7 @@ async function gatherExtensionContext(
       .limit(10);
 
     if (sessions?.length) {
-      sections.push("Recent tattoo sessions:");
+      sections.push(`Recent ${loadProfile().domain.plural_noun}:`);
       for (const s of sessions) {
         const parts = [`  ${s.session_date} (${s.status})`];
         if (s.piece_description) parts.push(s.piece_description);
@@ -484,7 +485,7 @@ async function gatherExtensionContext(
                 .ilike("email", `%${attendee}%`)
                 .limit(1);
               matched = data;
-              // Fallback: extract name from email (e.g. shane.briggs@gmail.com -> shane briggs)
+              // Fallback: extract name from email (e.g. alex.rivera@example.com -> alex rivera)
               if ((!matched || matched.length === 0) && attendee.includes("@")) {
                 const localPart = attendee.split("@")[0].replace(/[._+]/g, " ").trim();
                 if (localPart.length > 2) {

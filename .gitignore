@@ -50,5 +50,8 @@ profile.*.json
 !profile.example.json
 !tests/_shared/fixtures/profile.*.json
 
+# Operator-local fixtures (live PII values; never commit)
+tests/_shared/fixtures/private/
+
 # Handoff scratch files
 HANDOFF-*.md
