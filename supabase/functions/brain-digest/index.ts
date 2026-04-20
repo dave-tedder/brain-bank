@@ -505,7 +505,7 @@ async function gatherExtensionContext(
                 .ilike("name", `%${attendee}%`)
                 .limit(1);
               matched = data;
-              // Fallback: try first two words only (handles "Shane Briggs Bishamonten Sleeve" -> "Shane Briggs")
+              // Fallback: try first two words only (handles "Alex Rivera Consultation 2pm" -> "Alex Rivera")
               if ((!matched || matched.length === 0) && attendee.includes(" ")) {
                 const words = attendee.split(/\s+/);
                 if (words.length > 2) {
