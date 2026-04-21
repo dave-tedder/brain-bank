@@ -16,7 +16,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Daily-mode pre-brief filter: which event_types count as "client-facing"
 // for cross-referencing with the clients table. Sourced from profile so
-// non-tattoo operators can configure their own event semantics.
+// operators can configure their own event semantics.
 const clientEventTypes = loadProfile().client_event_types;
 
 // --- Slack ---
@@ -182,7 +182,7 @@ Review all thoughts captured yesterday, plus any business context provided (upco
 
 1. A brief narrative summary (2-3 sentences) of what was on his mind yesterday
 2. Any connections between yesterday's thoughts that might not be obvious
-3. Pre-appointment briefing: if there are appointments labeled "TODAY" in the business context, lead with them. For each, include the client name, what the session is (piece, placement, style), and any relevant context from the brain (previous conversations, preferences, notes). This is the most actionable part of the digest. If no events are labeled "TODAY", say so clearly (e.g., "No appointments on the books today.").
+3. Pre-appointment briefing: if there are appointments labeled "TODAY" in the business context, lead with them. For each, include the client name, what the session is (brief description), and any relevant context from the brain (previous conversations, preferences, notes). This is the most actionable part of the digest. If no events are labeled "TODAY", say so clearly (e.g., "No appointments on the books today.").
 4. IMPORTANT: Do NOT present events from future dates as today's appointments. Events labeled "LATER THIS WEEK" are NOT today. Only events explicitly labeled "TODAY" are today's appointments.
 5. List ALL upcoming ${loadProfile().domain.plural_noun} and consultations later this week individually, with client name, date, and what the session is. Do NOT collapse individual appointments into broader events (e.g., a multi-day event does not replace listing individual ${loadProfile().domain.plural_noun} happening during that span)
 6. If there are related Notion intake submissions for today's clients, mention any relevant details
