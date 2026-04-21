@@ -7,6 +7,7 @@ export interface Profile {
   domain: { singular_noun: string; plural_noun: string; vocabulary: string[] };
   event_types: string[];
   client_event_types: string[];
+  content_types: string[];
   mechanical_capture_prefixes: string[];
 }
 
@@ -48,6 +49,7 @@ function validate(p: Profile): void {
   if (!p.domain?.vocabulary?.length) missing.push("domain.vocabulary");
   if (!p.event_types?.length) missing.push("event_types");
   if (!p.client_event_types?.length) missing.push("client_event_types");
+  if (!p.content_types?.length) missing.push("content_types");
   if (missing.length) {
     throw new Error(
       `profile.json is missing required fields: ${missing.join(", ")}. ` +

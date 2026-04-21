@@ -17,5 +17,6 @@
   },
   "event_types": ["event", "meeting", "travel", "maintenance"],
   "client_event_types": ["client_session", "consultation", "business"],
+  "content_types": ["photo", "video", "article"],
   "mechanical_capture_prefixes": []
 }

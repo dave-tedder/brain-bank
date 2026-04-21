@@ -11,6 +11,7 @@ Deno.test("loadProfile parses a valid profile from a fixture URL", () => {
   assertEquals(p.domain.plural_noun, "client sessions");
   assertEquals(p.event_types.length, 4);
   assertEquals(p.client_event_types.length, 3);
+  assertEquals(p.content_types.length, 3);
   assertEquals(p.mechanical_capture_prefixes, []);
 });
 
