@@ -455,12 +455,7 @@ async function gatherExtensionContext(
       if (clientEvents.length > 0) {
         // Extract attendee names from business events only
         const attendeeNames: string[] = [];
-        // TODO(3.6): replace with loadProfile().operator.emails to filter
-        // the operator's own calendar entries out of the attendee list.
-        // Empty array means no filtering; owner emails leak into client-match
-        // loop until 3.6 wires the profile loader. Intermediate non-functional
-        // state per spec 3.2 sanitization boundary.
-        const ownerEmails: string[] = [];
+        const ownerEmails: string[] = loadProfile().operator.emails.map((e) => e.toLowerCase());
         for (const e of clientEvents) {
           const meta = (e as unknown as { metadata?: { attendees?: string[] } }).metadata;
           if (meta?.attendees) {
