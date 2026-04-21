@@ -252,9 +252,9 @@ function normalizeActionText(s: string): string {
 // signals from these sources must come through a manual `done:` command or a
 // dedicated session-log thought, not this path. Adding a pattern here means
 // "this source never resolves action items."
-// TODO(3.7): read additional operator-specific bridge prefixes from
-// loadProfile().mechanical_capture_prefixes and merge into this list.
-// Structural prefixes below are universal; any operator wants them.
+// Structural prefixes are universal (every operator has these sync sources).
+// Operator-specific bridge prefixes come from profile.json — see
+// `supabase/functions/_shared/profile.example.json`.
 const MECHANICAL_CAPTURE_PREFIXES = [
   "[Calendar Sync]",
   "[Notion Sync]",
@@ -262,6 +262,7 @@ const MECHANICAL_CAPTURE_PREFIXES = [
   "[Weekly Review]",
   "Email thread:",
   "Meta DM Scan failed",
+  ...loadProfile().mechanical_capture_prefixes,
 ];
 
 function isMechanicalCapture(content: string): boolean {
