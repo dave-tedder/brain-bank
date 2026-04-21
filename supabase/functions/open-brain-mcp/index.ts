@@ -130,6 +130,11 @@ const MECHANICAL_CAPTURE_PREFIXES = [
   ...loadProfile().mechanical_capture_prefixes,
 ];
 
+// MCP tool-surface enum values sourced from profile. See task 3.8 spec at
+// docs/superpowers/specs/2026-04-20-event-type-enum-profile-wiring-design.md
+const eventTypes = loadProfile().event_types;
+const contentTypes = loadProfile().content_types;
+
 function isMechanicalCapture(content: string): boolean {
   const head = content.trimStart();
   return MECHANICAL_CAPTURE_PREFIXES.some((p) => head.startsWith(p));
@@ -1233,7 +1238,7 @@ server.registerTool(
     inputSchema: {
       title: z.string().optional().describe("Content title or description"),
       content_type: z
-        .enum(["photo", "video", "flash_sheet", "portfolio_piece", "blog_post"])
+        .enum(contentTypes as [string, ...string[]])
         .describe("Type of content"),
       subject: z.string().optional().describe("What the content shows, e.g. 'in-progress work'"),
       client_id: z.string().optional().describe("Client UUID if content features a specific client's work"),
@@ -1340,7 +1345,7 @@ server.registerTool(
     description:
       "See what's in the content pipeline at each stage. Optionally filter by content type or platform.",
     inputSchema: {
-      content_type: z.string().optional().describe("Filter by type: photo, video, flash_sheet, portfolio_piece, blog_post"),
+      content_type: z.string().optional().describe(`Filter by type: ${contentTypes.join(", ")}`),
       platform: z.string().optional().describe("Filter by platform"),
       limit: z.number().optional().default(20),
     },
@@ -1457,10 +1462,10 @@ server.registerTool(
   {
     title: "Log Business Event",
     description:
-      "Record a business event: convention, guest spot, shop event, supply order, or maintenance.",
+      `Record a business event: ${eventTypes.join(", ")}.`,
     inputSchema: {
       event_type: z
-        .enum(["convention", "guest_spot", "shop_event", "supply_order", "maintenance"])
+        .enum(eventTypes as [string, ...string[]])
         .describe("Type of event"),
       title: z.string().describe("Event title"),
       date_start: z.string().optional().describe("Start date YYYY-MM-DD"),
@@ -1502,7 +1507,7 @@ server.registerTool(
     description:
       "Show upcoming business events. Optionally filter by event type.",
     inputSchema: {
-      event_type: z.string().optional().describe("Filter: convention, guest_spot, shop_event, supply_order, maintenance"),
+      event_type: z.string().optional().describe(`Filter: ${eventTypes.join(", ")}`),
       days: z.number().optional().default(90).describe("Look ahead N days"),
     },
   },
