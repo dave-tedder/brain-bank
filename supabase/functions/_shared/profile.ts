@@ -1,3 +1,9 @@
+// JSON module import (Deno 2.x stable). Creates a module-graph edge so the
+// Supabase CLI bundler uploads profile.json alongside this file. A runtime
+// Deno.readTextFileSync() would leave profile.json out of the deploy bundle
+// and crash at module-load time (Session 79 incident).
+import profileDefaults from "./profile.json" with { type: "json" };
+
 export interface Profile {
   operator: { name: string; emails: string[] };
   example_domain: string;
@@ -13,25 +19,11 @@ export interface Profile {
 
 let cached: Profile | null = null;
 
-export function loadProfile(pathOverride?: URL): Profile {
-  if (!pathOverride && cached) return cached;
-  const path = pathOverride ?? new URL("./profile.json", import.meta.url);
-  let raw: string;
-  try {
-    raw = Deno.readTextFileSync(path);
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) {
-      throw new Error(
-        "profile.json not found at supabase/functions/_shared/profile.json. " +
-          "Copy profile.example.json to supabase/functions/_shared/profile.json " +
-          "and fill in your values, then redeploy.",
-      );
-    }
-    throw err;
-  }
-  const parsed = JSON.parse(raw) as Profile;
+export function loadProfile(override?: Profile): Profile {
+  if (!override && cached) return cached;
+  const parsed = (override ?? profileDefaults) as Profile;
   validate(parsed);
-  if (!pathOverride) cached = parsed;
+  if (!override) cached = parsed;
   return parsed;
 }
 
