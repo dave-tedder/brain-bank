@@ -470,7 +470,7 @@ async function gatherExtensionContext(
 
         // Match attendees against clients table
         if (attendeeNames.length > 0) {
-          const clientMatches: Array<{ name: string; id: string }> = [];
+          const clientMatches: Array<{ id: string; name: string; preferred_styles?: string[]; notes?: string }> = [];
           const unmatchedAttendees: string[] = [];
           for (const attendee of attendeeNames) {
             const isEmail = attendee.includes("@");
