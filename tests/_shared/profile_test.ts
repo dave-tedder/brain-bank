@@ -1,9 +1,13 @@
-import { assertEquals, assertRejects, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { loadProfile } from "../../supabase/functions/_shared/profile.ts";
+import { assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { loadProfile, type Profile } from "../../supabase/functions/_shared/profile.ts";
 
-Deno.test("loadProfile parses a valid profile from a fixture URL", () => {
-  const fixture = new URL("./fixtures/profile.valid.json", import.meta.url);
-  const p = loadProfile(fixture);
+function loadFixture(name: string): Profile {
+  const raw = Deno.readTextFileSync(new URL(`./fixtures/${name}`, import.meta.url));
+  return JSON.parse(raw) as Profile;
+}
+
+Deno.test("loadProfile parses a valid profile from a fixture", () => {
+  const p = loadProfile(loadFixture("profile.valid.json"));
   assertEquals(p.operator.name, "Test Operator");
   assertEquals(p.operator.emails, ["test@example.com"]);
   assertEquals(p.example_domain, "example.com");
@@ -16,22 +20,9 @@ Deno.test("loadProfile parses a valid profile from a fixture URL", () => {
 });
 
 Deno.test("loadProfile throws a helpful error when required fields are missing", () => {
-  const fixture = new URL("./fixtures/profile.missing-required.json", import.meta.url);
-  const err = assertThrows(() => loadProfile(fixture), Error);
+  const err = assertThrows(() => loadProfile(loadFixture("profile.missing-required.json")), Error);
   const msg = (err as Error).message;
   if (!msg.includes("operator.name")) {
     throw new Error(`Expected error message to mention 'operator.name', got: ${msg}`);
-  }
-});
-
-Deno.test("loadProfile throws a helpful error when the file is missing", () => {
-  const fixture = new URL("./fixtures/does-not-exist.json", import.meta.url);
-  const err = assertThrows(() => loadProfile(fixture), Error);
-  const msg = (err as Error).message;
-  if (!msg.includes("profile.json not found")) {
-    throw new Error(`Expected error message to mention 'profile.json not found', got: ${msg}`);
-  }
-  if (!msg.includes("Copy profile.example.json")) {
-    throw new Error(`Expected error message to mention 'Copy profile.example.json', got: ${msg}`);
   }
 });
