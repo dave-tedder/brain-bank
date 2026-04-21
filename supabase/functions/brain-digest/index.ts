@@ -590,8 +590,8 @@ async function gatherExtensionContext(
             const lower = t.content.toLowerCase();
             for (const name of eventNames) {
               // Check if any attendee or event title keywords appear in Notion intake
-              const words = name.split(/[\s\-:]+/).filter((w) => w.length > 3);
-              if (words.some((w) => lower.includes(w))) {
+              const words = name.split(/[\s\-:]+/).filter((w: string) => w.length > 3);
+              if (words.some((w: string) => lower.includes(w))) {
                 matchedIntake.push(`  [${new Date(t.created_at).toLocaleDateString()}] ${t.content.substring(0, 200)}`);
                 break;
               }
