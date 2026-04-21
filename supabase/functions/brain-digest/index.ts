@@ -14,6 +14,11 @@ const NOTION_API_TOKEN = Deno.env.get("NOTION_API_TOKEN") || "";
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// Daily-mode pre-brief filter: which event_types count as "client-facing"
+// for cross-referencing with the clients table. Sourced from profile so
+// non-tattoo operators can configure their own event semantics.
+const clientEventTypes = loadProfile().client_event_types;
+
 // --- Slack ---
 
 async function postToSlack(channel: string, text: string): Promise<void> {
@@ -449,8 +454,6 @@ async function gatherExtensionContext(
     // Daily mode: pre-appointment briefings with client context
     if (mode === "daily") {
       const todayEvents = events?.filter((e) => e.date_start === today) || [];
-      // Only check client records for business-relevant event types
-      const clientEventTypes = ["tattoo_session", "consultation", "business"];
       const clientEvents = todayEvents.filter((e) => clientEventTypes.includes(e.event_type));
       if (clientEvents.length > 0) {
         // Extract attendee names from business events only
