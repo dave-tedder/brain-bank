@@ -21,6 +21,7 @@ out/
 
 # Deno
 .deno/
+deno.lock
 
 # Supabase CLI
 supabase/.temp/
