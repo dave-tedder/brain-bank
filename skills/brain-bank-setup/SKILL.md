@@ -237,6 +237,14 @@ Runs at **Step 3.5**. Flows as one continuous conversation, one question per exc
 | 12 | `content_types` | `["photo", "video", "article"]` | "Content types for things you log. Defaults shown. Keep defaults (y/n)?" |
 | 13 | `mechanical_capture_prefixes` | `[]` | "Advanced: prefixes marking a thought as 'mechanical' (skip auto-resolve). Default: empty list. Keep default (y/n)?" |
 
+**If the operator answers `n`** on any of fields 10-13, the follow-up prompt is:
+
+> "List your custom values, comma-separated. Example for field 10: `event, meeting, travel, maintenance, workout`."
+
+Validation: split on commas, trim whitespace, reject empty strings and any entry containing a space or non-`[a-z0-9_-]` character (these become JSON array members consumed by LLM prompts and Edge Function enum checks; hyphens and underscores allowed, spaces disallowed). If validation fails, re-prompt with the specific offending token: "`check up` has a space in it; enum values need to be single tokens. Try again or type 'default' to accept the default."
+
+For field 13 (`mechanical_capture_prefixes`) the prompt ends with a colon hint: `"List prefixes, comma-separated (e.g., 'todo:, note:, idea:')."` Trailing colon is expected; don't strip.
+
 ### Write safety
 
 After all 13 answered, construct JSON in memory and write via the Write tool. Before write:
