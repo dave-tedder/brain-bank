@@ -12,7 +12,7 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
 
 ## Step 3: supabase link
 * `Invalid access token` -> `supabase logout && supabase login`.
-  Forward: docs/troubleshooting.md "CLI auth" section.
+  Forward: docs/deploy-from-scratch.md Step 3 "If it fails" block (CLI auth failures aren't indexed in troubleshooting.md; the first-run walkthrough covers them).
 * `project not found` -> re-ask for project ref. Likely cause: operator pasted the URL (`https://xxx.supabase.co`) instead of the bare ref (`xxx`).
   Forward: docs/deploy-from-scratch.md Step 2.
 * Password prompt rejects a correct password -> CLI has stale cached state. Retry as a single command: `supabase link --project-ref <ref> --password <password>`.
@@ -43,7 +43,7 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
 * `401 Unauthorized` -> diff MCP_ACCESS_KEY via `supabase secrets list --project-ref $REF`. Grep for name presence (value is a SHA256 digest in the output, not the raw key).
   Forward: docs/deploy-from-scratch.md Step 10.
 * `500 WORKER_ERROR` or `500 Internal Server Error` -> `supabase functions logs open-brain-mcp --project-ref $REF`, grep for the actual error. Most common: `profile.json` missing from bundle (redo Step 4 + Step 9).
-  Forward: docs/troubleshooting.md "Edge Function 500s" section.
+  Forward: docs/troubleshooting.md section 6, "500 WORKER_ERROR at runtime after a deploy".
 * `522` or connection timeout -> Supabase outage; check [status.supabase.com](https://status.supabase.com).
 
 ## Slack Step 8: URL verification
@@ -51,7 +51,7 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
   - `HMAC verification failed` in logs -> `SLACK_SIGNING_SECRET` in Supabase doesn't match what Slack sends. Re-copy from Basic Information, update `.env`, re-run `supabase secrets set`, retry.
   - Any other 500 -> read the log for root cause (often: profile.json missing, env vars missing).
   - Nothing in logs at all -> URL is wrong; confirm it ends with `/functions/v1/ingest-thought` exactly.
-  Forward: docs/troubleshooting.md "Slack webhook verification" section (if it exists).
+  Forward: docs/troubleshooting.md section 2, "Slack capture" (covers capture-time verification failures that surface after deploy).
 * "URL returned HTTP 404" -> wrong function name in the URL. Confirm `/functions/v1/ingest-thought`.
 
 ## Slack Step 9: bot didn't reply
