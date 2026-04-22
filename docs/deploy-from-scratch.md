@@ -6,6 +6,10 @@ The walkthrough is written for someone who is comfortable pasting commands into 
 
 Twelve steps. The last two (Slack and scheduled digests) are optional.
 
+### Guided alternative
+
+If you prefer to do setup inside a Claude Code session rather than reading through this doc, run `/brain-bank-setup` after cloning. The skill walks you through every step interactively, writes `profile.json` based on a short Q&A, and handles all the shell work for you. This doc stays the authoritative reference if you want to self-serve or come back later.
+
 ## Before you start
 
 You need four accounts and four tools.

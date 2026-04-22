@@ -87,11 +87,18 @@ brain-bank/
 │       └── compile-pages/
 ├── dashboard/            # Next.js app (merged via git subtree)
 ├── docs/                 # deploy walkthrough, Slack setup, per-source guides
+├── skills/
+│   └── brain-bank-setup/                    # guided first-deploy wizard
+│       ├── SKILL.md
+│       ├── references/                      # slack-branch, cron-branch, error-recovery
+│       └── scripts/byte-check.sh            # Tier 1 static analysis
 ├── profile.example.json  # copy to profile.json and edit
 ├── profile.json          # personal overrides (gitignored)
 ├── .env.example          # every env var required by the deploy
 └── CHANGELOG.md
 ```
+
+**Skills:** Claude Code skills live in `skills/<name>/SKILL.md`. Auto-discovered when brain-bank is installed as a plugin or Claude Code runs inside a brain-bank clone.
 
 ## Status
 

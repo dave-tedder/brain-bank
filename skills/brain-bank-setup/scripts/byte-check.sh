@@ -35,6 +35,8 @@
 
 set -uo pipefail
 
+command -v python3 >/dev/null || { echo "FAIL: python3 required (install from python.org or via your package manager)"; exit 1; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="${1:-$SCRIPT_DIR/../SKILL.md}"
 
@@ -89,7 +91,7 @@ case "$FRONTMATTER_RESULT" in
   SKIP*)
     ;;  # no frontmatter or no pyyaml - skip silently
   FAIL*)
-    echo "FAIL: YAML frontmatter does not parse ($FRONTMATTER_RESULT)"
+    echo "FAIL check1: $FRONTMATTER_RESULT"
     FAIL=1
     ;;
 esac

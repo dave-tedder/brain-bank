@@ -123,7 +123,7 @@ Run this block exactly once, on the first secret gathered. On subsequent secrets
 
 After the teaching block runs, each subsequent secret uses this pattern:
 
-```
+```text
 Claude: "Next secret: OPENROUTER_API_KEY.
   Where: openrouter.ai, Keys, Create Key.
   Add this line to .env: OPENROUTER_API_KEY=<your key>
@@ -136,7 +136,7 @@ Claude: "OK, key shape looks right. Moving on."
 
 Failure (grep returns 0):
 
-```
+```text
 Claude: "I don't see a well-formed OPENROUTER_API_KEY in .env yet.
   Expected shape: starts with 'sk-or-' and at least 20 chars after.
   Possible causes: key wasn't saved yet, or you pasted the wrong key.
@@ -193,7 +193,7 @@ Each of deploy-from-scratch.md's Steps 1-10 becomes a conversational beat. The s
 | Step | Claude says (compressed) | Claude runs / checks | Operator does |
 |---|---|---|---|
 | **1. Clone** | "You're in the repo already (the skill only fires inside a brain-bank clone), so clone is done. Moving on." | `ls README.md supabase profile.example.json` to confirm structure. | Nothing. |
-| **2. Create Supabase project** | "Open [supabase.com/dashboard](https://supabase.com/dashboard), New Project. Name: whatever you like. Password: save to your password manager. Region: closest to you. Free tier. Takes ~2 min to provision." Link + two bullets on what to copy back (Reference ID, API URL). | When operator confirms project ready, ask for the project ref. Validate shape with regex `^[a-z0-9]{20}$`. | Click through dashboard, paste project ref when prompted. |
+| **2. Create Supabase project** | "Open [supabase.com/dashboard](https://supabase.com/dashboard), New Project. Name: whatever you like. Password: save to your password manager. Region: closest to you. Free tier. Takes ~2 min to provision." Link + two bullets on what to copy back (Reference ID, API URL). | When operator confirms project ready, ask for the project ref. Validate shape with regex `^[a-z0-9]{20}$`. If the ref doesn't match that pattern, say: "That looks like a URL or the wrong format. The ref is 20 lowercase letters and numbers, found at Dashboard > Project Settings > General > Reference ID. It looks like `dvsvzlwxhmqwhmknwmdr`." | Click through dashboard, paste project ref when prompted. |
 | **3. Link the CLI** | "Running `supabase login`: browser will open. Then `supabase link --project-ref <your-ref>`." | `supabase login` via Bash (opens browser, blocks until auth). Then `supabase link --project-ref $REF`. Check `ls supabase/.temp/project-ref`. | Approves browser auth, pastes DB password when prompted. |
 | **3.5. Profile Q&A** | [Full Q&A catalog below] | After last question, write `profile.json` via Write tool. Run `python3 -m json.tool profile.json > /dev/null` to verify it parses. | Answer 13 questions (accept defaults on 10-13). |
 | **4. Confirm profile.json** | "Your `profile.json` is written. Verifying it parses." | Already verified in 3.5. Just announce. | Nothing. |
@@ -201,8 +201,8 @@ Each of deploy-from-scratch.md's Steps 1-10 becomes a conversational beat. The s
 | **6. Push secrets to Supabase** | "Pushing your .env to Supabase secrets store." | `supabase secrets set --env-file .env --project-ref $REF`, then `supabase secrets list --project-ref $REF` to confirm the 4 required names appear. | Nothing. |
 | **7. Run migrations** | "Applying 11 migrations (schema + RPC)." | `supabase db push`. Check output for `Finished supabase db push.` | Nothing. Failures route to `references/error-recovery.md`. |
 | **8. Vault mirror** | **Skipped in core flow.** Only happens if operator says yes to cron branch. | | |
-| **9. Deploy 4 Edge Functions** | "Deploying ingest-thought, open-brain-mcp, brain-digest, compile-pages. Takes ~1 min total." | Four sequential `supabase functions deploy <name> --no-verify-jwt --project-ref $REF` calls. Check each returns `Deployed Function`. | Nothing. If `A profile.json file is required`: skill re-verifies `ls profile.json` and retries. |
-| **10. Smoke test** | "Testing the REST capture path with a placeholder thought." | Construct curl via `source .env && curl -X POST "$SUPABASE_URL/functions/v1/open-brain-mcp?key=$MCP_ACCESS_KEY" ...`. Secret never in chat text. Parse response for `"Captured."` | Run `select count(*) from thoughts;` in Supabase SQL editor, paste count (a number, not a secret) back to Claude. |
+| **9. Deploy 4 Edge Functions** | "Deploying ingest-thought, open-brain-mcp, brain-digest, compile-pages. Takes ~1 min total." | Four sequential `supabase functions deploy <name> --no-verify-jwt --project-ref $REF` calls (the `--no-verify-jwt` flag is required because these functions authenticate inbound callers via their own key scheme: `MCP_ACCESS_KEY` for the MCP/REST path and Slack Signing Secret for the Slack path; without the flag, every inbound call returns 401 before it even reaches the function's own auth check). Check each returns `Deployed Function`. | Nothing. If `A profile.json file is required`: skill re-verifies `ls profile.json` and retries. |
+| **10. Smoke test** | "Testing the REST capture path with a placeholder thought." | Construct curl via `source .env && curl -X POST "$SUPABASE_URL/functions/v1/open-brain-mcp?key=$MCP_ACCESS_KEY" ...`. The `source .env` is required before the curl; without it the shell has no value for `$SUPABASE_URL` or `$MCP_ACCESS_KEY` and the URL resolves to `null/functions/v1/open-brain-mcp`. Secret never in chat text. Parse response for `"Captured."` | Run `select count(*) from thoughts;` in Supabase SQL editor, paste count (a number, not a secret) back to Claude. |
 
 After Step 10 passes: **"Core deploy complete. You've got a working brain bank."** Then present the post-core branch menu.
 
@@ -267,7 +267,7 @@ Say to the operator:
 
 After Step 10 smoke test passes, present this menu:
 
-```
+```text
 Core deploy complete; one captured thought in the database. Want to wire Slack?
 
   1. Walk me through it (guided: I'll Read references/slack-branch.md and run you
@@ -282,7 +282,7 @@ On `3`: proceed to the cron branch menu.
 
 After Slack branch completes (or is skipped), present:
 
-```
+```text
 Want to schedule the morning digest? This wires pg_cron inside Postgres to:
   * Post a daily digest to Slack at 6 AM ET (or your timezone)
   * Post a weekly digest Monday 6 AM ET
