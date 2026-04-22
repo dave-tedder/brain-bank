@@ -598,10 +598,11 @@ async function handleRestCapture(req: Request): Promise<Response> {
     const body = await req.json();
     const content = body?.content;
     if (!content || typeof content !== "string") return jsonResponse({ error: "content field required" }, 400);
+    const source = typeof body?.source === "string" && body.source.length > 0 ? body.source : "chatgpt";
     const hash = await contentHash(content);
     if (await isDuplicate(hash)) return jsonResponse({ status: "duplicate", message: "Already in the brain." });
     const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-    const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: { ...metadata, source: "chatgpt" } }).select("id").single();
+    const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: { ...metadata, source } }).select("id").single();
     if (error || !inserted) return jsonResponse({ error: error?.message || "unknown error" }, 500);
 
     // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)

@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Changed
+
+- **REST `/capture` now honors an optional `source` field in the request body.** Prior behavior hardcoded `metadata.source = "chatgpt"` on every REST capture regardless of caller, because REST originally only served the ChatGPT custom GPT. The endpoint now reads `body.source` when the caller provides it (a non-empty string) and falls back to `"chatgpt"` when absent, so the existing ChatGPT GPT keeps working byte-identically without change. Why this matters: downstream capture sources such as the Gmail bridge, calendar sync, voice memos, and Notion sync can now tag their captures with accurate source values (`gmail`, `gcal`, `voice`, `notion-sync`) instead of masquerading as ChatGPT, which makes digest filtering and source-specific triage meaningful. File: `supabase/functions/open-brain-mcp/index.ts`, `handleRestCapture`.
+
 ## [0.1.0-pre] - 2026-04-21
 
 First pre-release snapshot. Everything below represents the initial open-sourcing cut of an engine that has been running in production for the author since March 2026. No prior public release, so nothing here is flagged Breaking.
