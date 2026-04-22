@@ -1,0 +1,184 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Brain Bank API",
+    "description": "Semantic memory layer. Search, browse, and capture thoughts.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://<your-supabase-project-ref>.supabase.co/functions/v1/open-brain-mcp"
+    }
+  ],
+  "paths": {
+    "/search": {
+      "get": {
+        "operationId": "searchThoughts",
+        "summary": "Search thoughts by meaning",
+        "description": "Semantic vector search across all captured thoughts.",
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" },
+            "description": "What to search for"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" },
+            "description": "Max results to return (default 10)"
+          },
+          {
+            "name": "threshold",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Minimum similarity score 0-1 (default 0.5)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "results": { "type": "array", "items": { "type": "object" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/list": {
+      "get": {
+        "operationId": "listThoughts",
+        "summary": "List recent thoughts with optional filters",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" },
+            "description": "Max results (default 10)"
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Filter: observation, task, idea, reference, person_note"
+          },
+          {
+            "name": "topic",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Filter by topic tag"
+          },
+          {
+            "name": "person",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Filter by person mentioned"
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" },
+            "description": "Only thoughts from the last N days"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of thoughts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "results": { "type": "array", "items": { "type": "object" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "operationId": "getThoughtStats",
+        "summary": "Get summary statistics of all captured thoughts",
+        "responses": {
+          "200": {
+            "description": "Thought statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "total": { "type": "integer" },
+                    "by_type": { "type": "object" },
+                    "by_source": { "type": "object" },
+                    "top_topics": { "type": "array", "items": { "type": "object" } },
+                    "top_people": { "type": "array", "items": { "type": "object" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/capture": {
+      "post": {
+        "operationId": "captureThought",
+        "summary": "Capture a new thought to Brain Bank",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["content"],
+                "properties": {
+                  "content": {
+                    "type": "string",
+                    "description": "The thought to capture"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Capture confirmation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" },
+                    "metadata": { "type": "object" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
