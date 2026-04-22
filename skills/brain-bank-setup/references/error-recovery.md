@@ -34,7 +34,7 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
 * `relation "thoughts" already exists` -> "Migrations ran against this project before. Cleanest reset: dashboard, Settings, Delete project, then restart /brain-bank-setup."
 
 ## Step 9: function deploy
-* `A profile.json file is required` -> re-verify `ls profile.json` and re-run deploy. If still fails, `Read` profile.json for syntax (verify via `python3 -m json.tool`, do NOT echo contents into chat), compare top-level keys against `profile.example.json`.
+* `A profile.json file is required` OR `Module not found "...supabase/functions/_shared/profile.json"` -> re-verify `ls supabase/functions/_shared/profile.json` and re-run deploy. **The bundler requires `profile.json` as a sibling of `_shared/profile.ts`, NOT at repo root.** If `ls profile.json` shows it only at repo root, move it: `mv profile.json supabase/functions/_shared/profile.json`. If still fails after the move, `Read` the file for syntax (verify via `python3 -m json.tool`, do NOT echo contents into chat), compare top-level keys against `profile.example.json`.
   Forward: docs/deploy-from-scratch.md Step 9.
 * `Deployment failed` with no detail -> `supabase functions logs <name> --project-ref $REF`, read the actual error from log output.
 * `undefined is not a function` at deploy time -> Supabase CLI too old. `supabase --version`; upgrade via `brew upgrade supabase` (macOS) or the appropriate package manager.
@@ -43,7 +43,6 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
 * `401 Unauthorized` -> diff MCP_ACCESS_KEY via `supabase secrets list --project-ref $REF`. Grep for name presence (value is a SHA256 digest in the output, not the raw key).
   Forward: docs/deploy-from-scratch.md Step 10.
 * `500 WORKER_ERROR` or `500 Internal Server Error` -> `supabase functions logs open-brain-mcp --project-ref $REF`, grep for the actual error. Common causes in order of likelihood:
-  - `profile.json` missing from bundle (redo Step 4 + Step 9).
   - **Anon key pasted into `SUPABASE_SERVICE_ROLE_KEY` slot.** Modern Supabase anon and service_role keys are both JWTs starting with `eyJ`; the Step 5 shape check cannot distinguish them. If Supabase dashboard > Database > Logs shows RLS denial or `permission denied for table thoughts`, the key is wrong. Re-copy the service_role key from Dashboard > Project Settings > API (it sits below the anon key, explicitly labeled `service_role`, click `Reveal`). Update `.env`, re-run `supabase secrets set --env-file .env --project-ref $REF`.
   - OpenRouter API key expired or over spend cap.
   Forward: docs/troubleshooting.md section 6, "500 WORKER_ERROR at runtime after a deploy".
@@ -52,7 +51,7 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
 ## Slack Step 8: URL verification
 * "Your URL did not respond with the value of the challenge parameter" -> `supabase functions logs ingest-thought --project-ref $REF` in parallel with clicking Retry in Slack.
   - `HMAC verification failed` in logs -> `SLACK_SIGNING_SECRET` in Supabase doesn't match what Slack sends. Re-copy from Basic Information, update `.env`, re-run `supabase secrets set`, retry.
-  - Any other 500 -> read the log for root cause (often: profile.json missing, env vars missing).
+  - Any other 500 -> read the log for root cause (often: env vars missing, OpenRouter outage, transient Supabase issue). `profile.json` missing no longer hits here; it's now caught at deploy as a 400 (see Step 9).
   - Nothing in logs at all -> URL is wrong; confirm it ends with `/functions/v1/ingest-thought` exactly.
   Forward: docs/troubleshooting.md section 2, "Slack capture" (covers capture-time verification failures that surface after deploy).
 * "URL returned HTTP 404" -> wrong function name in the URL. Confirm `/functions/v1/ingest-thought`.

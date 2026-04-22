@@ -46,7 +46,7 @@ After pre-flight passes, run a single state scan. This is one Bash call that pro
 
 ```bash
 cd "$(git rev-parse --show-toplevel)" && {
-  echo "profile=$([ -f profile.json ] && echo yes || echo no)"
+  echo "profile=$([ -f supabase/functions/_shared/profile.json ] && echo yes || echo no)"
   echo "env_required=$(grep -cE '^(SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY|OPENROUTER_API_KEY|MCP_ACCESS_KEY)=.+' .env 2>/dev/null || echo 0)"
   echo "env_slack=$(grep -cE '^SLACK_(BOT_TOKEN|CAPTURE_CHANNEL)=.+' .env 2>/dev/null || echo 0)"
   echo "linked=$([ -f supabase/.temp/project-ref ] && echo yes || echo no)"
@@ -57,7 +57,7 @@ cd "$(git rev-parse --show-toplevel)" && {
 If `profile=yes`, additionally validate it parses:
 
 ```bash
-python3 -m json.tool profile.json >/dev/null 2>&1 || echo "profile=invalid"
+python3 -m json.tool supabase/functions/_shared/profile.json >/dev/null 2>&1 || echo "profile=invalid"
 ```
 
 ### Resume decision tree
@@ -195,13 +195,13 @@ Each of deploy-from-scratch.md's Steps 1-10 becomes a conversational beat. The s
 | **1. Clone** | "You're in the repo already (the skill only fires inside a brain-bank clone), so clone is done. Moving on." | `ls README.md supabase profile.example.json` to confirm structure. | Nothing. |
 | **2. Create Supabase project** | "Open [supabase.com/dashboard](https://supabase.com/dashboard), New Project. Name: whatever you like. Password: save to your password manager. Region: closest to you. Free tier. Takes ~2 min to provision." Link + two bullets on what to copy back (Reference ID, API URL). | When operator confirms project ready, ask for the project ref. Validate shape with regex `^[a-z0-9]{20}$`. If the ref doesn't match that pattern, say: "That looks like a URL or the wrong format. The ref is 20 lowercase letters and numbers, found at Dashboard > Project Settings > General > Reference ID. It looks like `abcdefghij1234567890`." | Click through dashboard, paste project ref when prompted. |
 | **3. Link the CLI** | "Running `supabase login`: browser will open. Then `supabase link --project-ref <your-ref>`." | `supabase login` via Bash (opens browser, blocks until auth). Then `supabase link --project-ref $REF`. Check `ls supabase/.temp/project-ref`. | Approves browser auth, pastes DB password when prompted. |
-| **3.5. Profile Q&A** | [Full Q&A catalog below] | After last question, write `profile.json` via Write tool. Run `python3 -m json.tool profile.json > /dev/null` to verify it parses. | Answer 13 questions (accept defaults on 10-13). |
+| **3.5. Profile Q&A** | [Full Q&A catalog below] | After last question, write `supabase/functions/_shared/profile.json` via Write tool. **The bundler requires this exact path**: `loadProfile()` in `_shared/profile.ts` imports `profile.json` as a sibling module (`import profileDefaults from "./profile.json" with { type: "json" }`), and the Supabase CLI bundler resolves imports relative to the source file. A `profile.json` at repo root (or anywhere else) is invisible to the bundler and every deploy 400s with `Module not found`. Run `python3 -m json.tool supabase/functions/_shared/profile.json > /dev/null` to verify it parses. | Answer 13 questions (accept defaults on 10-13). |
 | **4. Confirm profile.json** | "Your `profile.json` is written. Verifying it parses." | Already verified in 3.5. Just announce. | Nothing. |
 | **5. Gather core secrets into .env** | **First-secret teaching block fires here.** Then walks through 4 secrets: SUPABASE_URL (auto-derived from project ref; skill writes it, operator just confirms), SUPABASE_SERVICE_ROLE_KEY (teach: "service_role key, NOT anon: dashboard, Project Settings, API, service_role, Reveal"), OPENROUTER_API_KEY (teach: "set monthly spend cap in OpenRouter dashboard FIRST, then create key"), MCP_ACCESS_KEY (skill generates via `openssl rand -hex 32`). | `cp .env.example .env` if .env missing. For SUPABASE_URL: `sed -i.bak "s|^SUPABASE_URL=.*|SUPABASE_URL=https://$REF.supabase.co|" .env && rm -f .env.bak` (replaces the placeholder line in place; the `.bak` suffix keeps the sed call portable between GNU sed and BSD sed on macOS). For the other three secrets: shape-check greps after each paste. | Create OpenRouter account + spend cap, gather service_role key from Supabase dashboard, paste both into .env. |
 | **6. Push secrets to Supabase** | "Pushing your .env to Supabase secrets store." | `supabase secrets set --env-file .env --project-ref $REF`, then `supabase secrets list --project-ref $REF` to confirm the 4 required names appear. | Nothing. |
 | **7. Run migrations** | "Applying 11 migrations (schema + RPC)." | `supabase db push`. Check output for `Finished supabase db push.` | Nothing. Failures route to `references/error-recovery.md`. |
 | **8. Vault mirror** | **Skipped in core flow.** Only happens if operator says yes to cron branch. | | |
-| **9. Deploy 4 Edge Functions** | "Deploying ingest-thought, open-brain-mcp, brain-digest, compile-pages. Takes ~1 min total." | Four sequential `supabase functions deploy <name> --no-verify-jwt --project-ref $REF` calls (the `--no-verify-jwt` flag is required because these functions authenticate inbound callers via their own key scheme: `MCP_ACCESS_KEY` for the MCP/REST path and Slack Signing Secret for the Slack path; without the flag, every inbound call returns 401 before it even reaches the function's own auth check). Check each returns `Deployed Function`. | Nothing. If `A profile.json file is required`: skill re-verifies `ls profile.json` and retries. |
+| **9. Deploy 4 Edge Functions** | "Deploying ingest-thought, open-brain-mcp, brain-digest, compile-pages. Takes ~1 min total." | Four sequential `supabase functions deploy <name> --no-verify-jwt --project-ref $REF` calls (the `--no-verify-jwt` flag is required because these functions authenticate inbound callers via their own key scheme: `MCP_ACCESS_KEY` for the MCP/REST path and Slack Signing Secret for the Slack path; without the flag, every inbound call returns 401 before it even reaches the function's own auth check). Check each returns `Deployed Function` or `You can inspect your deployment in the Dashboard` (the success banner changed between CLI minor versions). | Nothing. If `A profile.json file is required` or `Module not found "...supabase/functions/_shared/profile.json"`: skill re-verifies `ls supabase/functions/_shared/profile.json` (NOT repo root; the bundler reads only the `_shared/` sibling) and retries. |
 | **10. Smoke test** | "Testing the REST capture path with a placeholder thought." | Construct curl via `source .env && curl -X POST "$SUPABASE_URL/functions/v1/open-brain-mcp?key=$MCP_ACCESS_KEY" ...`. The `source .env` is required before the curl; without it the shell has no value for `$SUPABASE_URL` or `$MCP_ACCESS_KEY` and the URL resolves to `null/functions/v1/open-brain-mcp`. Secret never in chat text. Parse response for `"Captured."` | Run `select count(*) from thoughts;` in Supabase SQL editor, paste count (a number, not a secret) back to Claude. |
 
 After Step 10 passes: **"Core deploy complete. You've got a working brain bank."** Then present the post-core branch menu.
@@ -245,7 +245,7 @@ After all 13 answered, construct JSON in memory and write via the Write tool. Be
 2. **Validate JSON parses:** in-memory construct through indented serialization.
 3. **Schema sanity:** top-level keys of written content must match `profile.example.json`'s top-level keys.
 
-After write, `python3 -m json.tool profile.json > /dev/null && echo "valid"` as a final sanity check.
+After write, `python3 -m json.tool supabase/functions/_shared/profile.json > /dev/null && echo "valid"` as a final sanity check.
 
 ### Stuck-operator fallbacks
 
@@ -261,7 +261,7 @@ Fields 6, 8, 9 still can't reasonably be skipped (they go into actual prompt tex
 
 Say to the operator:
 
-> "profile.json written. You can edit it anytime; just make sure the JSON stays valid (`cat profile.json | python3 -m json.tool` parses it). Changes take effect on the next Edge Function deploy."
+> "profile.json written at `supabase/functions/_shared/profile.json` (the path the Edge Function bundler reads). You can edit it anytime; just make sure the JSON stays valid (`cat supabase/functions/_shared/profile.json | python3 -m json.tool` parses it). Changes take effect on the next Edge Function deploy."
 
 ## Post-core branch menu
 

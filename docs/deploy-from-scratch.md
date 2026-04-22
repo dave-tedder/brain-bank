@@ -95,10 +95,10 @@ Supabase will prompt for the database password from Step 2 during `link`. Paste 
 Brain Bank reads operator-specific vocabulary from `profile.json`. The repo ships `profile.example.json` with neutral defaults. Copy it:
 
 ```bash
-cp profile.example.json profile.json
+cp profile.example.json supabase/functions/_shared/profile.json
 ```
 
-Now open `profile.json` in an editor. The fields that matter day-to-day:
+Now open `supabase/functions/_shared/profile.json` in an editor. The fields that matter day-to-day:
 
 - `operator.name`: your name, used in digest prose.
 - `operator.emails`: list of email addresses that are "you." Used to filter which calendar events and Gmail threads are yours. Include every address you use (work, personal, aliases).
@@ -108,12 +108,12 @@ Now open `profile.json` in an editor. The fields that matter day-to-day:
 
 Leave `event_types`, `client_event_types`, `content_types`, and `mechanical_capture_prefixes` alone for a first deploy; the defaults are fine.
 
-**What success looks like:** `profile.json` exists at repo root and parses as JSON (`cat profile.json | python3 -m json.tool` prints it back without error).
+**What success looks like:** `supabase/functions/_shared/profile.json` exists and parses as JSON (`cat supabase/functions/_shared/profile.json | python3 -m json.tool` prints it back without error).
 
 **If it fails:**
 - `Expecting property name` from `json.tool`: you left a trailing comma or forgot quotes. Fix the syntax; JSON is strict about both.
 
-**Why this matters:** `profile.json` is bundled into every Edge Function deploy (see [`CHANGELOG.md`](../CHANGELOG.md) Fixed section for why the bundler needs a JSON module import, not a filesystem read). If `profile.json` is missing at deploy time, the functions return 500 at runtime. The next step checks for this.
+**Why this matters:** `profile.json` must live at `supabase/functions/_shared/profile.json` because `loadProfile()` in that directory imports it as a sibling module (`import profileDefaults from "./profile.json" with { type: "json" }`, see [`CHANGELOG.md`](../CHANGELOG.md) Fixed section for the bundler rationale). The Supabase CLI bundler resolves imports relative to the source file; `profile.json` at any other path is invisible to the bundler and every deploy returns a 400 `Failed to bundle ... Module not found "...supabase/functions/_shared/profile.json"` error at deploy time. The Session 80 fix moved this failure from silent runtime 500 to explicit deploy-time 400. The next step checks for the file.
 
 ---
 
@@ -237,7 +237,7 @@ Each deploy takes about fifteen seconds. There is no build step; the Supabase CL
 **What success looks like:** each deploy prints `Deployed Function <name> on project <project-ref>`.
 
 **If it fails:**
-- `A profile.json file is required`: the function bundler could not find `profile.json`. Confirm Step 4 wrote the file (`ls profile.json`) and re-run the deploy.
+- `A profile.json file is required` or `Failed to bundle the function (reason: Module not found "...supabase/functions/_shared/profile.json")`: the bundler cannot find the file at the expected path. Confirm Step 4 wrote it to the correct location (`ls supabase/functions/_shared/profile.json`) and re-run the deploy. If it landed at repo root instead, move it: `mv profile.json supabase/functions/_shared/profile.json`.
 - `Deployment failed` with no detail: run `supabase functions logs <name> --project-ref <ref>` to see the real error.
 - `undefined is not a function` at deploy time: you are on a very old Supabase CLI. Run `supabase --version`; upgrade to the latest with `brew upgrade supabase` (or the package-manager equivalent on your platform).
 
@@ -268,7 +268,7 @@ curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp
 
 **If it fails:**
 - `401 Unauthorized`: the `key` query parameter does not match the `MCP_ACCESS_KEY` in your `.env` / Supabase secrets. Confirm with `supabase secrets list --project-ref <ref>` that `MCP_ACCESS_KEY` is present, then re-check you copied it correctly into the curl command.
-- `500 Internal Server Error` with a body like `{"error":"WORKER_ERROR"}`: the function is crashing on startup. Run `supabase functions logs open-brain-mcp --project-ref <ref>` to see the actual error. The most common cause is `profile.json` missing from the bundle (redo Step 4 and Step 9).
+- `500 Internal Server Error` with a body like `{"error":"WORKER_ERROR"}`: the function is crashing on startup. Run `supabase functions logs open-brain-mcp --project-ref <ref>` to see the actual error. Common causes: OpenRouter API key expired or over spend cap; `SUPABASE_SERVICE_ROLE_KEY` is actually an anon key (pre-redesign JWTs both start with `eyJ` and look identical to the Step 5 shape check); Supabase transient outage. `profile.json` missing is no longer a 500-at-runtime cause; the Session 80 bundler fix surfaces it as a 400 at deploy time, so a deployed-but-500 function is a different issue.
 - `522` or connection timeout: Supabase is experiencing an outage. Check [status.supabase.com](https://status.supabase.com).
 
 Verify the thought landed. In the Supabase SQL editor:
