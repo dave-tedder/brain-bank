@@ -45,7 +45,7 @@ Halt if pre-flight fails. Do not proceed to state scan until all checks pass.
 After pre-flight passes, run a single state scan. This is one Bash call that probes every "what step did we reach last time" signal without reading raw secret values:
 
 ```bash
-cd "$BRAIN_BANK_REPO" && {
+cd "$(git rev-parse --show-toplevel)" && {
   echo "profile=$([ -f profile.json ] && echo yes || echo no)"
   echo "env_required=$(grep -cE '^(SUPABASE_URL|SUPABASE_SERVICE_ROLE_KEY|OPENROUTER_API_KEY|MCP_ACCESS_KEY)=.+' .env 2>/dev/null || echo 0)"
   echo "env_slack=$(grep -cE '^SLACK_(BOT_TOKEN|CAPTURE_CHANNEL)=.+' .env 2>/dev/null || echo 0)"
@@ -65,7 +65,7 @@ python3 -m json.tool profile.json >/dev/null 2>&1 || echo "profile=invalid"
 | Signal | Resume at |
 |---|---|
 | All checks negative (fresh clone) | Step 1 (intro + expectations) |
-| `profile=no`, others any | Step 4 (profile Q&A) |
+| `profile=no`, others any | Step 3.5 (profile Q&A) |
 | `profile=invalid` | Step 4 repair branch: "your profile.json exists but doesn't parse. Want me to show you the error, fix it together, or start fresh?" |
 | `profile=yes`, `env_required<4` | Step 5 (gather core secrets) |
 | `env_required=4`, `linked=no` | Step 3 (`supabase login` + `link`) |
@@ -197,7 +197,7 @@ Each of deploy-from-scratch.md's Steps 1-10 becomes a conversational beat. The s
 | **3. Link the CLI** | "Running `supabase login`: browser will open. Then `supabase link --project-ref <your-ref>`." | `supabase login` via Bash (opens browser, blocks until auth). Then `supabase link --project-ref $REF`. Check `ls supabase/.temp/project-ref`. | Approves browser auth, pastes DB password when prompted. |
 | **3.5. Profile Q&A** | [Full Q&A catalog below] | After last question, write `profile.json` via Write tool. Run `python3 -m json.tool profile.json > /dev/null` to verify it parses. | Answer 13 questions (accept defaults on 10-13). |
 | **4. Confirm profile.json** | "Your `profile.json` is written. Verifying it parses." | Already verified in 3.5. Just announce. | Nothing. |
-| **5. Gather core secrets into .env** | **First-secret teaching block fires here.** Then walks through 4 secrets: SUPABASE_URL (auto-derived from project ref; skill writes it, operator just confirms), SUPABASE_SERVICE_ROLE_KEY (teach: "service_role key, NOT anon: dashboard, Project Settings, API, service_role, Reveal"), OPENROUTER_API_KEY (teach: "set monthly spend cap in OpenRouter dashboard FIRST, then create key"), MCP_ACCESS_KEY (skill generates via `openssl rand -hex 32`). | `cp .env.example .env` if .env missing. For SUPABASE_URL: `echo "SUPABASE_URL=https://$REF.supabase.co" >> .env`. For the others: shape-check greps after each paste. | Create OpenRouter account + spend cap, gather service_role key from Supabase dashboard, paste both into .env. |
+| **5. Gather core secrets into .env** | **First-secret teaching block fires here.** Then walks through 4 secrets: SUPABASE_URL (auto-derived from project ref; skill writes it, operator just confirms), SUPABASE_SERVICE_ROLE_KEY (teach: "service_role key, NOT anon: dashboard, Project Settings, API, service_role, Reveal"), OPENROUTER_API_KEY (teach: "set monthly spend cap in OpenRouter dashboard FIRST, then create key"), MCP_ACCESS_KEY (skill generates via `openssl rand -hex 32`). | `cp .env.example .env` if .env missing. For SUPABASE_URL: `sed -i.bak "s|^SUPABASE_URL=.*|SUPABASE_URL=https://$REF.supabase.co|" .env && rm -f .env.bak` (replaces the placeholder line in place; the `.bak` suffix keeps the sed call portable between GNU sed and BSD sed on macOS). For the other three secrets: shape-check greps after each paste. | Create OpenRouter account + spend cap, gather service_role key from Supabase dashboard, paste both into .env. |
 | **6. Push secrets to Supabase** | "Pushing your .env to Supabase secrets store." | `supabase secrets set --env-file .env --project-ref $REF`, then `supabase secrets list --project-ref $REF` to confirm the 4 required names appear. | Nothing. |
 | **7. Run migrations** | "Applying 11 migrations (schema + RPC)." | `supabase db push`. Check output for `Finished supabase db push.` | Nothing. Failures route to `references/error-recovery.md`. |
 | **8. Vault mirror** | **Skipped in core flow.** Only happens if operator says yes to cron branch. | | |
