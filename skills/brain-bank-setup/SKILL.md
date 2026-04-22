@@ -302,7 +302,7 @@ When wrapping up:
 
 > "Setup complete. Capture your first real thought with `curl -X POST "$SUPABASE_URL/functions/v1/open-brain-mcp?key=$MCP_ACCESS_KEY" -H 'Content-Type: application/json' -d '{"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"hello world","source":"rest"}}}'` or wait for the morning digest if you scheduled it. Operating guide: `docs/troubleshooting.md` when things break."
 
-**Note:** `references/slack-branch.md` and `references/cron-branch.md` do not exist yet; the guided option (`1`) on either menu should print "Slack branch not yet implemented" / "Cron branch not yet implemented" until Tasks 3 and 4 land.
+**Slack branch is live** (see `references/slack-branch.md`). Cron branch wiring arrives with Task 4.
 
 ## Flow conventions
 
