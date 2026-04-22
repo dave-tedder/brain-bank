@@ -302,7 +302,7 @@ When wrapping up:
 
 > "Setup complete. Capture your first real thought with `curl -X POST "$SUPABASE_URL/functions/v1/open-brain-mcp?key=$MCP_ACCESS_KEY" -H 'Content-Type: application/json' -d '{"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"hello world","source":"rest"}}}'` or wait for the morning digest if you scheduled it. Operating guide: `docs/troubleshooting.md` when things break."
 
-**Slack branch is live** (see `references/slack-branch.md`). Cron branch wiring arrives with Task 4.
+**Both branches are live.** Slack: `references/slack-branch.md`. Cron: `references/cron-branch.md`. On-failure routing uses `references/error-recovery.md`.
 
 ## Flow conventions
 
