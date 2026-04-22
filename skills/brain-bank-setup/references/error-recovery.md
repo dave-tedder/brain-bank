@@ -42,7 +42,10 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
 ## Step 10: REST smoke test
 * `401 Unauthorized` -> diff MCP_ACCESS_KEY via `supabase secrets list --project-ref $REF`. Grep for name presence (value is a SHA256 digest in the output, not the raw key).
   Forward: docs/deploy-from-scratch.md Step 10.
-* `500 WORKER_ERROR` or `500 Internal Server Error` -> `supabase functions logs open-brain-mcp --project-ref $REF`, grep for the actual error. Most common: `profile.json` missing from bundle (redo Step 4 + Step 9).
+* `500 WORKER_ERROR` or `500 Internal Server Error` -> `supabase functions logs open-brain-mcp --project-ref $REF`, grep for the actual error. Common causes in order of likelihood:
+  - `profile.json` missing from bundle (redo Step 4 + Step 9).
+  - **Anon key pasted into `SUPABASE_SERVICE_ROLE_KEY` slot.** Modern Supabase anon and service_role keys are both JWTs starting with `eyJ`; the Step 5 shape check cannot distinguish them. If Supabase dashboard > Database > Logs shows RLS denial or `permission denied for table thoughts`, the key is wrong. Re-copy the service_role key from Dashboard > Project Settings > API (it sits below the anon key, explicitly labeled `service_role`, click `Reveal`). Update `.env`, re-run `supabase secrets set --env-file .env --project-ref $REF`.
+  - OpenRouter API key expired or over spend cap.
   Forward: docs/troubleshooting.md section 6, "500 WORKER_ERROR at runtime after a deploy".
 * `522` or connection timeout -> Supabase outage; check [status.supabase.com](https://status.supabase.com).
 

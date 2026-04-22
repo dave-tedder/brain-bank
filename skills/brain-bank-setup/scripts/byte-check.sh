@@ -112,7 +112,7 @@ bt = chr(96)  # backtick, avoids bash 3.2 heredoc-in-$() parse issue
 filepath = sys.argv[1]
 
 word_re = re.compile(
-    r'\b(inked|inking|tapestry|delve|delving|realm|synergy|holistic|robust)\b',
+    r'\b(inked|inking|tapestry|delve|delving|realm|landscape|leverage|synergy|holistic|robust)\b',
     re.IGNORECASE
 )
 em_dash_re = re.compile(r'\u2014')
