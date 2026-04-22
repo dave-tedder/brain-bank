@@ -150,7 +150,7 @@ One entry per secret. Never echo the matched value; `grep -c` returns counts onl
 | Secret | Shape regex | Guards against |
 |---|---|---|
 | `SUPABASE_URL` | `^SUPABASE_URL=https://[a-z0-9]{20}\.supabase\.co$` | Missing value, wrong ref format |
-| `SUPABASE_SERVICE_ROLE_KEY` | `^SUPABASE_SERVICE_ROLE_KEY=eyJ.{100,}` | Anon key instead, truncated paste |
+| `SUPABASE_SERVICE_ROLE_KEY` | `^SUPABASE_SERVICE_ROLE_KEY=(eyJ.{100,}|sb_secret_.{20,})$` | Anon key instead (legacy `eyJ` anon or modern `sb_publishable_*`), truncated paste |
 | `OPENROUTER_API_KEY` | `^OPENROUTER_API_KEY=sk-or-.{20,}` | Wrong provider, short paste |
 | `MCP_ACCESS_KEY` | `^MCP_ACCESS_KEY=[a-f0-9]{64}$` | Openssl ran on wrong line, not 32-byte hex |
 | `SLACK_BOT_TOKEN` | `^SLACK_BOT_TOKEN=xoxb-.{40,}` | User token instead of bot |

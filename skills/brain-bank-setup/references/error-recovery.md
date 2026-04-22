@@ -19,7 +19,7 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
   Forward: docs/deploy-from-scratch.md Step 3.
 
 ## Step 5: .env secret gathering
-* Service role key looks like `sb_pub_...` -> "anon key, not service_role. Dashboard, Project Settings, API, service_role, Reveal."
+* Service role key looks like `sb_publishable_...` -> "anon key, not service_role (modern Supabase format is visibly distinguishable: publishable/anon starts `sb_publishable_`, secret/service_role starts `sb_secret_`). Dashboard, Project Settings, API, service_role, Reveal."
   Forward: docs/deploy-from-scratch.md Step 5.
 * Any secret shape-check grep returns 0 -> "I don't see the expected shape. Open .env and check that line. Tell me when fixed."
 
@@ -43,7 +43,7 @@ Each entry: (signal) -> (inline diagnosis) -> (link).
 * `401 Unauthorized` -> diff MCP_ACCESS_KEY via `supabase secrets list --project-ref $REF`. Grep for name presence (value is a SHA256 digest in the output, not the raw key).
   Forward: docs/deploy-from-scratch.md Step 10.
 * `500 WORKER_ERROR` or `500 Internal Server Error` -> `supabase functions logs open-brain-mcp --project-ref $REF`, grep for the actual error. Common causes in order of likelihood:
-  - **Anon key pasted into `SUPABASE_SERVICE_ROLE_KEY` slot.** Modern Supabase anon and service_role keys are both JWTs starting with `eyJ`; the Step 5 shape check cannot distinguish them. If Supabase dashboard > Database > Logs shows RLS denial or `permission denied for table thoughts`, the key is wrong. Re-copy the service_role key from Dashboard > Project Settings > API (it sits below the anon key, explicitly labeled `service_role`, click `Reveal`). Update `.env`, re-run `supabase secrets set --env-file .env --project-ref $REF`.
+  - **Anon key pasted into `SUPABASE_SERVICE_ROLE_KEY` slot.** Supabase has two key formats. **Legacy JWT format:** both anon and service_role start with `eyJ`; the Step 5 shape check cannot distinguish them and a wrong paste only surfaces at runtime as RLS denial. **Modern `sb_*` format (2025+ projects):** publishable/anon starts with `sb_publishable_` and secret/service_role starts with `sb_secret_`, so the shape check catches this swap at paste time (the regex accepts only `eyJ.{100,}` or `sb_secret_.{20,}`). If logs show RLS denial or `permission denied for table thoughts`, the key is wrong. Re-copy the service_role key from Dashboard > Project Settings > API (it sits below the anon/publishable key, explicitly labeled `service_role` / `secret`, click `Reveal`). Update `.env`, re-run `supabase secrets set --env-file .env --project-ref $REF`.
   - OpenRouter API key expired or over spend cap.
   Forward: docs/troubleshooting.md section 6, "500 WORKER_ERROR at runtime after a deploy".
 * `522` or connection timeout -> Supabase outage; check [status.supabase.com](https://status.supabase.com).
