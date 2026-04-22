@@ -151,7 +151,7 @@ Edge Functions read environment variables from Supabase's secrets store, not fro
 supabase secrets set --env-file .env --project-ref <your-project-ref>
 ```
 
-**What success looks like:** `Finished supabase secrets set.` with no error output.
+**What success looks like:** `Finished supabase secrets set.` with no error output, PLUS one `Env name cannot start with SUPABASE_, skipping: <name>` line per `SUPABASE_*` variable in your `.env`. The skip warnings are expected: the Supabase CLI refuses to push any variable whose name starts with `SUPABASE_` because the Edge Function runtime auto-injects `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` at invocation time. The skip is not a failure; the functions still receive both values.
 
 **If it fails:**
 - `project not found`: you passed the wrong ref. Re-check against Step 2.
@@ -163,7 +163,7 @@ Verify the upload worked:
 supabase secrets list --project-ref <your-project-ref>
 ```
 
-You should see `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENROUTER_API_KEY`, `MCP_ACCESS_KEY` in the listed names. The `DIGEST` column shows SHA-256 hashes of the values, not the values themselves (Supabase CLI never prints secret values).
+You should see the non-`SUPABASE_` names: `OPENROUTER_API_KEY`, `MCP_ACCESS_KEY`, plus any `SLACK_*` names if you already filled in Slack secrets. `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` will NOT appear in this list (they were skipped by design, see above, and the runtime injects them anyway). The `DIGEST` column shows SHA-256 hashes of the values, not the values themselves (Supabase CLI never prints secret values).
 
 **Why this matters:** the secrets live on Supabase's servers, not in your local environment. Every Edge Function invocation reads them fresh. Rotating a secret later is re-running `supabase secrets set` with the new value; no code redeploy needed.
 
