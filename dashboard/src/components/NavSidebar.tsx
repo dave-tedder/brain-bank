@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { APP } from "@/config/app";
 
 const NAV_ITEMS = [
   { href: "/", label: "DASHBOARD" },
@@ -42,7 +43,7 @@ export default function NavSidebar() {
           className="font-terminal"
           style={{ fontSize: "1.5rem", color: "var(--text-primary)", lineHeight: 1 }}
         >
-          OPEN BRAIN
+          {APP.name.toUpperCase()}
         </div>
         <div
           style={{
@@ -54,7 +55,7 @@ export default function NavSidebar() {
             marginTop: 4,
           }}
         >
-          SEMANTIC MEMORY
+          {APP.sidebarSubtitle}
         </div>
       </div>
 

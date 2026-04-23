@@ -2,6 +2,7 @@
 
 import { useRef, useEffect } from "react";
 import { useOpenBrainChat } from "@/lib/useOpenBrainChat";
+import { APP } from "@/config/app";
 
 interface ChatPanelProps {
   open: boolean;
@@ -60,7 +61,7 @@ export default function ChatPanel({ open, onClose }: ChatPanelProps) {
         >
           <div className="flex items-center gap-2">
             <span className="font-terminal text-lg text-[var(--text-primary)]">
-              NEURAL INTERFACE
+              {APP.chatHeader.toUpperCase()}
             </span>
             <span
               className="inline-block w-2 h-2 rounded-full bg-[var(--accent)]"

@@ -1,6 +1,7 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
 import { searchThoughts, searchPages } from "@/lib/openBrainApi";
+import { APP } from "@/config/app";
 
 export const maxDuration = 30;
 
@@ -9,7 +10,7 @@ const openrouter = createOpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
 });
 
-const SYSTEM_PROMPT = `You are the Open Brain neural interface. You have access to a semantic memory system containing thoughts, wiki pages, client records, and business context.
+const SYSTEM_PROMPT = `You are the ${APP.name} neural interface. You have access to a semantic memory system containing thoughts, wiki pages, client records, and business context.
 
 Answer questions using the provided context. Be direct, specific, and reference the source material when relevant. If the context doesn't contain the answer, say so honestly.
 
@@ -60,7 +61,7 @@ export async function POST(req: Request) {
   const contextBlock =
     contextParts.length > 0
       ? `\n\n<context>\n${contextParts.join("\n")}</context>`
-      : "\n\n<context>No relevant context found in Open Brain.</context>";
+      : `\n\n<context>No relevant context found in ${APP.name}.</context>`;
 
   const result = streamText({
     model: openrouter.chat("anthropic/claude-sonnet-4.6"),

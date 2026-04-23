@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { APP } from "@/config/app";
 
 async function login(formData: FormData) {
   "use server";
@@ -38,7 +39,7 @@ export default async function LoginPage({
             className="font-terminal text-5xl text-glow animate-in stagger-0"
             style={{ color: "var(--text-primary)" }}
           >
-            OPEN BRAIN
+            {APP.name.toUpperCase()}
           </h1>
           <p
             className="animate-in stagger-1"
@@ -50,7 +51,7 @@ export default async function LoginPage({
               color: "var(--text-muted)",
             }}
           >
-            NEURAL TERMINAL v3.0
+            {APP.loginSubtitle}
           </p>
         </div>
 

@@ -2,6 +2,7 @@
 
 import { useRef, useEffect } from "react";
 import { useOpenBrainChat } from "@/lib/useOpenBrainChat";
+import { APP } from "@/config/app";
 
 export default function ChatPage() {
   const { messages, input, setInput, handleSubmit, isLoading } =
@@ -27,10 +28,10 @@ export default function ChatPage() {
       {/* Header */}
       <div className="animate-in mb-4">
         <h1 className="font-terminal text-2xl text-[var(--text-primary)] text-glow">
-          NEURAL INTERFACE
+          {APP.chatHeader.toUpperCase()}
         </h1>
         <p className="text-xs font-mono text-[var(--text-muted)] mt-1">
-          Query the semantic memory network
+          {APP.chatSubtitle}
         </p>
       </div>
 

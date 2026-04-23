@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import { APP } from "@/config/app";
 
 export interface ChatMessage {
   id: string;
@@ -83,7 +84,7 @@ export function useOpenBrainChat() {
         setMessages((prev) =>
           prev.map((m) =>
             m.id === assistantId
-              ? { ...m, content: "[Error: failed to reach neural interface]" }
+              ? { ...m, content: `[Error: failed to reach ${APP.chatHeader.toLowerCase()}]` }
               : m
           )
         );

@@ -4,6 +4,7 @@ import MatrixRain from "@/components/MatrixRain";
 import NavSidebar from "@/components/NavSidebar";
 import NavBottom from "@/components/NavBottom";
 import ChatFAB from "@/components/ChatFAB";
+import { APP } from "@/config/app";
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -13,13 +14,13 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "Open Brain",
-  description: "Neural Terminal - Semantic Memory System",
+  title: APP.name,
+  description: APP.tagline,
   robots: "noindex, nofollow",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Open Brain",
+    title: APP.name,
   },
   manifest: "/manifest.json",
 };
