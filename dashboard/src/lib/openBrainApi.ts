@@ -1,8 +1,13 @@
-const BASE_URL =
-  "https://dvsvzlwxhmqwhmknwmdr.supabase.co/functions/v1/open-brain-mcp";
+const BASE_URL = process.env.OPEN_BRAIN_URL || "";
 const API_KEY = process.env.OPEN_BRAIN_API_KEY || "";
 
 async function brainFetch(path: string): Promise<unknown> {
+  if (!BASE_URL || !API_KEY) {
+    console.error(
+      "openBrainApi: OPEN_BRAIN_URL and OPEN_BRAIN_API_KEY env vars are required"
+    );
+    return null;
+  }
   const res = await fetch(`${BASE_URL}${path}`, {
     headers: { "x-brain-key": API_KEY },
   });
