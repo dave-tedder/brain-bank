@@ -21,17 +21,29 @@ const clientEventTypes = loadProfile().client_event_types;
 
 // --- Slack ---
 
-async function postToSlack(channel: string, text: string): Promise<void> {
-  const r = await fetch("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ channel, text, unfurl_links: false }),
-  });
-  const d = await r.json();
-  if (!d.ok) console.error("Slack post error:", d.error);
+async function postToSlack(
+  channel: string,
+  text: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const r = await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ channel, text, unfurl_links: false }),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      console.error("Slack post error:", d.error);
+      return { ok: false, error: String(d.error || "unknown") };
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error("Slack post error:", err);
+    return { ok: false, error: "fetch_failed" };
+  }
 }
 
 // --- Synthesis ---
