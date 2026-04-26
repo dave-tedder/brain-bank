@@ -992,7 +992,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       }
     }
 
-    await postToSlack(SLACK_DIGEST_CHANNEL, slackMessage);
+    const slackResult = await postToSlack(SLACK_DIGEST_CHANNEL, slackMessage);
 
     // Self-capture: save weekly review as a thought for future reference
     if (mode === "weekly") {
