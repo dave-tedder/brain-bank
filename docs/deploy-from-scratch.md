@@ -123,7 +123,9 @@ Leave `event_types`, `client_event_types`, `content_types`, and `mechanical_capt
 cp .env.example .env
 ```
 
-Open `.env` in an editor. [`.env.example`](../.env.example) has a "where to find" pointer and a "WHY" line for every variable; read those as you fill each one in.
+Open `.env` in an editor. **Use a terminal editor (`nano`, `vi`, `vim`) or a code editor (VS Code, Sublime, etc.). On macOS, do NOT use TextEdit:** TextEdit silently fails to save files whose name starts with a dot (`.env`, `.gitignore`, etc.), reporting "Save successful" but writing nothing to disk. The next step's `supabase secrets set` will appear to push the right values when in fact `.env` is unchanged from `.env.example`. If you must use a GUI editor, confirm the save with `cat .env | head` immediately after.
+
+[`.env.example`](../.env.example) has a "where to find" pointer and a "WHY" line for every variable; read those as you fill each one in.
 
 For a minimum viable first deploy, you need:
 

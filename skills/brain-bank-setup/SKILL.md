@@ -110,6 +110,8 @@ Fires once, before the first core secret is gathered (typically `SUPABASE_SERVIC
 >
 > One more thing: don't take screenshots of Supabase dashboard pages showing API keys. Paste them into `.env` manually.
 >
+> **Editor heads-up:** open `.env` in a terminal editor (`nano`, `vi`, `vim`) or a code editor (VS Code, Sublime, etc.). On macOS, do NOT use TextEdit. TextEdit silently fails to save dot-prefixed files, reporting "Save successful" but writing nothing to disk. The shape-check grep below will catch this (returns 0 even though you "saved"), but you'll save time by avoiding TextEdit up front.
+>
 > For each secret, I'll:
 > 1. Tell you exactly where to find it in the relevant dashboard.
 > 2. Give you the line to paste into `.env`.
