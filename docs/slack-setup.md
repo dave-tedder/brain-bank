@@ -132,11 +132,13 @@ SLACK_QUERY_CHANNEL=CABCDEF1234     # #brain-ask (if using)
 SLACK_DIGEST_CHANNEL=C1234567890    # #brain-digest (if using)
 ```
 
-**What success looks like:** every channel you plan to use has a Channel ID that starts with `C` and no spaces, and the bot appears as a member of each.
+**What success looks like:** every channel you plan to use has a Channel ID that starts with `C` and no spaces, and the bot is recognized by the channel.
+
+To check whether the bot is recognized: scroll the same channel-details panel to the **Integrations** section (sometimes labeled **Apps**) and look for your bot's name. In modern Slack, bots appear under **Integrations**, NOT under **Members**. Operators who look at the Members tab and don't see the bot often assume the `/invite` failed when it actually worked. The Members tab lists humans only.
 
 **If it fails:**
 - You copied `#brain-capture` instead of `C0123456789`: Slack accepts both formats in the UI but Brain Bank only routes on Channel IDs. Re-do the right-click dance and copy the ID, not the name.
-- You see the Channel ID but the bot is not listed in the member list: run `/invite @Brain Bank` in that channel.
+- You see the Channel ID but the bot is not listed under **Integrations** either: run `/invite @Brain Bank` in that channel and refresh the channel-details panel.
 
 **Why this matters:** if you put a channel name in `SLACK_CAPTURE_CHANNEL` instead of a Channel ID, `ingest-thought` compares events against the wrong string and silently ignores every message. You get no errors and no captures.
 
@@ -210,9 +212,15 @@ If any of your Brain Bank channels are **private** channels, also add:
 
 You do NOT need to add `app_mention`. Brain Bank's query channel treats every message in `SLACK_QUERY_CHANNEL` as a search query, so an @mention is not required. (Mentions work too; they just do not add anything.)
 
-Click **Save Changes** at the bottom of the page. Slack will prompt you to **reinstall** the app because the bot event subscriptions changed the app's permissions. Click **Reinstall to Workspace** and **Allow**.
+Click **Save Changes** at the bottom of the page.
 
-**What success looks like:** green **Verified** by the Request URL, `message.channels` listed under Bot Events, and the sidebar no longer shows an orange "reinstall required" dot.
+Now manually reinstall the app. **Do this step every time, even if Slack does not prompt for it.** Slack's "reinstall required" prompt after a Save Changes is unreliable; it only appears for some scope and event combinations and not others, and the inconsistency is the single most common reason operators end up with green Verified, all green config, and zero inbound message events. Even when the prompt does appear, click-through is fragile because the workspace state can drift between the Save and the reinstall.
+
+To manually reinstall: left sidebar, **OAuth & Permissions**, scroll to the top, click **Reinstall to Workspace** (or **Reinstall App** depending on Slack version), then **Allow** on the workspace permission prompt.
+
+**Heads up: the Bot User OAuth Token can regenerate during a reinstall.** Slack does not always rotate the `xoxb-` token on reinstall, but it sometimes does (especially after scope changes). After the manual reinstall, scroll the OAuth & Permissions page back to the top, look at the **Bot User OAuth Token** value, and compare against the value you put into `.env` in Step 6. If they differ, copy the new value, update `SLACK_BOT_TOKEN` in `.env`, and re-run Step 7 (`supabase secrets set --env-file .env --project-ref <ref>`). A stale bot token after a reinstall produces a `delivery_failed` digest with `slack_error: invalid_auth` and silent capture failure on every Slack message.
+
+**What success looks like:** green **Verified** by the Request URL, `message.channels` listed under Bot Events, the sidebar no longer shows an orange "reinstall required" dot, and your `SLACK_BOT_TOKEN` in `.env` matches the current Bot User OAuth Token.
 
 **If it fails:**
 - **Request URL returns red "Your URL did not respond with the value of the challenge parameter":** open the Supabase Dashboard at Project → Edge Functions → `ingest-thought` → **Logs** in another browser tab, then click **Retry** in Slack and refresh the Logs view. The logs tell you which failure mode this is:
@@ -220,7 +228,7 @@ Click **Save Changes** at the bottom of the page. Slack will prompt you to **rei
   - Any other 500 error: read the logs for the real cause. Common: `profile.json` missing from bundle (redo Step 4 and Step 9 of `deploy-from-scratch.md`), or missing env vars.
   - Nothing in the logs at all: the URL is wrong and the function never saw the request. Double-check the URL ends with `/functions/v1/ingest-thought`, not `/ingest-thought-v2` or `/open-brain-mcp`.
 - **Request URL returns red "URL returned HTTP 404":** you pointed Slack at a function name that does not exist. Double-check the URL ends with `/functions/v1/ingest-thought`.
-- **Slack does not prompt to reinstall after Save Changes:** your app was already reinstalled recently. Just manually reinstall via **OAuth & Permissions → Reinstall to Workspace** for completeness.
+- **Capture sends no reply and no row appears in the `thoughts` table after Step 9:** the most likely cause is a stale `SLACK_BOT_TOKEN` after the reinstall (see the Heads up paragraph above). Re-grab the token from OAuth & Permissions and re-push secrets. The second most likely cause is the `message.channels` subscription was lost during the reinstall; re-add it under Subscribe to bot events and Save Changes again.
 
 **Why this matters:** the Request URL is what ties Slack to your Brain Bank deploy. Changing the URL (for example, migrating to a new Supabase project) means updating this field and re-verifying. Keep the URL written down alongside the Supabase project ref.
 
