@@ -1028,10 +1028,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     return new Response(
       JSON.stringify({
-        status: "delivered",
+        status: slackResult.ok ? "delivered" : "delivery_failed",
         mode,
         thoughts_count: data.length,
         channel: SLACK_DIGEST_CHANNEL,
+        ...(slackResult.ok ? {} : { slack_error: slackResult.error }),
         ...(notionResult ? { notion_push: notionResult } : {}),
       }),
       { headers: { "Content-Type": "application/json" } }
