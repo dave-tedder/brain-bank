@@ -72,7 +72,7 @@ supabase functions deploy ingest-thought open-brain-mcp brain-digest compile-pag
 
 The full end-to-end setup (Slack app, cron jobs, dashboard, capture integrations) is covered in [`docs/deploy-from-scratch.md`](docs/deploy-from-scratch.md) and takes about thirty minutes start to finish.
 
-If `supabase functions deploy` fails with "Project not found," check that `supabase link` finished successfully. If an Edge Function returns 500, `supabase functions logs <name>` will surface the real error.
+If `supabase functions deploy` fails with "Project not found," check that `supabase link` finished successfully. If an Edge Function returns 500, open the Supabase Dashboard at Project → Edge Functions → [function] → **Logs** to see the real error (the `supabase functions logs` CLI subcommand was removed in CLI v2.75; see `docs/troubleshooting.md` Section 1).
 
 ## Project Structure
 

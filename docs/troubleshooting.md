@@ -19,18 +19,15 @@ If you have not completed [`docs/deploy-from-scratch.md`](deploy-from-scratch.md
 
 ## 1. Read the logs first
 
-Before you theorize, tail the logs.
+Before you theorize, read the logs. The Supabase Dashboard is the canonical UI:
 
-```bash
-supabase functions logs ingest-thought --project-ref <your-project-ref>
-supabase functions logs open-brain-mcp --project-ref <your-project-ref>
-supabase functions logs brain-digest  --project-ref <your-project-ref>
-supabase functions logs compile-pages --project-ref <your-project-ref>
+```
+https://supabase.com/dashboard/project/<your-project-ref>/functions
 ```
 
-The CLI streams recent log lines for that function. Add `--tail` to follow live.
+Click the function (`ingest-thought`, `open-brain-mcp`, `brain-digest`, `compile-pages`) → **Logs** tab. The Logs view shows recent invocations with timestamps, status codes, and any `console.log` / `console.error` output the function emitted. Refresh to pull newer entries.
 
-Or read logs in the Supabase dashboard: Dashboard → Edge Functions → (pick function) → Logs.
+Heads-up: the `supabase functions logs` CLI subcommand was removed in CLI v2.75 and later. Older guides referenced it, current CLI rejects it with `unknown command`, and the CLI does not loudly suggest the Dashboard alternative. If you need a scripted log retrieval path, the Supabase Management API exposes an analytics-logs endpoint, or use the Supabase MCP (`get_logs` with `service: "edge-function"`).
 
 ### The URL-encode gotcha
 
@@ -217,13 +214,7 @@ Alternatively, add explicit scoping to the resolving thought (mention the projec
 
 ### Debugging an auto-resolve decision in real time
 
-Tail the logs while you run the capture:
-
-```bash
-supabase functions logs ingest-thought --project-ref <ref> --tail
-```
-
-Send your test thought. The log stream will print:
+Open the Edge Function logs in the Supabase Dashboard at Project → Edge Functions → `ingest-thought` → **Logs**. Send your test thought, then refresh the Logs view. You will see:
 - `checkAutoResolve: blocked mechanical capture (prefix match): ...` if LAYER 0 fired.
 - `checkAutoResolve: restatement guard dropped N candidate(s)` if LAYER 1.5 fired.
 - The full LAYER 2 request/response is NOT logged by default (too verbose). If you need it, add a temporary `console.log` around the `fetch(OPENROUTER_BASE/chat/completions)` call, redeploy, reproduce, then revert.
@@ -354,7 +345,7 @@ Fix: confirm `ls profile.json` returns the file, and you are running `supabase f
 
 The function deployed but crashes on first request. Causes ranked by likelihood:
 
-1. **`profile.json` not bundled.** Run `supabase functions logs <name> --project-ref <ref>` and look for `Cannot find module` or `NotFound` on a profile path. If the bundler silently shipped without `profile.json`, the fix is in the shipped loader: `profile.ts` uses `import profileDefaults from "./profile.json" with { type: "json" }` so the bundler treats it as a module graph edge. If you modified that import, revert it. Do NOT use `Deno.readTextFileSync`: it works at local `deno run` time but the CLI bundler does not include the JSON file as an asset.
+1. **`profile.json` not bundled.** Open the function's Logs in the Supabase Dashboard (Project → Edge Functions → [function] → **Logs**) and look for `Cannot find module` or `NotFound` on a profile path. If the bundler silently shipped without `profile.json`, the fix is in the shipped loader: `profile.ts` uses `import profileDefaults from "./profile.json" with { type: "json" }` so the bundler treats it as a module graph edge. If you modified that import, revert it. Do NOT use `Deno.readTextFileSync`: it works at local `deno run` time but the CLI bundler does not include the JSON file as an asset.
 2. **Required secret missing.** A new code path needs an env var you did not set. Run `supabase secrets list --project-ref <ref>` and compare against `.env.example` (11 required vars for base capture + digest).
 3. **OpenRouter key hit its monthly spend cap.** Embeddings calls 402. Check your OpenRouter dashboard.
 
@@ -393,4 +384,4 @@ Supabase does not have a one-click rollback. Your options:
 Two escape hatches:
 
 - **Reproduce against a throwaway project.** Create a fresh Supabase project, run [`docs/deploy-from-scratch.md`](deploy-from-scratch.md) end to end, then try to reproduce the bug there. If it repros on a clean deploy, the bug is in the code (file an issue). If it does not, the bug is in your environment (stale config, secret mismatch, drifted schema).
-- **File an issue.** Include the function name, the first line of the error from `supabase functions logs`, the response body from the failing call (redact your access key), and a curl command that reproduces. The more complete the repro, the faster the fix.
+- **File an issue.** Include the function name, the first error line from the Supabase Dashboard Logs (Project → Edge Functions → [function] → **Logs**), the response body from the failing call (redact your access key), and a curl command that reproduces. The more complete the repro, the faster the fix.

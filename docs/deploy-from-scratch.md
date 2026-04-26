@@ -238,7 +238,7 @@ Each deploy takes about fifteen seconds. There is no build step; the Supabase CL
 
 **If it fails:**
 - `A profile.json file is required` or `Failed to bundle the function (reason: Module not found "...supabase/functions/_shared/profile.json")`: the bundler cannot find the file at the expected path. Confirm Step 4 wrote it to the correct location (`ls supabase/functions/_shared/profile.json`) and re-run the deploy. If it landed at repo root instead, move it: `mv profile.json supabase/functions/_shared/profile.json`.
-- `Deployment failed` with no detail: run `supabase functions logs <name> --project-ref <ref>` to see the real error.
+- `Deployment failed` with no detail: open the Supabase Dashboard at Project → Edge Functions → [function] → **Logs** to see the real error (the `supabase functions logs` CLI subcommand was removed in CLI v2.75).
 - `undefined is not a function` at deploy time: you are on a very old Supabase CLI. Run `supabase --version`; upgrade to the latest with `brew upgrade supabase` (or the package-manager equivalent on your platform).
 
 **Why this matters:** all four functions share code in `supabase/functions/_shared/` and read the same `profile.json`. Deploy order does not matter, but every one of the four needs to deploy successfully before the system is usable end-to-end.
@@ -272,7 +272,7 @@ curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp
 **If it fails:**
 - `Not Acceptable: Client must accept both application/json and text/event-stream` (as a JSON-RPC error body): your curl is missing the `Accept: application/json, text/event-stream` header. The MCP Streamable HTTP transport requires both MIME types in `Accept`. Re-add the header and retry.
 - `401 Unauthorized`: the `key` query parameter does not match the `MCP_ACCESS_KEY` in your `.env` / Supabase secrets. Confirm with `supabase secrets list --project-ref <ref>` that `MCP_ACCESS_KEY` is present, then re-check you copied it correctly into the curl command.
-- `500 Internal Server Error` with a body like `{"error":"WORKER_ERROR"}`: the function is crashing on startup. Run `supabase functions logs open-brain-mcp --project-ref <ref>` to see the actual error. Common causes: OpenRouter API key expired or over spend cap; `SUPABASE_SERVICE_ROLE_KEY` is actually an anon key (pre-redesign JWTs both start with `eyJ` and look identical to the Step 5 shape check); Supabase transient outage. `profile.json` missing is no longer a 500-at-runtime cause; the Session 80 bundler fix surfaces it as a 400 at deploy time, so a deployed-but-500 function is a different issue.
+- `500 Internal Server Error` with a body like `{"error":"WORKER_ERROR"}`: the function is crashing on startup. Open the Supabase Dashboard at Project → Edge Functions → `open-brain-mcp` → **Logs** to see the actual error. Common causes: OpenRouter API key expired or over spend cap; `SUPABASE_SERVICE_ROLE_KEY` is actually an anon key (pre-redesign JWTs both start with `eyJ` and look identical to the Step 5 shape check); Supabase transient outage. `profile.json` missing is no longer a 500-at-runtime cause; the Session 80 bundler fix surfaces it as a 400 at deploy time, so a deployed-but-500 function is a different issue.
 - `522` or connection timeout: Supabase is experiencing an outage. Check [status.supabase.com](https://status.supabase.com).
 
 Verify the thought landed. In the Supabase SQL editor:

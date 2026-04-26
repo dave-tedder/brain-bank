@@ -215,7 +215,7 @@ Click **Save Changes** at the bottom of the page. Slack will prompt you to **rei
 **What success looks like:** green **Verified** by the Request URL, `message.channels` listed under Bot Events, and the sidebar no longer shows an orange "reinstall required" dot.
 
 **If it fails:**
-- **Request URL returns red "Your URL did not respond with the value of the challenge parameter":** in a second terminal, tail the function logs with `supabase functions logs ingest-thought --project-ref <ref>` while you click **Retry** in Slack. The logs tell you which failure mode this is:
+- **Request URL returns red "Your URL did not respond with the value of the challenge parameter":** open the Supabase Dashboard at Project → Edge Functions → `ingest-thought` → **Logs** in another browser tab, then click **Retry** in Slack and refresh the Logs view. The logs tell you which failure mode this is:
   - `HMAC verification failed` in the logs: your `SLACK_SIGNING_SECRET` in Supabase does not match what Slack is sending. Re-copy the Signing Secret from Basic Information (double-check you are in the right Slack app; it is easy to paste from an older app by accident), update `.env`, re-run Step 7, retry.
   - Any other 500 error: read the logs for the real cause. Common: `profile.json` missing from bundle (redo Step 4 and Step 9 of `deploy-from-scratch.md`), or missing env vars.
   - Nothing in the logs at all: the URL is wrong and the function never saw the request. Double-check the URL ends with `/functions/v1/ingest-thought`, not `/ingest-thought-v2` or `/open-brain-mcp`.
@@ -308,7 +308,7 @@ curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/brain-digest?m
 
 **If any step fails:**
 - **Posted in capture channel, no reply and no row in `thoughts`:** the Request URL verification passed (Step 8) but Slack is not actually forwarding messages. Check **Event Subscriptions → Subscribe to bot events** includes `message.channels`. Reinstall the app if you added events after install.
-- **Row lands but with `metadata->>'source'` blank or wrong:** the function is receiving webhook calls but is getting stuck. `supabase functions logs ingest-thought --project-ref <ref>` will show the real error (often: `profile.json` missing from bundle, OpenRouter key invalid, or database insert type mismatch).
+- **Row lands but with `metadata->>'source'` blank or wrong:** the function is receiving webhook calls but is getting stuck. The Supabase Dashboard at Project → Edge Functions → `ingest-thought` → **Logs** will show the real error (often: `profile.json` missing from bundle, OpenRouter key invalid, or database insert type mismatch).
 - **Bot reply says "Failed to capture":** the database write failed. The reply text includes the Supabase error message; most common cause is a wrong service role key (re-check Step 6 of `deploy-from-scratch.md`).
 - **Digest curl returns `401 Unauthorized`:** the `key=` value does not match `MCP_ACCESS_KEY`. Re-check the value in `.env` and your curl command.
 - **Digest curl succeeds but no post lands in Slack:** `SLACK_DIGEST_CHANNEL` value is wrong, OR the bot has not been invited to that channel. Re-check Step 5.
