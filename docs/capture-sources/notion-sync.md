@@ -151,8 +151,9 @@ STEP 2: For each row returned, capture a thought via POST /capture
 - Extract Created: page.created_time (ISO 8601).
 - Compose the thought content:
   "[Notion Sync] <title> -- Status: <status>. Created: <created_time>. Source: Notion <DATABASE_NAME> database."
-- POST to $BRAIN_BASE/capture?key=$BRAIN_KEY:
-  curl -s -X POST "$BRAIN_BASE/capture?key=$BRAIN_KEY" \
+- POST to $BRAIN_BASE/capture with header auth:
+  curl -s -X POST "$BRAIN_BASE/capture" \
+    -H "x-brain-key: $BRAIN_KEY" \
     -H "Content-Type: application/json" \
     -d "{\"content\":\"<thought content>\",\"source\":\"notion-sync\"}"
 - Expected success: HTTP 200 with {"status":"captured",...} or {"status":"duplicate",...}. Both are success; SHA-256 dedup is intentional.
@@ -244,8 +245,9 @@ STEP 2.5 (OPTIONAL, CRM shape only): If the TARGET DATABASE looks like a contact
     - If the title ends in the word "intake" or "Intake" (case-insensitive), strip that suffix.
     - If the name does not look like a person's name (more than 4 words, contains a colon, contains a project-sounding phrase), skip the /client call for that row rather than creating a bad record.
 - Extract email and phone from properties of the right type (email and phone_number). If absent, use null.
-- POST to $BRAIN_BASE/client?key=$BRAIN_KEY:
-  curl -s -X POST "$BRAIN_BASE/client?key=$BRAIN_KEY" \
+- POST to $BRAIN_BASE/client with header auth:
+  curl -s -X POST "$BRAIN_BASE/client" \
+    -H "x-brain-key: $BRAIN_KEY" \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"<person-name>\",\"email\":<email-or-null>,\"phone\":<phone-or-null>,\"notes\":\"Intake: <row-title>. Submitted: <created_time>.\",\"first_contact\":\"<created_time as YYYY-MM-DD>\"}"
 - Expected success: {"status":"created"} for new contacts, {"status":"exists"} for already-known names. Both are success; the endpoint is idempotent and safe to re-run.

@@ -250,7 +250,8 @@ Each deploy takes about fifteen seconds. There is no build step; the Supabase CL
 Now verify the REST capture path works. Replace `<your-project-ref>` and `<your-mcp-access-key>` with your values:
 
 ```bash
-curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp?key=<your-mcp-access-key>" \
+curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp" \
+  -H "x-brain-key: <your-mcp-access-key>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{
@@ -271,7 +272,7 @@ curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp
 
 **If it fails:**
 - `Not Acceptable: Client must accept both application/json and text/event-stream` (as a JSON-RPC error body): your curl is missing the `Accept: application/json, text/event-stream` header. The MCP Streamable HTTP transport requires both MIME types in `Accept`. Re-add the header and retry.
-- `401 Unauthorized`: the `key` query parameter does not match the `MCP_ACCESS_KEY` in your `.env` / Supabase secrets. Confirm with `supabase secrets list --project-ref <ref>` that `MCP_ACCESS_KEY` is present, then re-check you copied it correctly into the curl command.
+- `401 Unauthorized`: the `x-brain-key` header value does not match the `MCP_ACCESS_KEY` in your `.env` / Supabase secrets. Confirm with `supabase secrets list --project-ref <ref>` that `MCP_ACCESS_KEY` is present (the list shows a SHA256 digest, not the raw key), then re-check you copied it correctly into the curl command. The function also accepts `Authorization: Bearer <key>` and a `?key=<key>` URL parameter as alternative auth modes; header auth is the recommended path because URL parameters appear in Edge Function logs.
 - `500 Internal Server Error` with a body like `{"error":"WORKER_ERROR"}`: the function is crashing on startup. Open the Supabase Dashboard at Project → Edge Functions → `open-brain-mcp` → **Logs** to see the actual error. Common causes: OpenRouter API key expired or over spend cap; `SUPABASE_SERVICE_ROLE_KEY` is actually an anon key (pre-redesign JWTs both start with `eyJ` and look identical to the Step 5 shape check); Supabase transient outage. `profile.json` missing is no longer a 500-at-runtime cause; the Session 80 bundler fix surfaces it as a 400 at deploy time, so a deployed-but-500 function is a different issue.
 - `522` or connection timeout: Supabase is experiencing an outage. Check [status.supabase.com](https://status.supabase.com).
 

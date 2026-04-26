@@ -141,7 +141,7 @@ Symptom: `curl -X POST /capture` returns 401 or does not create a row.
 Symptom: Claude Desktop or Claude Code `capture_thought` tool silently fails or returns an error.
 
 1. **Claude Desktop: restart required.** If you just added the MCP URL to Settings → Connectors, fully quit and relaunch Claude Desktop. New config isn't read until restart.
-2. **Wrong URL shape.** Desktop URL is `https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp?key=<your-mcp-access-key>`. The `?key=` URL parameter is required; MCP doesn't send headers by default.
+2. **Wrong URL shape.** Desktop URL is `https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp?key=<your-mcp-access-key>`. The `?key=` URL parameter is required for MCP Desktop because the client doesn't send custom headers by default. Heads-up: query-parameter auth gets logged plaintext into Edge Function request logs, so prefer header auth (`x-brain-key: <key>`) for your own curl smoke tests, scheduled jobs, and integration scripts. The `?key=` form is fine for the MCP Desktop URL specifically (it's the only auth path that client supports), but treat the resulting log entries as containing a secret and rotate `MCP_ACCESS_KEY` if you ever share Edge Function log exports.
 3. **406 Not Acceptable.** Some MCP clients don't send `Accept: text/event-stream`. The Edge Function injects the header automatically: if you still see 406, your client is very old. Update to a recent `mcp-remote` or Claude build.
 
 ---
