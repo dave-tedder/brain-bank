@@ -24,6 +24,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 - **Stale `dashboard/docs/superpowers/plans/` directory deleted.** Three plan files (`2026-04-13-neural-terminal-phase-9a.md`, `9b.md`, `9c.md`, ~110 KB combined) came across in the Phase 5.1 subtree-add as pre-existing build-log artifacts from the former dashboard repo and were never load-bearing in brain-bank. No file in the monorepo references them. The now-empty `dashboard/docs/` and `dashboard/docs/superpowers/` parent directories were removed along with the files. Why this matters: keeps the dashboard subtree focused on shippable code plus its own `CLAUDE.md`, not on in-progress build logs from another repo's phase tracking.
 
+### Fixed
+
+- **`brain-digest` no longer reports `status: "delivered"` when the Slack post failed.** The `postToSlack` helper previously called `chat.postMessage`, logged any error via `console.error`, and returned. The response builder reported `delivered` regardless of whether the message actually landed. This made cron silent failures (invalid bot token, channel not found, not in channel, network blip) invisible to operators reading either the curl response, the `cron.job_run_details` body, or the dashboard. The helper now returns `{ ok: true } | { ok: false; error: <slack-error-code> }`, and the response body sets `status: "delivery_failed"` with `slack_error: <code>` when delivery failed (happy-path response shape unchanged, slack_error only present on failure). HTTP status stays 200 in both cases since the synthesis half (which already wrote the digest to the `digests` table) succeeded. Discovered during the Brain Bank Tier 3 fresh-deploy verification when a manual cron fire reported `delivered` but the message never appeared in the test workspace channel. File: `supabase/functions/brain-digest/index.ts`.
+
 ## [0.1.0-pre] - 2026-04-21
 
 First pre-release snapshot. Everything below represents the initial open-sourcing cut of an engine that has been running in production for the author since March 2026. No prior public release, so nothing here is flagged Breaking.
