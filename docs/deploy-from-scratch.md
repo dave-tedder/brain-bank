@@ -240,6 +240,8 @@ Each deploy takes about fifteen seconds. There is no build step; the Supabase CL
 
 **What success looks like:** each deploy prints `Deployed Function <name> on project <project-ref>`.
 
+**Expected noise (ignore):** every deploy on a host without Docker prints `WARNING: Docker is not running, switching to API bundling.` That is benign. Brain Bank's bundling path uses Supabase's API-side bundler regardless of whether Docker is installed; the warning just notes that the CLI fell back to it. If you do not have Docker installed, leave it that way; installing Docker just to silence this warning gains you nothing.
+
 **If it fails:**
 - `A profile.json file is required` or `Failed to bundle the function (reason: Module not found "...supabase/functions/_shared/profile.json")`: the bundler cannot find the file at the expected path. Confirm Step 4 wrote it to the correct location (`ls supabase/functions/_shared/profile.json`) and re-run the deploy. If it landed at repo root instead, move it: `mv profile.json supabase/functions/_shared/profile.json`.
 - `Deployment failed` with no detail: open the Supabase Dashboard at Project → Edge Functions → [function] → **Logs** to see the real error (the `supabase functions logs` CLI subcommand was removed in CLI v2.75).
