@@ -348,12 +348,14 @@ begin
     select net.http_post(
       url := v_url,
       headers := '{"Content-Type": "application/json"}'::jsonb,
-      body := '{}'::jsonb
+      body := '{}'::jsonb,
+      timeout_milliseconds := 30000
     ) into v_request_id;
   elsif http_method = 'GET' then
     select net.http_get(
       url := v_url,
-      headers := '{"Content-Type": "application/json"}'::jsonb
+      headers := '{"Content-Type": "application/json"}'::jsonb,
+      timeout_milliseconds := 30000
     ) into v_request_id;
   else
     raise exception 'unsupported http_method: %', http_method;
@@ -373,6 +375,8 @@ select public.call_edge_function('open-brain-mcp', 'health=1', 'GET');
 ```
 
 should return a bigint (the `net.http_*` request ID), and inspecting `select * from net._http_response order by id desc limit 1;` shortly after should show a 200 response.
+
+**Why `timeout_milliseconds := 30000`:** pg_net's default request timeout is 5 seconds. The `brain-digest` synthesis path can run 7 to 25 seconds depending on the LLM round-trip and the number of thoughts being summarized; `compile-pages` can be similar when it has to compile fresh pages. Without the explicit 30-second timeout, pg_net records `Timeout of 5000 ms reached` in `net._http_response.error_msg`, even though the Edge Function continues running and finishes the work successfully (Edge Functions run independently of the pg_net client connection). The cron job appears to have failed when it actually delivered. Setting the timeout to 30000ms aligns the pg_net client window with the Edge Function's true completion time and makes `net._http_response` a truthful diagnostic.
 
 **If it fails:**
 - `vault secret mcp_access_key not found`: you skipped Step 8. Go back and create the vault secret.
