@@ -128,21 +128,30 @@ After the teaching block runs, each subsequent secret uses this pattern:
 ```text
 Claude: "Next secret: OPENROUTER_API_KEY.
   Where: openrouter.ai, Keys, Create Key.
-  Add this line to .env: OPENROUTER_API_KEY=<your key>
+  In .env, find the existing OPENROUTER_API_KEY= line (it's there from .env.example with an empty value) and replace its value. Don't append a new line; the file would then have two OPENROUTER_API_KEY= entries and `supabase secrets set --env-file` resolves duplicates by reading the LAST occurrence, which is implementation-defined and easy to get wrong on the next paste.
   Let me know when saved."
 Operator: "saved"
 Claude: [Bash: grep -cE '^OPENROUTER_API_KEY=sk-or-.{20,}' .env]
 Bash output: "1"
+Claude: [Bash: grep -c '^OPENROUTER_API_KEY=' .env]  # dedup safety net
+Bash output: "1"
 Claude: "OK, key shape looks right. Moving on."
 ```
 
-Failure (grep returns 0):
+Failure (shape grep returns 0):
 
 ```text
 Claude: "I don't see a well-formed OPENROUTER_API_KEY in .env yet.
   Expected shape: starts with 'sk-or-' and at least 20 chars after.
   Possible causes: key wasn't saved yet, or you pasted the wrong key.
   Open .env and check the OPENROUTER_API_KEY line. Let me know when fixed."
+```
+
+Failure (dedup grep returns > 1):
+
+```text
+Claude: "I see two or more OPENROUTER_API_KEY= lines in .env. supabase secrets set --env-file resolves duplicates implementation-defined; let's clean it up before pushing.
+  Open .env, delete every OPENROUTER_API_KEY= line that's empty or has the wrong value, leave exactly one with the right value. Let me know when fixed."
 ```
 
 ### Shape-check grep patterns
