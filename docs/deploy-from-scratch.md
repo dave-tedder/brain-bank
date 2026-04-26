@@ -79,14 +79,14 @@ supabase link --project-ref <your-project-ref>
 
 The `login` command opens a browser and authenticates the CLI with your Supabase account. The `link` command tells the CLI "this directory maps to that project."
 
-Supabase will prompt for the database password from Step 2 during `link`. Paste it.
+If the CLI prompts for the database password from Step 2, paste it. Recent Supabase CLI versions (v2.75 and newer) skip the password prompt at link time and defer it to Step 7's `supabase db push` instead. Either flow is fine; have your password from Step 2 ready when prompted, whether that's now or at the migration step.
 
 **What success looks like:** `Finished supabase link.` and no error output. A new `supabase/.temp/` directory appears in the repo with a cached project reference.
 
 **If it fails:**
 - `Invalid access token`: re-run `supabase login`.
 - `project not found`: the ref in `--project-ref` is wrong. Re-check the ID from Step 2. A common trap is copying the URL (`https://xxx.supabase.co`) instead of the bare ref (`xxx`).
-- Password prompt rejects a correct password: Supabase occasionally caches old password state on the CLI. Run `supabase link --project-ref <ref> --password <password>` as a single command instead of letting the prompt ask.
+- Password prompt rejects a correct password (older CLI versions only): Supabase occasionally caches old password state on the CLI. Run `supabase link --project-ref <ref> --password <password>` as a single command instead of letting the prompt ask.
 
 ---
 
