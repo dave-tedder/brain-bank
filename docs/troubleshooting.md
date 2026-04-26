@@ -82,8 +82,13 @@ Symptom: typing in `#brain-capture` produces no bot reply and no new row.
 3. **Is the channel ID in `.env` right?** `SLACK_CAPTURE_CHANNEL` is a channel ID (starts with `C`), not a channel name (does not start with `#`). In Slack, right-click the channel → View channel details → scroll to the bottom → Channel ID. Copy it into `.env` and re-push secrets (`supabase secrets set --env-file .env --project-ref <ref>`).
 4. **Is `SLACK_SIGNING_SECRET` right?** If the logs show `HMAC verification failed`, the signing secret in `.env` does not match the one in Slack's app settings. Slack API → your app → Basic Information → App Credentials → Signing Secret. Copy, paste into `.env`, re-push.
 5. **Slack's Bot Token was rotated or reinstalled?** The `xoxb-` token in `SLACK_BOT_TOKEN` must match the current install. If you reinstalled the app after changing scopes, grab the new Bot User OAuth Token from Slack → OAuth & Permissions and re-push.
+6. **All five above green, but zero inbound POSTs (rare):** if everything above checks out, Slack's UI shows the app healthy, the bot is in the channel, but the Edge Function logs show no POST from Slack at all when you type in the channel, you have hit a known Slack-side delivery silent-fail mode. Diagnostic path:
+   - Confirm: post a test message in the capture channel and watch the Edge Function logs (Supabase Dashboard → Edge Functions → `ingest-thought` → Logs). Zero new POST entries means Slack is not delivering the event.
+   - Narrow: in Slack API → Event Subscriptions, subscribe to a non-message event like `app_home_opened` and check whether THAT one fires. If yes, the issue is specific to `message.channels`. If no, the issue is all-event-delivery-broken for that workspace.
+   - Workaround while diagnosing: capture still works via REST `/capture`, MCP, Gmail bridge, voice, and Apple Notes. Only Slack inbound is affected.
+   - Last resort: open a Slack Developer Support ticket. Slack does not log inbound delivery failures on the dev console; they have to inspect their internal delivery queue.
 
-**Why this matters:** the four `SLACK_*` variables have to all agree. A mismatch anywhere (wrong channel ID, stale signing secret, old bot token) produces a silent failure, because the function returns `200 ok` to Slack even when it can't route the message. Only the logs tell you what went wrong.
+**Why this matters:** the `SLACK_*` variables have to all agree. A mismatch anywhere (wrong channel ID, stale signing secret, old bot token) produces a silent failure on the inbound side, because the function returns `200 ok` to Slack even when it can't route the message. Only the logs tell you what went wrong.
 
 ### Gmail bridge capture
 
@@ -235,7 +240,7 @@ order by created_at desc
 limit 5;
 ```
 
-**Row for today exists:** the digest generated but Slack delivery may have failed. Check the function logs for `Slack post error: ...`. Most common cause: `SLACK_DIGEST_CHANNEL` is empty, wrong, or the bot is not in the channel.
+**Row for today exists:** the digest generated AND attempted Slack delivery. Whether the Slack post actually succeeded is reflected in the Edge Function's response, not in the `digests` row (the row is upserted before the Slack post). Manually re-fire the digest (see below) and read the response. A `delivery_failed` status plus a `slack_error` field tells you exactly which Slack API error returned. If the response is `delivered` and the channel is still empty, the bot may have been removed between fires; re-invite and re-fire.
 
 **No row for today:** the digest did not run or returned `{"status":"skipped"}`. Check:
 
@@ -245,16 +250,27 @@ limit 5;
 
 ### Manually fire the digest
 
-Useful for both testing and recovering a missed day:
+Useful for both testing and recovering a missed day. Use header auth (avoid `?key=<...>` URL-param auth, since the key would be logged plaintext in the Edge Function request log):
 
 ```bash
-curl -X POST "https://<project-ref>.supabase.co/functions/v1/brain-digest?mode=daily&key=<mcp-access-key>"
+curl -X POST "https://<project-ref>.supabase.co/functions/v1/brain-digest?mode=daily" \
+  -H "x-brain-key: <mcp-access-key>" \
+  --max-time 60
 ```
 
 Response shapes:
-- `{"status":"delivered","mode":"daily","thoughts_count":N,"channel":"..."}`: digest posted.
+- `{"status":"delivered","mode":"daily","thoughts_count":N,"channel":"..."}`: digest synthesized AND posted to Slack.
+- `{"status":"delivery_failed","mode":"daily","thoughts_count":N,"channel":"...","slack_error":"<code>"}`: digest synthesized and saved to the `digests` table, but Slack rejected the post. Common `slack_error` codes:
+  - `invalid_auth`: the `SLACK_BOT_TOKEN` in your secrets is stale. Most often happens after reinstalling the Slack app, which can regenerate the bot token. Fix: Slack API → your app → OAuth & Permissions → copy the current Bot User OAuth Token → update `.env` → `supabase secrets set --env-file .env --project-ref <ref>`.
+  - `not_in_channel`: the bot left or was removed from the digest channel. Fix: `/invite @<bot-name>` in `#brain-digest` (or whatever `SLACK_DIGEST_CHANNEL` resolves to).
+  - `channel_not_found`: `SLACK_DIGEST_CHANNEL` does not match a channel ID the bot can see. Fix: confirm the ID is current; channel IDs change if a private channel becomes public.
+  - `is_archived`: the digest channel was archived. Fix: unarchive or repoint `SLACK_DIGEST_CHANNEL`.
+  - `missing_scope`: `chat:write` was removed from the app's Bot Token Scopes. Fix: re-add the scope and reinstall the app, then re-grab the bot token (see `invalid_auth`).
+  - `fetch_failed`: network error reaching `slack.com`. Usually transient; re-fire to confirm.
 - `{"status":"skipped","mode":"daily","reason":"..."}`: not enough thoughts.
 - `{"error":"..."}` with 500: something crashed; check logs.
+
+**Cron-fire diagnostic vs response body:** if today's auto-cron at 6 AM ET reports `succeeded` in `cron.job_run_details` but the channel is empty, that does NOT prove Slack delivery worked. `cron.job_run_details.return_message` reflects the SQL row count of the wrapper call (always `1 row`), not the Edge Function response body. The actual response body is in `net._http_response` (short retention; query within a few hours of the fire) or in the Edge Function logs. Use the manual re-fire above for a fresh diagnostic.
 
 ### Business events (pre-brief) not showing up
 
