@@ -150,8 +150,10 @@ You can leave every Slack variable and `NOTION_API_TOKEN` blank for now. The RES
 Edge Functions read environment variables from Supabase's secrets store, not from your local `.env` file. Push them:
 
 ```bash
-supabase secrets set --env-file .env --project-ref <your-project-ref>
+grep -v '^[A-Z_]*=$' .env | grep -v '^#' | supabase secrets set --project-ref <your-project-ref> --env-file /dev/stdin
 ```
+
+The `grep -v '^[A-Z_]*=$'` filter strips any line ending in `=` with no value (the empty placeholders left over from `.env.example` for vars you skipped, like the optional `SLACK_*` set on a no-Slack first deploy). Without the filter, `supabase secrets set` happily pushes every `KEY=` line as an empty-string secret, leaving 6 to 10 cosmetic empty entries in your project that show up forever in `supabase secrets list`. The filter keeps the dashboard clean. If you prefer to keep things simple at the cost of cosmetic noise, the unfiltered form (`supabase secrets set --env-file .env --project-ref <your-project-ref>`) works too, the empty entries are harmless.
 
 **What success looks like:** `Finished supabase secrets set.` with no error output, PLUS one `Env name cannot start with SUPABASE_, skipping: <name>` line per `SUPABASE_*` variable in your `.env`. The skip warnings are expected: the Supabase CLI refuses to push any variable whose name starts with `SUPABASE_` because the Edge Function runtime auto-injects `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` at invocation time. The skip is not a failure; the functions still receive both values.
 
