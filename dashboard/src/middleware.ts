@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import { verifySessionToken } from "@/lib/auth";
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   if (request.nextUrl.pathname === "/login") {
     const response = NextResponse.next();
     response.headers.set("X-Robots-Tag", "noindex, nofollow");
@@ -8,7 +9,7 @@ export function middleware(request: NextRequest) {
   }
   const expected = process.env.DASHBOARD_PASSWORD;
   const auth = request.cookies.get("bb-auth")?.value;
-  if (!expected || !auth || auth !== expected) {
+  if (!(await verifySessionToken(auth, expected))) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
   const response = NextResponse.next();

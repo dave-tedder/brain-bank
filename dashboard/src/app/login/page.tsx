@@ -1,13 +1,16 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { APP } from "@/config/app";
+import { signSessionToken } from "@/lib/auth";
 
 async function login(formData: FormData) {
   "use server";
   const password = formData.get("password") as string;
-  if (password === process.env.DASHBOARD_PASSWORD) {
+  const expected = process.env.DASHBOARD_PASSWORD;
+  if (expected && password === expected) {
+    const sessionToken = await signSessionToken(expected);
     const cookieStore = await cookies();
-    cookieStore.set("bb-auth", password, {
+    cookieStore.set("bb-auth", sessionToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
