@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { useOpenBrainChat } from "@/lib/useOpenBrainChat";
+import { useBrainBankChat } from "@/lib/useBrainBankChat";
 import { APP } from "@/config/app";
 
 interface ChatPanelProps {
@@ -11,7 +11,7 @@ interface ChatPanelProps {
 
 export default function ChatPanel({ open, onClose }: ChatPanelProps) {
   const { messages, input, setInput, handleSubmit, isLoading, cancel } =
-    useOpenBrainChat();
+    useBrainBankChat();
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 

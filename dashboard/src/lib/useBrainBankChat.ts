@@ -9,7 +9,7 @@ export interface ChatMessage {
   content: string;
 }
 
-export function useOpenBrainChat() {
+export function useBrainBankChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);

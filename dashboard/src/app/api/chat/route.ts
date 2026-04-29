@@ -1,6 +1,6 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
-import { searchThoughts, searchPages } from "@/lib/openBrainApi";
+import { searchThoughts, searchPages } from "@/lib/brainBankApi";
 import { APP } from "@/config/app";
 
 export const maxDuration = 30;

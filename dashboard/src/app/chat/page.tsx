@@ -1,12 +1,12 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { useOpenBrainChat } from "@/lib/useOpenBrainChat";
+import { useBrainBankChat } from "@/lib/useBrainBankChat";
 import { APP } from "@/config/app";
 
 export default function ChatPage() {
   const { messages, input, setInput, handleSubmit, isLoading } =
-    useOpenBrainChat();
+    useBrainBankChat();
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
