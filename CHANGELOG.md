@@ -10,6 +10,8 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ### Added
 
+- **`SECURITY.md` at the repo root** documents the vulnerability disclosure path, threat model, and supported-versions policy. Reports route through GitHub Security Advisories at `/security/advisories/new` so the report stays private until a fix is ready. Includes the operator-trust model: Brain Bank is designed for a single trusted operator with `MCP_ACCESS_KEY` as a shared secret; multi-tenant deployments need an upstream enforcement layer (Cloudflare Worker, API Gateway). Why this matters: GitHub auto-surfaces `SECURITY.md` in a dedicated tab on public repos and prompts security researchers toward the private-advisory flow instead of public issues, cutting the most common path for accidental zero-day disclosure.
+
 - **Dashboard merged into the monorepo at `dashboard/` via `git subtree add --squash`.** The Next.js dashboard (formerly hosted in a separate private dashboard repo) now lives inside Brain Bank as a single squashed import rather than a submodule, so a `git clone` of Brain Bank pulls the full dashboard tree in one shot. Prior dashboard history is collapsed into a single squash commit. Why this matters: operators no longer need a second repo permission or a second clone step to stand up the web UI, and future dashboard changes land as normal commits on the monorepo instead of cross-repo coordination. Follow-up work in upcoming Unreleased entries will replace the hardcoded backend URL in `dashboard/src/lib/openBrainApi.ts` with an env var, add the dashboard env vars to `.env.example`, and strip operator-specific branding from the chat system prompt.
 
 ### Changed
