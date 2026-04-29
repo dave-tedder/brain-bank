@@ -1,0 +1,24 @@
+{
+  "name": "brain-bank",
+  "owner": {
+    "name": "Dave Tedder"
+  },
+  "metadata": {
+    "description": "Brain Bank: a forkable semantic memory system with proactive digests and Karpathy-style compiled wikis. Captures from Slack, MCP, REST, Gmail, Calendar, Notion, voice, and ChatGPT GPT."
+  },
+  "plugins": [
+    {
+      "name": "brain-bank",
+      "source": "./",
+      "description": "Slash-command-driven first-deploy guide for Brain Bank operators. Installs the /brain-bank-setup skill, which walks through Supabase project creation, secret stash, schema migrations, Edge Function deployment, and end-to-end smoke verification.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Dave Tedder"
+      },
+      "homepage": "https://github.com/dave-tedder/brain-bank",
+      "repository": "https://github.com/dave-tedder/brain-bank",
+      "license": "MIT",
+      "keywords": ["semantic-memory", "supabase", "edge-functions", "rag", "deployment", "claude-code"]
+    }
+  ]
+}
