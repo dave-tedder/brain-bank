@@ -66,7 +66,7 @@ Click **Create new project** and wait about two minutes while Supabase provision
 
 Once the dashboard shows the project as ready, grab two values you will need later:
 
-1. **Project Reference ID.** Dashboard → Project Settings → General → Reference ID. Format: a 20-character lowercase string like `dvsvzlwxhmqwhmknwmdr`. This is your `<project-ref>` everywhere else in the walkthrough.
+1. **Project Reference ID.** Dashboard → Project Settings → General → Reference ID. Format: a 20-character lowercase string like `abcdefghijklmnopqrst`. This is your `<project-ref>` everywhere else in the walkthrough.
 2. **API URL.** Dashboard → Project Settings → API → Project URL. Format: `https://<project-ref>.supabase.co`.
 
 **What success looks like:** the dashboard shows a green "Healthy" status and your project ref matches the first part of the API URL.
