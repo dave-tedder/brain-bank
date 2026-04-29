@@ -7,7 +7,7 @@ async function login(formData: FormData) {
   const password = formData.get("password") as string;
   if (password === process.env.DASHBOARD_PASSWORD) {
     const cookieStore = await cookies();
-    cookieStore.set("ob-auth", password, {
+    cookieStore.set("bb-auth", password, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",

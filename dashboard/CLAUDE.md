@@ -36,7 +36,7 @@ dashboard/
 │       ├── globals.css
 │       ├── page.tsx
 │       ├── login/page.tsx      # Password form (server action)
-│       ├── logout/route.ts     # POST handler: clears ob-auth, 303 to /login
+│       ├── logout/route.ts     # POST handler: clears bb-auth, 303 to /login
 │       ├── thoughts/page.tsx
 │       ├── search/page.tsx
 │       ├── audit/page.tsx
@@ -48,8 +48,8 @@ dashboard/
 
 ## Key Files
 
-- `src/middleware.ts`: Checks `ob-auth` cookie against `DASHBOARD_PASSWORD` env var. Redirects to `/login` if the env var is unset OR the cookie is missing OR the value mismatches. **MUST live at `src/middleware.ts`, never at project root** — see Conventions.
-- `src/app/logout/route.ts`: POST-only handler. Returns 303 with `Set-Cookie: ob-auth=; Max-Age=0` and relative `Location: /login`. Triggered by the LOGOUT button in `NavSidebar`.
+- `src/middleware.ts`: Checks `bb-auth` cookie against `DASHBOARD_PASSWORD` env var. Redirects to `/login` if the env var is unset OR the cookie is missing OR the value mismatches. **MUST live at `src/middleware.ts`, never at project root** — see Conventions.
+- `src/app/logout/route.ts`: POST-only handler. Returns 303 with `Set-Cookie: bb-auth=; Max-Age=0` and relative `Location: /login`. Triggered by the LOGOUT button in `NavSidebar`.
 - `src/lib/supabase.ts`: Single server-side Supabase client using service_role key.
 - `src/app/page.tsx`: Stats dashboard. Aggregates types, topics, people, sources, 14-day activity chart.
 - `src/app/search/page.tsx`: Semantic search. Calls OpenRouter for embeddings, then match_thoughts RPC.
@@ -107,11 +107,11 @@ Uses `match_thoughts` RPC for semantic search.
 
 ## Local dev auth shortcut
 
-`middleware.ts` compares the `ob-auth` cookie value directly against `DASHBOARD_PASSWORD`. Bypass the `/login` form in local dev by setting the cookie header directly on curl:
+`middleware.ts` compares the `bb-auth` cookie value directly against `DASHBOARD_PASSWORD`. Bypass the `/login` form in local dev by setting the cookie header directly on curl:
 
 ```bash
 PW=$(grep DASHBOARD_PASSWORD .env.local | cut -d= -f2-)
-curl -s "http://localhost:3100/" -H "Cookie: ob-auth=$PW" -o /tmp/home.html
+curl -s "http://localhost:3100/" -H "Cookie: bb-auth=$PW" -o /tmp/home.html
 ```
 
 This is the reliable way to exercise authenticated routes in local dev without touching `/login`. The login page's event-handler trap (onFocus/onBlur/onMouseEnter on inputs that caused `POST /login` to 500) was fixed in PR #1 (`a65ba7c`, 2026-04-17) by stripping inline handlers and moving hover/focus styling to CSS `:hover` / `:focus` / `:active` selectors.

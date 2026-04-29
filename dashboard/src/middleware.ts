@@ -7,7 +7,7 @@ export function middleware(request: NextRequest) {
     return response;
   }
   const expected = process.env.DASHBOARD_PASSWORD;
-  const auth = request.cookies.get("ob-auth")?.value;
+  const auth = request.cookies.get("bb-auth")?.value;
   if (!expected || !auth || auth !== expected) {
     return NextResponse.redirect(new URL("/login", request.url));
   }

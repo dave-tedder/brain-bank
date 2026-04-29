@@ -5,7 +5,7 @@ export async function POST() {
     status: 303,
     headers: { Location: "/login" },
   });
-  response.cookies.set("ob-auth", "", {
+  response.cookies.set("bb-auth", "", {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
