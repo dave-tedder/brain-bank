@@ -309,8 +309,11 @@ The new row should have `source = brain-channel`.
 Manually fire the daily digest. Replace the two placeholders:
 
 ```bash
-curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/brain-digest?mode=daily&key=<your-mcp-access-key>"
+curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/brain-digest?mode=daily" \
+  -H "x-brain-key: <your-mcp-access-key>"
 ```
+
+Header auth keeps your key out of the Edge Function request log (URL-parameter auth would log the key plaintext on every fire).
 
 **What success looks like:** within ten to thirty seconds, the digest posts to `SLACK_DIGEST_CHANNEL` (or `SLACK_CAPTURE_CHANNEL` if you left the digest channel blank). The curl response body is a JSON payload like `{"status":"delivered","mode":"daily","thoughts_count":<N>,"channel":"C0123456789"}`. If the response is `{"status":"skipped","reason":"..."}`, the function ran but found nothing worth digesting today (usually because no captures since yesterday's digest); not an error.
 
@@ -318,7 +321,7 @@ curl -X POST "https://<your-project-ref>.supabase.co/functions/v1/brain-digest?m
 - **Posted in capture channel, no reply and no row in `thoughts`:** the Request URL verification passed (Step 8) but Slack is not actually forwarding messages. Check **Event Subscriptions → Subscribe to bot events** includes `message.channels`. Reinstall the app if you added events after install.
 - **Row lands but with `metadata->>'source'` blank or wrong:** the function is receiving webhook calls but is getting stuck. The Supabase Dashboard at Project → Edge Functions → `ingest-thought` → **Logs** will show the real error (often: `profile.json` missing from bundle, OpenRouter key invalid, or database insert type mismatch).
 - **Bot reply says "Failed to capture":** the database write failed. The reply text includes the Supabase error message; most common cause is a wrong service role key (re-check Step 6 of `deploy-from-scratch.md`).
-- **Digest curl returns `401 Unauthorized`:** the `key=` value does not match `MCP_ACCESS_KEY`. Re-check the value in `.env` and your curl command.
+- **Digest curl returns `401 Unauthorized`:** the `x-brain-key` header value does not match `MCP_ACCESS_KEY`. Re-check the value in `.env` and your curl command.
 - **Digest curl succeeds but no post lands in Slack:** `SLACK_DIGEST_CHANNEL` value is wrong, OR the bot has not been invited to that channel. Re-check Step 5.
 
 ---
