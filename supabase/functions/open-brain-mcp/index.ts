@@ -729,7 +729,7 @@ async function handleRestEvent(req: Request): Promise<Response> {
 // --- MCP Server Setup ---
 
 const server = new McpServer({
-  name: "open-brain",
+  name: "brain-bank",
   version: "1.0.0",
 });
 
@@ -862,7 +862,7 @@ server.registerTool(
   "capture_thought",
   {
     title: "Capture Thought",
-    description: "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client.",
+    description: "Save a new thought to Brain Bank. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client.",
     inputSchema: {
       content: z.string().describe("The thought to capture"),
     },
