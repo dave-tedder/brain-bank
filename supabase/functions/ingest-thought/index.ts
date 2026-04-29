@@ -872,7 +872,9 @@ async function handleQueryThreadReply(
       .join("\n");
 
     const synthesizedQuery = await synthesizeContextualQuery(history, replyText);
-    console.log(`Thread query synthesized: "${replyText}" → "${synthesizedQuery}"`);
+    console.log(
+      `Thread query synthesized: "${replyText.slice(0, LOG_TRUNC)}" → "${synthesizedQuery.slice(0, LOG_TRUNC)}"`,
+    );
 
     await handleQuery(synthesizedQuery, channel, threadTs, 0.3);
   } catch (err) {

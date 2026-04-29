@@ -162,7 +162,7 @@ Tap **Add to Siri** and record the phrase Siri should listen for. Suggestions:
 
 - `brain thought` (short, hard to confuse with other commands)
 - `capture thought`
-- `open brain`
+- `brain bank`
 
 Speak the phrase clearly, twice if the recording UI asks. Tap **Done**.
 
