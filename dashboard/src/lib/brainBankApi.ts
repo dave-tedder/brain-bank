@@ -1,10 +1,10 @@
-const BASE_URL = process.env.OPEN_BRAIN_URL || "";
-const API_KEY = process.env.OPEN_BRAIN_API_KEY || "";
+const BASE_URL = process.env.BRAIN_BANK_URL || "";
+const API_KEY = process.env.BRAIN_BANK_API_KEY || "";
 
 async function brainFetch(path: string): Promise<unknown> {
   if (!BASE_URL || !API_KEY) {
     console.error(
-      "brainBankApi: OPEN_BRAIN_URL and OPEN_BRAIN_API_KEY env vars are required"
+      "brainBankApi: BRAIN_BANK_URL and BRAIN_BANK_API_KEY env vars are required"
     );
     return null;
   }
