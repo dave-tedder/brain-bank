@@ -231,7 +231,7 @@ Runs at **Step 3.5**. Flows as one continuous conversation, one question per exc
 |---|---|---|---|
 | 1 | `operator.name` | "What name should the digest use when referring to you? (first name is fine, e.g., 'Dave', 'Jamie')" | Non-empty string |
 | 2 | `operator.emails` | "What email addresses are 'you'? List all: work, personal, aliases. Separate with commas." | Each segment matches `^[^@\s]+@[^@\s]+\.[^@\s]+$` |
-| 3 | `example_domain` | "What's the primary domain for your work or business? (e.g., `tedderfamilytattooing.com` or `jamiesblog.com`)" | `^[a-z0-9.-]+\.[a-z]{2,}$` |
+| 3 | `example_domain` | "What's the primary domain for your work or business? (e.g., `acmestudio.com` or `jamiesblog.com`)" | `^[a-z0-9.-]+\.[a-z]{2,}$` |
 | 4 | `example_projects` | "Name three of your active projects. Separate with commas; short names are fine." | Exactly 3 non-empty segments after split |
 | 5 | `example_person_name` | "What's a name the engine might see often in your captures? A regular client, coworker, or family member. (Just 'Firstname Lastname'.)" | Non-empty, has a space |
 | 6 | `persona.digest` | "How would you describe what you do in one short phrase? Start with 'a' or 'an'. Examples: 'a tattoo artist', 'a product manager at a healthtech startup'." | Starts with `a ` or `an ` |
