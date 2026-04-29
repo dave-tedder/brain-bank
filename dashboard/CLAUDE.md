@@ -19,7 +19,6 @@ dashboard/
 ├── package.json
 ├── postcss.config.mjs
 ├── tsconfig.json
-├── .env.example               # Required env vars
 ├── src/
 │   ├── middleware.ts          # Auth: password cookie check. MUST live here (see Conventions)
 │   ├── lib/
