@@ -47,6 +47,14 @@ cd brain-bank
 
 ## Step 2. Create a fresh Supabase project
 
+> **Free-tier project cap heads-up.** Supabase's free plan limits each organization to **2 active projects** at a time. If you already have two active projects under the same organization, **New project** will fail with a 400 / `BadRequestException`. Three ways out:
+>
+> 1. **Pause one of your existing active projects** (Dashboard → Project → Settings → Pause project). Pausing is free, instant, and reversible. Paused projects do not count toward the 2-active cap, so pausing one immediately frees a slot. Restore later from the Dashboard.
+> 2. **Upgrade to Pro** ($25/mo per organization). Removes the cap entirely.
+> 3. **Delete a project you no longer need** (Dashboard → Project → Settings → Delete project). Permanent; only do this if you're certain.
+>
+> Note: pausing differs from deleting. Paused projects retain their database, secrets, and Edge Functions and can be restored later. Deleting is irreversible.
+
 Go to [supabase.com/dashboard](https://supabase.com/dashboard), click **New project**, and fill in:
 
 - **Name:** anything you like. "brain-bank" works.
