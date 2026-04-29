@@ -100,6 +100,16 @@ brain-bank/
 
 **Skills:** Claude Code skills live in `skills/<name>/SKILL.md`. Auto-discovered when brain-bank is installed as a plugin or Claude Code runs inside a brain-bank clone.
 
+## Trust model
+
+Brain Bank assumes a **single trusted operator**. Every Edge Function endpoint is gated by a shared secret (`MCP_ACCESS_KEY` for MCP / REST, the Slack signing secret for Slack inbound), but the engine does not implement per-key rate limiting, per-tenant isolation, or quotas. A leaked key allows an attacker to write captures and read all stored thoughts until the key is rotated. The mitigations are upstream:
+
+- Set a per-month spend cap on your OpenRouter account so a leaked key cannot drain unlimited LLM credits.
+- Rotate `MCP_ACCESS_KEY` immediately if you suspect a leak (see [`docs/troubleshooting.md`](docs/troubleshooting.md) for the full rotation path).
+- Set `DASHBOARD_ORIGIN` in `.env` to your dashboard's origin (e.g. `https://brain.example.com`) to scope browser-callable origins instead of the open `*` default.
+
+If you intend to expose Brain Bank to multiple users or untrusted callers, place a Cloudflare Worker, API Gateway, or similar enforcement layer in front of the Edge Functions. The full threat model is documented in [`SECURITY.md`](SECURITY.md), and security reports go through GitHub Security Advisories.
+
 ## Status
 
 **Pre-release.** The engine is deployed and running in a live personal instance. The public deploy walkthrough ([`docs/deploy-from-scratch.md`](docs/deploy-from-scratch.md)) is being polished against a fresh Supabase project. Until that verification is complete, expect to hit bumps when following the quickstart above. Once the walkthrough runs cleanly end-to-end, this repo flips public and gets a `v0.1.0` tag.

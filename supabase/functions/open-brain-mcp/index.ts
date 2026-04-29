@@ -490,8 +490,15 @@ async function postCaptureHook(
 
 // --- REST API helpers (for ChatGPT custom GPT Actions) ---
 
+// Defense-in-depth: if the operator deploys a browser-based dashboard at a
+// known origin, set DASHBOARD_ORIGIN to that origin (e.g. "https://brain.example.com")
+// to scope browser-callable origins instead of accepting any. Falls back to "*"
+// when unset so the existing MCP / REST / ChatGPT GPT flows (none of which go
+// through a browser CORS preflight) keep working out of the box. Real auth
+// gating still happens via x-brain-key on every request; tightening CORS only
+// closes the leaked-key + malicious-origin browser-exfiltration vector.
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": Deno.env.get("DASHBOARD_ORIGIN") || "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, x-brain-key",
 };
