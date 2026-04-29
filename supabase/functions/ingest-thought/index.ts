@@ -585,7 +585,7 @@ For each match you return, the "reason" field must quote the specific phrase in 
   // Jaccard ≥ QUOTE_OVERLAP_THRESHOLD). Blocks umbrella-item FPs where
   // the quote is a truthful past-tense completion of a SPECIFIC subtask
   // but the candidate description is BROAD (e.g., "rotate 4 live secrets"
-  // resolved by "Notion token rotation COMPLETE"). Session 55/56 bug.
+  // resolved by "Notion token rotation COMPLETE").
   const resolvedDescriptions: string[] = [];
   // shared across the batch — intentional, do not move inside loop
   const now = new Date().toISOString();

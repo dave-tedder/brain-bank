@@ -1,7 +1,7 @@
 // JSON module import (Deno 2.x stable). Creates a module-graph edge so the
 // Supabase CLI bundler uploads profile.json alongside this file. A runtime
 // Deno.readTextFileSync() would leave profile.json out of the deploy bundle
-// and crash at module-load time (Session 79 incident).
+// and crash at module-load time.
 import profileDefaults from "./profile.json" with { type: "json" };
 
 export interface Profile {
