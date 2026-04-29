@@ -1,12 +1,12 @@
-# Open Brain Dashboard
+# Brain Bank Dashboard
 
-Internal Next.js dashboard for browsing, searching, and auditing the Open Brain semantic memory system. Single-user, password-protected.
+Internal Next.js dashboard for browsing, searching, and auditing the Brain Bank semantic memory system. Single-user, password-protected.
 
 ## Tech Stack
 
 - **Framework:** Next.js 15, App Router, React 19
 - **Styling:** Tailwind CSS 4
-- **Database:** Supabase (shared with Open Brain core)
+- **Database:** Supabase (shared with the Brain Bank engine)
 - **Hosting:** Railway (standalone output mode)
 - **Auth:** Simple password gate via middleware cookie
 
@@ -58,7 +58,7 @@ dashboard/
 - `src/app/clients/[id]/page.tsx`: Client detail with session history table and cross-referenced thoughts from metadata.people.
 - `src/lib/digest.ts`: Server-only digest helpers. `getLatestDigest(type)`, `getDigestByDate(date, type)`, `listDigests({type,limit,offset})`, `getAdjacentDigests(date,type)`, `resolveClientLinks(metadata)`. `listDigests` throws on real DB errors; archive page try/catches to distinguish empty vs fetch failure.
 - `src/components/DigestHeroCard.tsx`: Server component, renders four states — (a) `today` (ASCII-framed digest with truncated markdown + `READ FULL DIGEST >` link), (b) `pending` (pre-6 AM ET amber `[PENDING]` tag + latest fallback), (c) `empty` (`[EMPTY]`), (d) `error` (red `[ERROR]`). Uses ClickableCard-style overlay-link pattern inline (no `onClick` handlers; see `~/.claude/rules/nextjs-server-components.md`).
-- `src/components/DigestMarkdown.tsx`: Client component wrapping `react-markdown` + `remark-gfm`. Neural-terminal component overrides (VT323 headers, IBM Plex Mono body, tree-character lists, `[REF :: <name>]` phosphor chips for `/clients/<id>` links). `linkifyClients()` pre-processes markdown with a case-insensitive regex to wrap client-name matches in chip anchors; passes the matched text through so case variants in prose ("Jane Doe" vs canonical "Jane Doe") still render naturally.
+- `src/components/DigestMarkdown.tsx`: Client component wrapping `react-markdown` + `remark-gfm`. Neural-terminal component overrides (VT323 headers, IBM Plex Mono body, tree-character lists, `[REF :: <name>]` phosphor chips for `/clients/<id>` links). `linkifyClients()` pre-processes markdown with a case-insensitive regex to wrap client-name matches in chip anchors; passes the matched text through so case variants in prose (e.g., "jane doe" vs canonical "Jane Doe") still render naturally.
 - `src/app/digest/page.tsx`: Archive. `?type=daily|weekly` tabs, paginated via `?offset=N`. Differentiates "fetch failed" (DB error) from "no entries" (cron not running / wrong type) in the terminal log.
 - `src/app/digest/[date]/page.tsx`: Detail. `getDigestByDate(date, type)` → 404 if null. `resolveClientLinks()` looks up `metadata.referenced_client_names` against the `clients` table and passes matched pairs to `DigestMarkdown` for auto-linking.
 
@@ -83,13 +83,13 @@ Railway deployment: push to repo, Railway auto-builds. Needs env vars set in Rai
 
 ## Database Access
 
-Reads from the Open Brain Supabase project (read-only from dashboard):
-- `thoughts`: Core brain content
-- `clients`: Client profiles
-- `client_sessions`: Tattoo session records (unused by dashboard as of Session 37, 2026-04-14)
-- `action_items`: Open/resolved tracked actions
+Reads from the Brain Bank Supabase project (read-only from the dashboard):
+- `thoughts`: core captured content
+- `clients`: client profiles
+- `client_sessions`: per-operator session records (unused by the dashboard; reserved for future surfaces)
+- `action_items`: open / resolved tracked actions
 - `compiled_pages`: Karpathy-style wiki pages
-- `digests`: Persisted daily/weekly digest markdown + metadata (populated by the brain-digest Edge Function; powers the hero card, `/digest` archive, `/digest/[date]` detail)
+- `digests`: persisted daily / weekly digest markdown + metadata (populated by the brain-digest Edge Function; powers the hero card, `/digest` archive, `/digest/[date]` detail)
 
 Uses `match_thoughts` RPC for semantic search.
 
