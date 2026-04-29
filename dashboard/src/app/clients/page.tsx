@@ -22,14 +22,6 @@ export default async function ClientsPage({ searchParams }: Props) {
 
   const { data: clients } = await q;
 
-  const { data: sessions } = await supabase()
-    .from("client_sessions")
-    .select("client_id");
-  const sessionCounts: Record<string, number> = {};
-  for (const s of sessions || []) {
-    sessionCounts[s.client_id] = (sessionCounts[s.client_id] || 0) + 1;
-  }
-
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -112,12 +104,6 @@ export default async function ClientsPage({ searchParams }: Props) {
                   </div>
                 </div>
                 <div className="flex items-center gap-4 text-xs text-[var(--text-muted)] font-mono">
-                  {sessionCounts[c.id] && (
-                    <span className="bg-[var(--accent-dim)] px-2.5 py-1 rounded-[var(--radius-sm)] border border-[var(--border)]">
-                      {sessionCounts[c.id]} session
-                      {sessionCounts[c.id] > 1 ? "s" : ""}
-                    </span>
-                  )}
                   {c.last_contact && (
                     <span className="tabular-nums">
                       {new Date(c.last_contact).toLocaleDateString("en-US", {

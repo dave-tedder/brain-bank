@@ -1008,7 +1008,7 @@ server.registerTool(
   {
     title: "Client Context",
     description:
-      `Get full context on a client: profile, session history, and related brain thoughts. Use before a ${loadProfile().domain.singular_noun} or when a client reaches out.`,
+      `Get full context on a client: profile and related brain thoughts. Use before a ${loadProfile().domain.singular_noun} or when a client reaches out.`,
     inputSchema: {
       client_id: z.string().optional().describe("Client UUID (if known)"),
       name: z.string().optional().describe("Client name (used if client_id not provided)"),
@@ -1046,14 +1046,6 @@ server.registerTool(
         }
         client = data[0];
       }
-
-      // Get session history
-      const { data: sessions } = await supabase
-        .from("client_sessions")
-        .select("*")
-        .eq("client_id", client.id)
-        .order("session_date", { ascending: false })
-        .limit(20);
 
       // Cross-reference thoughts table for mentions of this client's name
       const clientNameParts = client.name.split(" ");
@@ -1109,22 +1101,6 @@ server.registerTool(
       if (client.first_contact) lines.push(`First contact: ${new Date(client.first_contact).toLocaleDateString()}`);
       if (client.last_contact) lines.push(`Last contact: ${new Date(client.last_contact).toLocaleDateString()}`);
 
-      // Sessions
-      if (sessions && sessions.length > 0) {
-        lines.push("", "## Session History");
-        for (const s of sessions) {
-          const parts = [`${s.session_date || "No date"} - ${s.status}`];
-          if (s.piece_description) parts.push(`Piece: ${s.piece_description}`);
-          if (s.placement) parts.push(`Placement: ${s.placement}`);
-          if (s.style) parts.push(`Style: ${s.style}`);
-          if (s.duration_hours) parts.push(`Duration: ${s.duration_hours}h`);
-          if (s.notes) parts.push(`Notes: ${s.notes}`);
-          lines.push(parts.join(" | "));
-        }
-      } else {
-        lines.push("", "No session history yet.");
-      }
-
       // Related thoughts
       if (uniqueThoughts.length > 0) {
         lines.push("", "## Related Brain Thoughts");
@@ -1136,93 +1112,6 @@ server.registerTool(
       }
 
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
-    } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
-    }
-  }
-);
-
-server.registerTool(
-  "log_session",
-  {
-    title: `Log ${titleCase(loadProfile().domain.singular_noun)}`,
-    description:
-      `Record a ${loadProfile().domain.singular_noun} for a client. Updates the client's last_contact date automatically.`,
-    inputSchema: {
-      client_id: z.string().optional().describe("Client UUID (if known)"),
-      client_name: z.string().optional().describe("Client name (used if client_id not provided)"),
-      session_date: z.string().optional().describe("Date of session YYYY-MM-DD (defaults to today)"),
-      duration_hours: z.number().optional().describe("Session duration in hours"),
-      piece_description: z.string().optional().describe("Description of the work performed"),
-      placement: z.string().optional().describe("Body placement"),
-      style: z.string().optional().describe("Style"),
-      status: z
-        .enum(["scheduled", "completed", "cancelled", "no-show"])
-        .optional()
-        .default("completed")
-        .describe("Session status"),
-      notes: z.string().optional().describe("Session notes"),
-    },
-  },
-  async ({ client_id, client_name, session_date, duration_hours, piece_description, placement, style, status, notes }) => {
-    try {
-      if (!client_id && !client_name) {
-        return {
-          content: [{ type: "text" as const, text: "Provide either client_id or client_name." }],
-          isError: true,
-        };
-      }
-
-      // Resolve client
-      let resolvedId = client_id;
-      let resolvedName = client_name;
-      if (!resolvedId) {
-        const { data } = await supabase
-          .from("clients")
-          .select("id, name")
-          .ilike("name", `%${client_name}%`)
-          .limit(1);
-        if (!data?.length) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `No client found matching "${client_name}". Use add_client first.`,
-              },
-            ],
-          };
-        }
-        resolvedId = data[0].id;
-        resolvedName = data[0].name;
-      }
-
-      const dateStr = session_date || new Date().toISOString().split("T")[0];
-      const record: Record<string, unknown> = {
-        client_id: resolvedId,
-        session_date: dateStr,
-        status: status || "completed",
-      };
-      if (duration_hours) record.duration_hours = duration_hours;
-      if (piece_description) record.piece_description = piece_description;
-      if (placement) record.placement = placement;
-      if (style) record.style = style;
-      if (notes) record.notes = notes;
-
-      const { error } = await supabase.from("client_sessions").insert(record);
-      if (error) {
-        return { content: [{ type: "text" as const, text: `Failed to log session: ${error.message}` }], isError: true };
-      }
-
-      // Update client's last_contact
-      await supabase
-        .from("clients")
-        .update({ last_contact: new Date(dateStr).toISOString() })
-        .eq("id", resolvedId);
-
-      let msg = `Session logged for ${resolvedName || resolvedId} on ${dateStr} (${status || "completed"}).`;
-      if (piece_description) msg += ` Piece: ${piece_description}.`;
-      if (placement) msg += ` Placement: ${placement}.`;
-      return { content: [{ type: "text" as const, text: msg }] };
     } catch (err: unknown) {
       return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
     }
@@ -1585,14 +1474,6 @@ server.registerTool(
         .select("*", { count: "exact", head: true })
         .gte("last_contact", thirtyDaysAgo.toISOString());
 
-      // Recent sessions
-      const { data: recentSessions } = await supabase
-        .from("client_sessions")
-        .select("session_date, status, piece_description, client_id")
-        .gte("session_date", thirtyAgoStr)
-        .order("session_date", { ascending: false })
-        .limit(10);
-
       // Content pipeline counts by stage
       const { data: contentItems } = await supabase
         .from("content_items")
@@ -1612,14 +1493,6 @@ server.registerTool(
 
       // Clients
       lines.push(`\nClients: ${totalClients || 0} total, ${activeClients || 0} active (last 30 days)`);
-
-      // Recent sessions
-      if (recentSessions?.length) {
-        lines.push(`\nRecent sessions (last 30 days): ${recentSessions.length}`);
-        for (const s of recentSessions.slice(0, 5)) {
-          lines.push(`  ${s.session_date} - ${s.status}${s.piece_description ? ": " + s.piece_description : ""}`);
-        }
-      }
 
       // Content pipeline
       if (Object.keys(stageCounts).length > 0) {
@@ -1653,7 +1526,7 @@ server.registerTool(
   {
     title: "Full Context",
     description:
-      "Get everything the brain knows about a person, topic, or subject. Searches across all tables: thoughts, clients, sessions, content, and events. Use this before a client meeting, when preparing for a convention, or when you need the complete picture on anything.",
+      "Get everything the brain knows about a person, topic, or subject. Searches across all tables: thoughts, clients, content, and events. Use this before a client meeting, when preparing for a convention, or when you need the complete picture on anything.",
     inputSchema: {
       query: z.string().describe("Person name, topic, or subject to look up"),
     },
@@ -1714,20 +1587,9 @@ server.registerTool(
         .ilike("name", `%${query}%`)
         .limit(5);
 
-      // 3. Sessions for matched clients
       const clientIds = (clients || []).map((c) => c.id);
-      let sessions: Record<string, unknown>[] = [];
-      if (clientIds.length > 0) {
-        const { data } = await supabase
-          .from("client_sessions")
-          .select("*")
-          .in("client_id", clientIds)
-          .order("session_date", { ascending: false })
-          .limit(10);
-        sessions = data || [];
-      }
 
-      // 4. Content items matching query in title, subject, or linked to matched clients
+      // 3. Content items matching query in title, subject, or linked to matched clients
       const { data: contentBySubject } = await supabase
         .from("content_items")
         .select("*")
@@ -1753,7 +1615,7 @@ server.registerTool(
       }
       const allContent = Array.from(contentMap.values()).slice(0, 10);
 
-      // 5. Business events matching query
+      // 4. Business events matching query
       const { data: events } = await supabase
         .from("business_events")
         .select("*")
@@ -1773,19 +1635,6 @@ server.registerTool(
           if (c.notes) lines.push(`Notes: ${c.notes}`);
           if (c.last_contact) lines.push(`Last contact: ${new Date(c.last_contact).toLocaleDateString()}`);
           sections.push(lines.join("\n"));
-        }
-      }
-
-      if (sessions.length > 0) {
-        sections.push("\n### Session History");
-        for (const s of sessions as { session_date: string; status: string; piece_description?: string; placement?: string; style?: string; duration_hours?: number; notes?: string }[]) {
-          const parts = [`${s.session_date || "TBD"} - ${s.status}`];
-          if (s.piece_description) parts.push(`| ${s.piece_description}`);
-          if (s.placement) parts.push(`| ${s.placement}`);
-          if (s.style) parts.push(`| ${s.style}`);
-          if (s.duration_hours) parts.push(`| ${s.duration_hours}h`);
-          if (s.notes) parts.push(`| ${s.notes}`);
-          sections.push(parts.join(" "));
         }
       }
 
@@ -1827,7 +1676,6 @@ server.registerTool(
       // Summary line
       const counts = [
         clients?.length ? `${clients.length} client(s)` : null,
-        sessions.length ? `${sessions.length} session(s)` : null,
         allContent.length ? `${allContent.length} content item(s)` : null,
         events?.length ? `${events.length} event(s)` : null,
         allThoughts.length ? `${allThoughts.length} thought(s)` : null,

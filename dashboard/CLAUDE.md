@@ -85,7 +85,6 @@ Railway deployment: push to repo, Railway auto-builds. Needs env vars set in Rai
 Reads from the Brain Bank Supabase project (read-only from the dashboard):
 - `thoughts`: core captured content
 - `clients`: client profiles
-- `client_sessions`: per-operator session records (unused by the dashboard; reserved for future surfaces)
 - `action_items`: open / resolved tracked actions
 - `compiled_pages`: Karpathy-style wiki pages
 - `digests`: persisted daily / weekly digest markdown + metadata (populated by the brain-digest Edge Function; powers the hero card, `/digest` archive, `/digest/[date]` detail)

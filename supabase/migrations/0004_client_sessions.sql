@@ -1,8 +1,7 @@
 -- 0004_client_sessions.sql
--- Deprecated in the live Open Brain deployment (0 rows, no active population
--- path). Kept in the schema for schema-completeness and because operators
--- may wire up their own population from the MCP `log_session` tool. No
--- updated_at column — sessions are append-only event records.
+-- This table was dropped in 0011_drop_client_sessions.sql. The migration is
+-- kept in place so the migration sequence stays continuous and existing
+-- deploys retain a complete schema_migrations history.
 
 CREATE TABLE public.client_sessions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

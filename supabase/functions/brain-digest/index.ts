@@ -442,26 +442,8 @@ async function gatherExtensionContext(
       sections.push(`No events scheduled for TODAY (${today}) or the coming week.`);
     }
 
-    // Recent sessions (last 1-7 days)
     const sessionSince = new Date();
     sessionSince.setDate(sessionSince.getDate() - lookBack);
-    const { data: sessions } = await supabase
-      .from("client_sessions")
-      .select("session_date, status, piece_description, placement, style")
-      .gte("session_date", sessionSince.toISOString().split("T")[0])
-      .order("session_date", { ascending: false })
-      .limit(10);
-
-    if (sessions?.length) {
-      sections.push(`Recent ${loadProfile().domain.plural_noun}:`);
-      for (const s of sessions) {
-        const parts = [`  ${s.session_date} (${s.status})`];
-        if (s.piece_description) parts.push(s.piece_description);
-        if (s.placement) parts.push(`on ${s.placement}`);
-        if (s.style) parts.push(`[${s.style}]`);
-        sections.push(parts.join(" - "));
-      }
-    }
 
     // Daily mode: pre-appointment briefings with client context
     if (mode === "daily") {
@@ -613,44 +595,6 @@ async function gatherExtensionContext(
             sections.push("Related Notion intake for today's appointments:");
             sections.push(...matchedIntake.slice(0, 5));
           }
-        }
-      }
-    }
-
-    // Upcoming client sessions (next 7 days, weekly mode)
-    if (mode === "weekly") {
-      const upcomingUntil = new Date();
-      upcomingUntil.setDate(upcomingUntil.getDate() + 7);
-      const { data: upcomingSessions } = await supabase
-        .from("client_sessions")
-        .select("session_date, piece_description, placement, style, client_id")
-        .gte("session_date", today)
-        .lte("session_date", upcomingUntil.toISOString().split("T")[0])
-        .order("session_date", { ascending: true })
-        .limit(10);
-
-      if (upcomingSessions?.length) {
-        // Fetch client names for matched sessions
-        const clientIds = [...new Set(upcomingSessions.map((s) => s.client_id).filter(Boolean))];
-        let clientNames: Record<string, string> = {};
-        if (clientIds.length > 0) {
-          const { data: clients } = await supabase
-            .from("clients")
-            .select("id, name")
-            .in("id", clientIds);
-          if (clients) {
-            clientNames = Object.fromEntries(clients.map((c) => [c.id, c.name]));
-          }
-        }
-
-        sections.push("Upcoming sessions (next 7 days):");
-        for (const s of upcomingSessions) {
-          const name = s.client_id ? clientNames[s.client_id] || "unknown client" : "no client linked";
-          const parts = [`  ${s.session_date} - ${name}`];
-          if (s.piece_description) parts.push(s.piece_description);
-          if (s.placement) parts.push(`on ${s.placement}`);
-          if (s.style) parts.push(`[${s.style}]`);
-          sections.push(parts.join(" - "));
         }
       }
     }
