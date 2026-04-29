@@ -510,6 +510,19 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
+// Hard caps on user-supplied string lengths in REST handler bodies. The
+// thought `content` field gets a generous cap because operators paste long
+// passages and full meeting transcripts; small string fields (name, title,
+// notes, etc.) get a tight cap so a single curl can't pump megabytes of
+// text into a paid LLM call. Real auth still gates access via x-brain-key;
+// these caps are defense against a leaked key spending unbounded credits.
+const MAX_CONTENT_LENGTH = 32_000;
+const MAX_FIELD_LENGTH = 1_000;
+
+function tooLong(value: unknown, max: number): boolean {
+  return typeof value === "string" && value.length > max;
+}
+
 async function handleRestSearch(url: URL): Promise<Response> {
   const query = url.searchParams.get("query");
   if (!query) return jsonResponse({ error: "query parameter required" }, 400);
@@ -606,6 +619,9 @@ async function handleRestCapture(req: Request): Promise<Response> {
     const body = await req.json();
     const content = body?.content;
     if (!content || typeof content !== "string") return jsonResponse({ error: "content field required" }, 400);
+    if (tooLong(content, MAX_CONTENT_LENGTH)) {
+      return jsonResponse({ error: `content exceeds ${MAX_CONTENT_LENGTH} chars` }, 413);
+    }
     const source = typeof body?.source === "string" && body.source.length > 0 ? body.source : "chatgpt";
     const hash = await contentHash(content);
     if (await isDuplicate(hash)) return jsonResponse({ status: "duplicate", message: "Already in the brain." });
@@ -635,6 +651,11 @@ async function handleRestClient(req: Request): Promise<Response> {
     const body = await req.json();
     const { name, email, phone, instagram, preferred_styles, notes, first_contact, last_contact } = body || {};
     if (!name || typeof name !== "string") return jsonResponse({ error: "name field required" }, 400);
+    for (const [field, value] of Object.entries({ name, email, phone, instagram, notes })) {
+      if (tooLong(value, MAX_FIELD_LENGTH)) {
+        return jsonResponse({ error: `${field} exceeds ${MAX_FIELD_LENGTH} chars` }, 413);
+      }
+    }
 
     // Check if client with same name already exists (case-insensitive)
     const { data: existing } = await supabase
@@ -684,6 +705,11 @@ async function handleRestEvent(req: Request): Promise<Response> {
     const body = await req.json();
     const { title, event_type, date_start, date_end, location, notes, metadata } = body || {};
     if (!title || typeof title !== "string") return jsonResponse({ error: "title field required" }, 400);
+    for (const [field, value] of Object.entries({ title, event_type, location, notes })) {
+      if (tooLong(value, MAX_FIELD_LENGTH)) {
+        return jsonResponse({ error: `${field} exceeds ${MAX_FIELD_LENGTH} chars` }, 413);
+      }
+    }
 
     // Upsert by Google Calendar event ID if provided
     const gcalId = metadata?.gcal_event_id;
