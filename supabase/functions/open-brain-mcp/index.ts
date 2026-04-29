@@ -344,8 +344,9 @@ async function checkAutoResolve(
   // LAYER 1.5: restatement guard. If the new thought's own extracted action_items
   // are semantically similar to a candidate's description, the new thought is
   // RE-CAPTURING that work, not completing it. Drop those candidates before the
-  // LLM sees them. Prevents the classic "Dave says 'I really need to research
-  // Virginia permits'" case where the LLM reads topical overlap as completion.
+  // LLM sees them. Prevents the classic "I really need to research X" capture
+  // from being mistakenly read as completion of a pending action item just
+  // because both share topical vocabulary.
   const newOwnActionItemsRaw = newMetadata?.action_items;
   const newOwnActionItems: string[] = Array.isArray(newOwnActionItemsRaw)
     ? (newOwnActionItemsRaw as unknown[]).map((x) => String(x))
