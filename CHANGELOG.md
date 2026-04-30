@@ -8,6 +8,8 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-04-29
+
 ### Added
 
 - **`README.md` Trust model section** documenting the single-trusted-operator threat model, the `OpenRouter spend cap` + `key rotation` + `DASHBOARD_ORIGIN scoping` mitigations, and the upstream-enforcement-layer (Cloudflare Worker, API Gateway) recommendation for multi-tenant deployments. Forward-links to `SECURITY.md` for the full threat model and `docs/troubleshooting.md` for the key rotation recipe. Closes audit F#C16.
@@ -101,5 +103,6 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 - This is a pre-release. The engine is live for the author, but the deploy-from-scratch walkthrough (`docs/deploy-from-scratch.md`) is still being written. The first tagged release (`v0.1.0`) ships once a friend deploys successfully from a cold clone using only the shipped docs.
 - The dashboard (Next.js on Railway) is still a separate private repo. It will merge into `dashboard/` via `git subtree add` during Phase 5, after which dashboard env vars get added to `.env.example`.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.1.0-pre...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0
 [0.1.0-pre]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0-pre
