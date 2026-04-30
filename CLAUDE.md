@@ -4,7 +4,7 @@ Personal semantic memory system. Captures thoughts from multiple sources (Slack,
 
 ## Current Status
 
-**Pre-release (v0.1.0 imminent).** All four Edge Functions and the Next.js dashboard are merged into this monorepo and verified end-to-end against fresh-deploy throwaway Supabase projects. Adversarial pre-public audit completed; the resulting BLOCKER fixes are landing on `dev` ahead of the `v0.1.0` tag. `CHANGELOG.md` is the source of truth: `[Unreleased]` covers in-flight work, dated sections cover shipped releases.
+**v0.1.0 shipped 2026-04-30.** Repo is public. The four Edge Functions and the Next.js dashboard are merged into this monorepo and verified end-to-end against fresh-deploy throwaway Supabase projects. Pre-public adversarial audit findings (BLOCKERs, HIGHs, MEDIUMs, LOWs) all landed before the visibility flip. Going forward, `CHANGELOG.md` is the source of truth. `[Unreleased]` covers in-flight work, dated sections cover shipped releases. New work branches from `dev`; `main` carries tagged releases only.
 
 ## Tech Stack
 

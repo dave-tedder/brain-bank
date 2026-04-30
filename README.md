@@ -112,7 +112,7 @@ If you intend to expose Brain Bank to multiple users or untrusted callers, place
 
 ## Status
 
-**Pre-release.** The engine is deployed and running in a live personal instance. The public deploy walkthrough ([`docs/deploy-from-scratch.md`](docs/deploy-from-scratch.md)) is being polished against a fresh Supabase project. Until that verification is complete, expect to hit bumps when following the quickstart above. Once the walkthrough runs cleanly end-to-end, this repo flips public and gets a `v0.1.0` tag.
+**v0.1.0** (2026-04-30): first public release. The engine and dashboard run in a live personal instance, and [`docs/deploy-from-scratch.md`](docs/deploy-from-scratch.md) has been verified end-to-end against fresh Supabase projects. Solo-maintained, so expect to hit edge cases off the documented happy path. Pin to the `v0.1.0` tag rather than `main` if you want a stable target; `main` advances as new work lands.
 
 ## Inspired by
 
