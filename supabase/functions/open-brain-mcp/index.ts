@@ -761,17 +761,32 @@ async function handleRestEvent(req: Request): Promise<Response> {
 
 // --- MCP Server Setup ---
 
-const server = new McpServer({
-  name: "brain-bank",
-  version: "1.0.0",
-});
+const server = new McpServer(
+  {
+    name: "brain-bank",
+    version: "1.0.0",
+  },
+  {
+    instructions: `# Open Brain — How to use these tools
+
+Open Brain exposes two retrieval surfaces. Choose based on the shape of the question.
+
+**Wiki (compiled pages)** — \`get_compiled_page\`, \`search_compiled_pages\`, \`list_compiled_pages\`. Pre-synthesized markdown reference docs about specific entities: a client, a topic, a project. One page per entity, regenerated daily, plus a read-time tail of activity captured since the last compile. Use the wiki when the question is entity-shaped: "what do we know about Sarah?", "what's our position on Japanese irezumi sleeves?", "where are we with the Phoenix project?". The wiki gives you a synthesized summary in one call instead of forcing you to re-read 50 raw thoughts.
+
+**Thoughts (raw captures)** — \`search_thoughts\`, \`list_thoughts\`. Individual captured moments: an email, a note, a Slack message, a calendar event. Use thoughts when the question is moment-shaped: "what did I think about that estimate yesterday?", "did anyone DM about the booth?", "find the message where we agreed on color palette". Wiki pages don't preserve the texture of an individual moment; thoughts do.
+
+**Drill between them.** Wiki pages list the thought IDs that contributed to them in a "Sources" section. When the wiki gives you a synthesized fact and you need the underlying capture, follow the citation — \`get_thought_by_id\` returns the raw thought. Going the other way: a raw thought matching a known entity is summarized into that entity's wiki page on the next compile run.
+
+**Default heuristic.** Try \`search_compiled_pages\` or \`get_compiled_page\` first when a known entity is named in the question. Fall back to \`search_thoughts\` if no compiled page exists or if the question is moment-shaped.`,
+  }
+);
 
 server.registerTool(
   "search_thoughts",
   {
     title: "Search Thoughts",
     description:
-      "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea they've previously captured.",
+      "Semantic vector search across all captured raw thoughts. Use this when the question is moment-shaped ('what did I write about X yesterday?', 'find the message where Y was decided'). For entity-shaped questions about a known client / topic / project, prefer `get_compiled_page` or `search_compiled_pages` first — those return synthesized summaries instead of forcing you to re-read individual captures.",
     inputSchema: {
       query: z.string().describe("What to search for"),
       limit: z.number().optional().default(10),
@@ -1734,7 +1749,7 @@ server.registerTool(
   {
     title: "Get Compiled Page",
     description:
-      "Read a pre-synthesized wiki page by slug or by name and type. Compiled pages are persistent reference documents maintained by the digest engine. Use this for client context, topic overviews, or project summaries instead of searching raw thoughts.",
+      "Read a pre-synthesized wiki page about a known entity (client, topic, or project). **Prefer this over `search_thoughts` when the question is entity-shaped** ('what do we know about X?', 'what's our history with Y?'). Returns synthesized markdown plus a tail of new activity captured since the last compile. After Phase 12.D, includes a 'Sources' section with thought IDs you can drill into via `get_thought_by_id`. If no compiled page exists, fall back to `search_thoughts`.",
     inputSchema: {
       slug: z.string().optional().describe(`Page slug, e.g. 'client/${slugify(loadProfile().example_person_name)}' or 'topic/${slugify(loadProfile().domain.vocabulary[0])}'`),
       name: z.string().optional().describe("Page title to search for (used if slug not provided)"),
@@ -1828,7 +1843,7 @@ server.registerTool(
   {
     title: "Search Compiled Pages",
     description:
-      "Search wiki pages by keyword in title or content. Returns page summaries, not full content. Use to find which compiled pages exist on a subject.",
+      "Find which wiki pages exist on a subject. Returns titles + 150-char previews (use `get_compiled_page` for full content). **Prefer this over `search_thoughts` when you want to know whether an entity is written up at all** ('is there a page on X?', 'what topics have I been logging about?').",
     inputSchema: {
       query: z.string().describe("Search term"),
       page_type: z.string().optional().describe("Filter by type: client, topic, project"),
@@ -1867,7 +1882,7 @@ server.registerTool(
   {
     title: "List Compiled Pages",
     description:
-      "List all wiki pages, optionally filtered by type. Shows titles, types, and compilation status.",
+      "Browse the wiki's full table of contents, optionally filtered by type (client / topic / project / index). **Use this for orientation when starting a session** — gives a one-screen view of every entity the wiki tracks. For a curated narrative version, get the page at slug `index/wiki` (auto-compiled).",
     inputSchema: {
       page_type: z.string().optional().describe("Filter by type: client, topic, project"),
       limit: z.number().optional().default(50),

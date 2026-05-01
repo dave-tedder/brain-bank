@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Brain Bank API",
-    "description": "Semantic memory layer. Search, browse, and capture thoughts.",
+    "description": "Semantic memory layer with two retrieval surfaces. Use /pages for entity-shaped queries (synthesized wiki) and /search for moment-shaped queries (raw thoughts). Drill from a wiki page's source thought IDs back to raw thoughts via /search?id=<uuid> (planned, see Phase 12.D).",
     "version": "1.0.0"
   },
   "servers": [
@@ -176,6 +176,91 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/pages": {
+      "get": {
+        "operationId": "getCompiledPages",
+        "summary": "Read or list wiki pages",
+        "description": "When `slug` is provided, returns the full page content for that slug. Otherwise lists pages, optionally filtered by `type` and/or `query` (keyword in title or content). Prefer this over /search for entity-shaped queries about a known client, topic, or project.",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Page slug, e.g. 'client/jane-doe' or 'topic/japanese-irezumi'. If provided, returns the full single page; other params are ignored."
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["client", "topic", "project", "index"]
+            },
+            "description": "Filter list results by page type."
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" },
+            "description": "Filter list results by keyword in title or content."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" },
+            "description": "Max list results (default 20)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page content (when slug provided) or list of pages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "slug": { "type": "string" },
+                        "title": { "type": "string" },
+                        "page_type": { "type": "string" },
+                        "content": { "type": "string" },
+                        "backlinks": { "type": "array", "items": { "type": "string" } },
+                        "last_compiled": { "type": "string", "format": "date-time" }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "count": { "type": "integer" },
+                        "pages": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "slug": { "type": "string" },
+                              "title": { "type": "string" },
+                              "page_type": { "type": "string" },
+                              "last_compiled": { "type": "string", "format": "date-time" }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No page found for the provided slug."
           }
         }
       }
