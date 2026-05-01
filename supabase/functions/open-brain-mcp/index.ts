@@ -872,6 +872,54 @@ server.registerTool(
 );
 
 server.registerTool(
+  "get_thought_by_id",
+  {
+    title: "Get Thought By ID",
+    description:
+      "Fetch a single raw thought by its UUID. **Use this when drilling from a wiki page's 'Sources' section to inspect the original capture** — the get_compiled_page output lists the source thought IDs and this tool reads them back. Returns the full content + metadata + capture date + source.",
+    inputSchema: {
+      id: z.string().describe("Thought UUID. Get these from the 'Sources' section of a get_compiled_page response."),
+    },
+  },
+  async ({ id }) => {
+    try {
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(id)) {
+        return {
+          content: [{ type: "text" as const, text: `Invalid thought ID format. Expected a UUID; got "${id}".` }],
+          isError: true,
+        };
+      }
+      const { data, error } = await supabase
+        .from("thoughts")
+        .select("id, content, metadata, created_at")
+        .eq("id", id)
+        .single();
+      if (error || !data) {
+        return { content: [{ type: "text" as const, text: `No thought found with id "${id}".` }] };
+      }
+      const m = (data.metadata || {}) as Record<string, unknown>;
+      const parts = [
+        `## Thought ${data.id}`,
+        `Captured: ${new Date(data.created_at).toLocaleString()}`,
+        `Source: ${(m.source as string) || "unknown"}`,
+        `Type: ${m.type || "unknown"}`,
+      ];
+      if (Array.isArray(m.topics) && m.topics.length) parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+      if (Array.isArray(m.people) && m.people.length) parts.push(`People: ${(m.people as string[]).join(", ")}`);
+      if (m.project) parts.push(`Project: ${m.project}`);
+      if (Array.isArray(m.action_items) && m.action_items.length) {
+        parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
+      }
+      parts.push("", data.content);
+      return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
   "thought_stats",
   {
     title: "Thought Statistics",
@@ -1766,7 +1814,7 @@ server.registerTool(
       if (slug) {
         const { data, error } = await supabase
           .from("compiled_pages")
-          .select("slug, title, page_type, content, backlinks, last_compiled")
+          .select("slug, title, page_type, content, backlinks, last_compiled, source_thought_ids")
           .eq("slug", slug)
           .single();
         if (error || !data) {
@@ -1776,7 +1824,7 @@ server.registerTool(
       } else {
         let q = supabase
           .from("compiled_pages")
-          .select("slug, title, page_type, content, backlinks, last_compiled")
+          .select("slug, title, page_type, content, backlinks, last_compiled, source_thought_ids")
           .ilike("title", `%${name}%`);
         if (page_type) q = q.eq("page_type", page_type);
         const { data, error } = await q.limit(1);
@@ -1795,6 +1843,35 @@ server.registerTool(
         lines.push(`Backlinks: ${page.backlinks.join(", ")}`);
       }
       lines.push("", page.content || "(empty page, not yet compiled)");
+
+      // Phase 12.D: Sources section. Drill from synthesized page → raw thought.
+      // Show up to 20 most-recent source thought IDs with truncated previews.
+      // Hint at get_thought_by_id for full reads. Best-effort: errors swallowed
+      // so the page read never fails on Sources alone.
+      if (Array.isArray((page as { source_thought_ids?: string[] }).source_thought_ids)
+        && (page as { source_thought_ids: string[] }).source_thought_ids.length > 0) {
+        try {
+          const allIds = (page as { source_thought_ids: string[] }).source_thought_ids;
+          // Most-recent 20 by capture order: query thoughts by id, take 20 most recent.
+          const { data: sources } = await supabase
+            .from("thoughts")
+            .select("id, content, created_at")
+            .in("id", allIds)
+            .order("created_at", { ascending: false })
+            .limit(20);
+          if (sources && sources.length > 0) {
+            lines.push("", `## Sources (${allIds.length} total, showing ${sources.length} most recent)`);
+            for (const s of sources) {
+              const d = new Date(s.created_at).toLocaleDateString();
+              const preview = s.content.length > 200 ? s.content.substring(0, 200) + "..." : s.content;
+              lines.push(`- \`${s.id}\` [${d}] ${preview}`);
+            }
+            lines.push("", `_Drill into any source with \`get_thought_by_id(id)\`._`);
+          }
+        } catch (_err) {
+          // Sources is best-effort.
+        }
+      }
 
       // Read-time freshness: append thoughts captured since last_compiled that
       // match this entity. Closes the staleness window between daily compiles.

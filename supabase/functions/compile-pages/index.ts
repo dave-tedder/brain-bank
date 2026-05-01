@@ -135,6 +135,7 @@ async function compilePage(
     content: string;
     source_entity_id: string | null;
     last_compiled: string | null;
+    source_thought_ids?: string[];
   },
   allPageSlugs: string[]
 ): Promise<{ updated: boolean; error?: string }> {
@@ -143,7 +144,7 @@ async function compilePage(
     const since = page.last_compiled || "2020-01-01T00:00:00Z";
     let thoughtQuery = supabase
       .from("thoughts")
-      .select("content, metadata, created_at")
+      .select("id, content, metadata, created_at")
       .gt("created_at", since)
       .order("created_at", { ascending: true });
 
@@ -188,12 +189,14 @@ async function compilePage(
       }
     }
 
-    // Build the new thoughts text
+    // Build the new thoughts text. Embed the thought UUID so the LLM can echo
+    // it back in SOURCE_THOUGHTS: at the end. The (id: <uuid>) prefix is
+    // adjacent to the index marker so the LLM doesn't drop or truncate it.
     const newThoughtsText = newThoughts.map((t, i) => {
       const date = new Date(t.created_at).toLocaleDateString();
       const m = t.metadata || {};
       const type = (m.type as string) || "";
-      return `[${i + 1}] (${date}, ${type}) ${t.content}`;
+      return `[${i + 1}] (id: ${t.id}, ${date}, ${type}) ${t.content}`;
     }).join("\n\n");
 
     // Available pages for backlink detection
@@ -211,6 +214,8 @@ Write a well-organized markdown document that synthesizes all the information in
 
 At the end, on a new line, output BACKLINKS: followed by a comma-separated list of page slugs from the available pages list that this page should cross-reference. If none are relevant, output BACKLINKS: none.
 
+On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separated list of the thought UUIDs (the (id: <uuid>) values from the source material) whose content contributed to the new or updated portions of this page. Include every thought you drew on. If you did not draw on any (e.g. minor cleanup pass), output SOURCE_THOUGHTS: none.
+
 Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical). No em dashes. No emojis.`
       : `You are maintaining a wiki-style reference page for ${loadProfile().persona.compile_pages}. Update the existing page for "${page.title}" (type: ${page.page_type}) by integrating new information.
 
@@ -224,6 +229,8 @@ Rules:
 
 At the end, on a new line, output BACKLINKS: followed by a comma-separated list of page slugs from the available pages list that this page should cross-reference. If none are relevant, output BACKLINKS: none.
 
+On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separated list of the thought UUIDs (the (id: <uuid>) values from the source material) whose content contributed to the new or updated portions of this page. Include every thought you drew on. If you did not draw on any (e.g. minor cleanup pass), output SOURCE_THOUGHTS: none.
+
 Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical). No em dashes. No emojis.`;
 
     const userContent = isNewPage
@@ -232,12 +239,22 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
 
     const result = await llmCall(systemPrompt, userContent);
 
-    // Parse backlinks from the result
-    const backlinkMatch = result.match(/BACKLINKS:\s*(.+)$/m);
+    // Parse backlinks and source_thought_ids from the result. Both lines are
+    // line-anchored at the end of the LLM response. Order: cleanContent,
+    // BACKLINKS:, SOURCE_THOUGHTS:.
+    const backlinkMatch = result.match(/^BACKLINKS:\s*(.+)$/m);
+    const sourceMatch = result.match(/^SOURCE_THOUGHTS:\s*(.+)$/m);
+
     let backlinks: string[] = [];
+    let newSourceIds: string[] = [];
     let cleanContent = result;
-    if (backlinkMatch) {
+
+    // Strip the BACKLINKS line and everything after from displayed content.
+    if (backlinkMatch && typeof backlinkMatch.index === "number") {
       cleanContent = result.substring(0, backlinkMatch.index).trim();
+    }
+
+    if (backlinkMatch) {
       const backlinkStr = backlinkMatch[1].trim();
       if (backlinkStr !== "none") {
         backlinks = backlinkStr
@@ -247,6 +264,25 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       }
     }
 
+    if (sourceMatch) {
+      const sourceStr = sourceMatch[1].trim();
+      if (sourceStr !== "none") {
+        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const validIdsFromInput = new Set(newThoughts.map((t) => t.id));
+        newSourceIds = sourceStr
+          .split(",")
+          .map((s) => s.trim())
+          .filter((s) => uuidPattern.test(s))
+          .filter((s) => validIdsFromInput.has(s)); // only accept IDs the LLM was actually shown
+      }
+    }
+
+    // Merge with existing source_thought_ids (cumulative). Read current array
+    // from the page row we already loaded; older rows pre-12.D have an empty
+    // default and accumulate organically.
+    const existingIds = (page as { source_thought_ids?: string[] }).source_thought_ids ?? [];
+    const mergedIds = Array.from(new Set([...existingIds, ...newSourceIds]));
+
     // Update the page
     const now = new Date().toISOString();
     const { error: updateErr } = await supabase
@@ -254,6 +290,7 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       .update({
         content: cleanContent,
         backlinks,
+        source_thought_ids: mergedIds,
         last_compiled: now,
       })
       .eq("id", page.id);
@@ -488,7 +525,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Get all existing pages
     const { data: pages, error: pagesErr } = await supabase
       .from("compiled_pages")
-      .select("id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks")
+      .select("id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids")
       .order("slug", { ascending: true });
 
     if (pagesErr) {
@@ -522,7 +559,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (autoCreated > 0) {
       const { data: refreshed } = await supabase
         .from("compiled_pages")
-        .select("id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks")
+        .select("id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids")
         .order("slug", { ascending: true });
       allPages = refreshed || [];
     }
