@@ -49,6 +49,81 @@ function makeSlug(pageType: string, name: string): string {
   return `${pageType}/${slugify(name)}`;
 }
 
+// --- Compile the Self-Index Page ---
+// Builds a curated table-of-contents page summarizing every other compiled
+// page by type. Slug 'index/wiki', page_type 'index'. Regenerated daily on
+// the same pg_cron schedule as the rest of the wiki so the TOC stays current.
+async function compileIndexPage(
+  allPages: Array<{
+    slug: string;
+    title: string;
+    page_type: string;
+    content: string;
+    last_compiled: string | null;
+  }>
+): Promise<{ updated: boolean; error?: string }> {
+  try {
+    // Filter to non-index pages (don't include the index in itself)
+    const tocSources = allPages.filter((p) => p.page_type !== "index");
+    if (tocSources.length === 0) {
+      return { updated: false, error: "No pages to index yet" };
+    }
+
+    // Build per-page descriptors: title, slug, type, last compiled, first 200 chars of content.
+    const grouped: Record<string, typeof tocSources> = {};
+    for (const p of tocSources) {
+      if (!grouped[p.page_type]) grouped[p.page_type] = [];
+      grouped[p.page_type].push(p);
+    }
+
+    const tocText = Object.entries(grouped)
+      .map(([type, pages]) => {
+        const lines = [`### ${type.toUpperCase()} (${pages.length} pages)`];
+        for (const p of pages) {
+          const compiled = p.last_compiled
+            ? new Date(p.last_compiled).toLocaleDateString()
+            : "never";
+          const preview = p.content
+            ? p.content.substring(0, 200).replace(/\n+/g, " ").trim()
+            : "(not yet compiled)";
+          lines.push(`- **${p.title}** (\`${p.slug}\`, compiled ${compiled})\n  ${preview}`);
+        }
+        return lines.join("\n");
+      })
+      .join("\n\n");
+
+    const systemPrompt = `You are writing the table-of-contents page for a wiki-style knowledge base. Given a list of all pages grouped by type (client, topic, project), write a single coherent index page that:
+- Briefly introduces what the wiki tracks (one short paragraph).
+- For each section (Clients, Topics, Projects), names the pages and gives a one-sentence sense of what each one covers (drawn from its preview).
+- Stays under 800 words total.
+- Is meant to be read by a future agent or the operator looking for orientation, not as a sales pitch.
+
+Use markdown sections. Group pages alphabetically within each section. Don't editorialize beyond what the previews show. Don't invent page slugs that aren't in the input.
+
+Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
+
+    const userContent = `Pages currently in the wiki:\n\n${tocText}`;
+
+    const result = await llmCall(systemPrompt, userContent);
+
+    // No backlinks for the index — it's the root, not a member of the graph.
+    const now = new Date().toISOString();
+    const { error: updateErr } = await supabase
+      .from("compiled_pages")
+      .update({
+        content: result,
+        backlinks: [],
+        last_compiled: now,
+      })
+      .eq("slug", "index/wiki");
+
+    if (updateErr) return { updated: false, error: updateErr.message };
+    return { updated: true };
+  } catch (err) {
+    return { updated: false, error: (err as Error).message };
+  }
+}
+
 // --- Compile a Single Page ---
 
 async function compilePage(
@@ -425,6 +500,20 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     const existingSlugs = new Set((pages || []).map((p) => p.slug));
 
+    // Bootstrap the self-index page row if it doesn't exist yet. This row
+    // anchors the daily-compiled wiki TOC at slug 'index/wiki'. Idempotent:
+    // does nothing if the row already exists.
+    if (!existingSlugs.has("index/wiki")) {
+      const { error: bootErr } = await supabase.from("compiled_pages").insert({
+        slug: "index/wiki",
+        title: "Wiki Index",
+        page_type: "index",
+      });
+      if (!bootErr) existingSlugs.add("index/wiki");
+      // If insert failed (e.g., unique constraint race), continue silently —
+      // the next iteration will pick it up.
+    }
+
     // Auto-create pages for new entities
     const autoCreated = await autoCreatePages(existingSlugs);
 
@@ -456,6 +545,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const compiledSlugs: string[] = [];
 
     for (const page of sortedPages) {
+      // Index pages are handled by compileIndexPage() below, not the
+      // per-entity loop (their content is the TOC of all other pages,
+      // not a synthesis of matching thoughts).
+      if (page.page_type === "index") continue;
       if (compiled + errors >= maxCompilePerRun) {
         skipped++;
         continue;
@@ -469,6 +562,25 @@ Deno.serve(async (req: Request): Promise<Response> => {
         errors++;
       }
       // If not updated and no error, page had no new thoughts (not counted)
+    }
+
+    // Compile the self-index page LAST so it reflects every other page's
+    // current state. Best-effort: errors are logged but don't fail the run.
+    let indexCompiled = false;
+    try {
+      // Re-fetch to capture any content updates from this run
+      const { data: freshAllPages } = await supabase
+        .from("compiled_pages")
+        .select("slug, title, page_type, content, last_compiled")
+        .order("slug", { ascending: true });
+      const indexResult = await compileIndexPage(freshAllPages || []);
+      if (indexResult.updated) {
+        indexCompiled = true;
+      } else if (indexResult.error) {
+        console.error(`Index compile error: ${indexResult.error}`);
+      }
+    } catch (err) {
+      console.error(`Index compile threw: ${(err as Error).message}`);
     }
 
     // Lint pass (only when requested, typically weekly)
@@ -490,6 +602,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       skipped,
       errors,
       compiled_slugs: compiledSlugs,
+      index_compiled: indexCompiled,
     };
     if (lint) response.lint = lint;
 
