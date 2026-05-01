@@ -1781,6 +1781,41 @@ server.registerTool(
       }
       lines.push("", page.content || "(empty page, not yet compiled)");
 
+      // Read-time freshness: append thoughts captured since last_compiled that
+      // match this entity. Closes the staleness window between daily compiles.
+      // Mirrors compile-pages filter logic so the recent activity matches what
+      // would land in the page on the next compile.
+      if (page.last_compiled) {
+        try {
+          let recentQ = supabase
+            .from("thoughts")
+            .select("content, created_at")
+            .gt("created_at", page.last_compiled)
+            .order("created_at", { ascending: false })
+            .limit(20);
+
+          if (page.page_type === "client") {
+            recentQ = recentQ.contains("metadata", { people: [page.title] });
+          } else if (page.page_type === "topic") {
+            recentQ = recentQ.contains("metadata", { topics: [page.title.toLowerCase()] });
+          } else if (page.page_type === "project") {
+            recentQ = recentQ.contains("metadata", { project: page.title });
+          }
+
+          const { data: recent } = await recentQ;
+          if (recent && recent.length > 0) {
+            lines.push("", `## Recent activity since last compile (${recent.length})`);
+            for (const t of recent) {
+              const d = new Date(t.created_at).toLocaleString();
+              const preview = t.content.length > 300 ? t.content.substring(0, 300) + "..." : t.content;
+              lines.push(`- [${d}] ${preview}`);
+            }
+          }
+        } catch (_err) {
+          // Freshness is best-effort; never fail the page read on freshness errors.
+        }
+      }
+
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
       return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
