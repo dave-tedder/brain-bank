@@ -791,8 +791,8 @@ server.registerTool(
       "Semantic vector search across all captured raw thoughts. Use this when the question is moment-shaped ('what did I write about X yesterday?', 'find the message where Y was decided'). For entity-shaped questions about a known client / topic / project, prefer `get_compiled_page` or `search_compiled_pages` first — those return synthesized summaries instead of forcing you to re-read individual captures.",
     inputSchema: {
       query: z.string().describe("What to search for"),
-      limit: z.number().optional().default(10),
-      threshold: z.number().optional().default(0.5),
+      limit: z.coerce.number().optional().default(10),
+      threshold: z.coerce.number().optional().default(0.5),
     },
   },
   async ({ query, limit, threshold }) => {
@@ -838,11 +838,11 @@ server.registerTool(
     title: "List Recent Thoughts",
     description: "List recently captured thoughts with optional filters by type, topic, person, or time range.",
     inputSchema: {
-      limit: z.number().optional().default(10),
+      limit: z.coerce.number().optional().default(10),
       type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
-      days: z.number().optional().describe("Only thoughts from the last N days"),
+      days: z.coerce.number().optional().describe("Only thoughts from the last N days"),
     },
   },
   async ({ limit, type, topic, person, days }) => {
@@ -969,8 +969,8 @@ server.registerTool(
     inputSchema: {
       id: z.string().describe("Thought UUID. Get these from get_thought_by_id, get_compiled_page Sources, or list_thoughts."),
       relation: z.enum(["supports", "contradicts", "evolved_into", "supersedes", "depends_on", "related_to"]).optional().describe("Optional: filter by edge relation type."),
-      min_confidence: z.number().optional().default(0.0).describe("Optional: minimum confidence floor (0.0-1.0)."),
-      limit: z.number().optional().default(50).describe("Max edges to return (capped at 100)."),
+      min_confidence: z.coerce.number().optional().default(0.0).describe("Optional: minimum confidence floor (0.0-1.0)."),
+      limit: z.coerce.number().optional().default(50).describe("Max edges to return (capped at 100)."),
     },
   },
   async ({ id, relation, min_confidence, limit }) => {
@@ -1410,10 +1410,10 @@ server.registerTool(
       published_date: z.string().optional().describe("Published date YYYY-MM-DD"),
       performance: z
         .object({
-          likes: z.number().optional(),
-          saves: z.number().optional(),
-          comments: z.number().optional(),
-          reach: z.number().optional(),
+          likes: z.coerce.number().optional(),
+          saves: z.coerce.number().optional(),
+          comments: z.coerce.number().optional(),
+          reach: z.coerce.number().optional(),
         })
         .optional()
         .describe("Performance metrics"),
@@ -1462,7 +1462,7 @@ server.registerTool(
     inputSchema: {
       content_type: z.string().optional().describe(`Filter by type: ${contentTypes.join(", ")}`),
       platform: z.string().optional().describe("Filter by platform"),
-      limit: z.number().optional().default(20),
+      limit: z.coerce.number().optional().default(20),
     },
   },
   async ({ content_type, platform, limit }) => {
@@ -1527,8 +1527,8 @@ server.registerTool(
     description:
       "See how published content is performing. Shows top content by engagement metrics.",
     inputSchema: {
-      days: z.number().optional().default(30).describe("Look back N days"),
-      limit: z.number().optional().default(10),
+      days: z.coerce.number().optional().default(30).describe("Look back N days"),
+      limit: z.coerce.number().optional().default(10),
     },
   },
   async ({ days, limit }) => {
@@ -1623,7 +1623,7 @@ server.registerTool(
       "Show upcoming business events. Optionally filter by event type.",
     inputSchema: {
       event_type: z.string().optional().describe(`Filter: ${eventTypes.join(", ")}`),
-      days: z.number().optional().default(90).describe("Look ahead N days"),
+      days: z.coerce.number().optional().default(90).describe("Look ahead N days"),
     },
   },
   async ({ event_type, days }) => {
@@ -2052,7 +2052,7 @@ server.registerTool(
     inputSchema: {
       query: z.string().describe("Search term"),
       page_type: z.string().optional().describe("Filter by type: client, topic, project"),
-      limit: z.number().optional().default(10),
+      limit: z.coerce.number().optional().default(10),
     },
   },
   async ({ query, page_type, limit }) => {
@@ -2090,7 +2090,7 @@ server.registerTool(
       "Browse the wiki's full table of contents, optionally filtered by type (client / topic / project / index). **Use this for orientation when starting a session** — gives a one-screen view of every entity the wiki tracks. For a curated narrative version, get the page at slug `index/wiki` (auto-compiled).",
     inputSchema: {
       page_type: z.string().optional().describe("Filter by type: client, topic, project"),
-      limit: z.number().optional().default(50),
+      limit: z.coerce.number().optional().default(50),
     },
   },
   async ({ page_type, limit }) => {
