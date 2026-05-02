@@ -876,7 +876,7 @@ server.registerTool(
   {
     title: "Get Thought By ID",
     description:
-      "Fetch a single raw thought by its UUID. **Use this when drilling from a wiki page's 'Sources' section to inspect the original capture** — the get_compiled_page output lists the source thought IDs and this tool reads them back. Returns the full content + metadata + capture date + source.",
+      "Fetch a single raw thought by its UUID. **Use this when drilling from a wiki page's 'Sources' section to inspect the original capture** — the get_compiled_page output lists the source thought IDs and this tool reads them back. Returns the full content + metadata + capture date + source. After Phase 13, also includes a brief 'Relationships' section listing typed edges (supports / contradicts / supersedes / etc.) to other thoughts; use `get_thought_edges` for full edge inspection.",
     inputSchema: {
       id: z.string().describe("Thought UUID. Get these from the 'Sources' section of a get_compiled_page response."),
     },
@@ -912,6 +912,45 @@ server.registerTool(
         parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
       }
       parts.push("", data.content);
+
+      // Phase 13.5: append a brief Relationships section if the thought has
+      // any typed edges. Best-effort: errors swallowed, since this is an
+      // enrichment to the primary thought-content response. Edges are one
+      // signal among many; the wiki and raw thoughts remain primary.
+      try {
+        const { data: edges, error: eErr } = await supabase
+          .from("thought_edges")
+          .select("relation, from_thought_id, to_thought_id, confidence, classifier_version")
+          .or(`from_thought_id.eq.${id},to_thought_id.eq.${id}`)
+          .order("confidence", { ascending: false })
+          .limit(20);
+        if (!eErr && edges && edges.length > 0) {
+          const byRelation: Record<string, Array<{ counterpart: string; confidence: number; direction: "out" | "in" }>> = {};
+          for (const e of edges) {
+            const isOutgoing = e.from_thought_id === id;
+            const counterpart = isOutgoing ? e.to_thought_id : e.from_thought_id;
+            const direction: "out" | "in" = isOutgoing ? "out" : "in";
+            byRelation[e.relation] = byRelation[e.relation] || [];
+            byRelation[e.relation].push({ counterpart, confidence: e.confidence ?? 0, direction });
+          }
+          parts.push("", `## Relationships (${edges.length} edge${edges.length === 1 ? "" : "s"})`);
+          const rOrder = ["contradicts", "supersedes", "depends_on", "supports", "evolved_into", "related_to"];
+          for (const r of rOrder) {
+            const list = byRelation[r];
+            if (!list || list.length === 0) continue;
+            const top = list.slice(0, 3);
+            const formatted = top.map(x =>
+              `${x.direction === "out" ? "->" : "<-"} ${x.counterpart} (${(x.confidence * 100).toFixed(0)}%)`
+            ).join(", ");
+            const more = list.length > 3 ? ` +${list.length - 3} more` : "";
+            parts.push(`- **${r}** (${list.length}): ${formatted}${more}`);
+          }
+          parts.push("", `_Use \`get_thought_edges(id="${id}")\` to inspect all relationships in detail._`);
+        }
+      } catch {
+        // Silent: edge enrichment is best-effort.
+      }
+
       return { content: [{ type: "text" as const, text: parts.join("\n") }] };
     } catch (err: unknown) {
       return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
