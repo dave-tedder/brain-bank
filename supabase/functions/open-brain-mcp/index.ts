@@ -777,6 +777,8 @@ Open Brain exposes two retrieval surfaces. Choose based on the shape of the ques
 
 **Drill between them.** Wiki pages list the thought IDs that contributed to them in a "Sources" section. When the wiki gives you a synthesized fact and you need the underlying capture, follow the citation — \`get_thought_by_id\` returns the raw thought. Going the other way: a raw thought matching a known entity is summarized into that entity's wiki page on the next compile run.
 
+**Edges between thoughts.** Some thoughts are linked by typed semantic relations: \`supports\`, \`contradicts\`, \`supersedes\`, \`evolved_into\`, \`depends_on\`, \`related_to\`. \`get_thought_by_id\` shows a brief Relationships summary; \`get_thought_edges\` returns the full edge list with counterpart previews. Edges enrich retrieval — they are one signal among many, not a primary surface. The wiki and raw thoughts remain the first thing to check.
+
 **Default heuristic.** Try \`search_compiled_pages\` or \`get_compiled_page\` first when a known entity is named in the question. Fall back to \`search_thoughts\` if no compiled page exists or if the question is moment-shaped.`,
   }
 );
@@ -952,6 +954,93 @@ server.registerTool(
       }
 
       return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
+  "get_thought_edges",
+  {
+    title: "Get Thought Edges",
+    description:
+      "Inspect the typed semantic edges for a single thought. Returns each edge's relation, direction, confidence, and a short preview of the counterpart thought. Use this when the **'Relationships'** summary in `get_thought_by_id` flags an interesting edge and you want details. Optional filters: `relation` (one of supports/contradicts/evolved_into/supersedes/depends_on/related_to), `min_confidence`, `limit`. Edges are an enrichment signal — fall back to `search_thoughts` or `get_compiled_page` for primary retrieval.",
+    inputSchema: {
+      id: z.string().describe("Thought UUID. Get these from get_thought_by_id, get_compiled_page Sources, or list_thoughts."),
+      relation: z.enum(["supports", "contradicts", "evolved_into", "supersedes", "depends_on", "related_to"]).optional().describe("Optional: filter by edge relation type."),
+      min_confidence: z.number().optional().default(0.0).describe("Optional: minimum confidence floor (0.0-1.0)."),
+      limit: z.number().optional().default(50).describe("Max edges to return (capped at 100)."),
+    },
+  },
+  async ({ id, relation, min_confidence, limit }) => {
+    try {
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(id)) {
+        return {
+          content: [{ type: "text" as const, text: `Invalid thought ID format. Expected a UUID; got "${id}".` }],
+          isError: true,
+        };
+      }
+      const cap = Math.min(100, Math.max(1, limit ?? 50));
+      const conf = Math.max(0, Math.min(1, min_confidence ?? 0.0));
+
+      let q = supabase
+        .from("thought_edges")
+        .select("relation, from_thought_id, to_thought_id, confidence, valid_from, valid_until, classifier_version, support_count, metadata, created_at")
+        .or(`from_thought_id.eq.${id},to_thought_id.eq.${id}`)
+        .gte("confidence", conf)
+        .order("confidence", { ascending: false })
+        .limit(cap);
+      if (relation) q = q.eq("relation", relation);
+
+      const { data: edges, error } = await q;
+      if (error) {
+        return { content: [{ type: "text" as const, text: `Error fetching edges: ${error.message}` }], isError: true };
+      }
+      if (!edges || edges.length === 0) {
+        const filterDesc = relation ? ` of type '${relation}'` : "";
+        return { content: [{ type: "text" as const, text: `No edges${filterDesc} found for thought "${id}".` }] };
+      }
+
+      // Fetch counterpart previews
+      const counterpartIds = Array.from(new Set(
+        edges.map(e => e.from_thought_id === id ? e.to_thought_id : e.from_thought_id)
+      ));
+      const { data: counterparts } = await supabase
+        .from("thoughts")
+        .select("id, content, created_at")
+        .in("id", counterpartIds);
+      const cMap = new Map((counterparts || []).map(t => [t.id, t]));
+
+      const lines: string[] = [
+        `## Edges for thought ${id}`,
+        `Total: ${edges.length} edge${edges.length === 1 ? "" : "s"}${relation ? ` (filtered: ${relation})` : ""}, min_confidence=${conf}`,
+        "",
+      ];
+      for (const e of edges) {
+        const isOut = e.from_thought_id === id;
+        const counterpartId = isOut ? e.to_thought_id : e.from_thought_id;
+        const cp = cMap.get(counterpartId);
+        const arrow = isOut ? "->" : "<-";
+        lines.push(`### ${e.relation} ${arrow} ${counterpartId}`);
+        lines.push(`Confidence: ${(e.confidence ?? 0).toFixed(2)} | Support: ${e.support_count} | Classifier: ${e.classifier_version || "unknown"}`);
+        if (e.valid_from || e.valid_until) {
+          lines.push(`Validity: ${e.valid_from || "always"} -> ${e.valid_until || "current"}`);
+        }
+        const rationale = (e.metadata as Record<string, unknown> | null)?.rationale;
+        if (typeof rationale === "string" && rationale.length > 0) {
+          lines.push(`Rationale: ${rationale}`);
+        }
+        if (cp) {
+          const preview = cp.content.length > 200 ? cp.content.slice(0, 200) + "..." : cp.content;
+          lines.push(`Counterpart preview: ${preview}`);
+        }
+        lines.push("");
+      }
+      lines.push(`_Use \`get_thought_by_id(id="<counterpart_id>")\` to read a counterpart in full._`);
+
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
       return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
     }
