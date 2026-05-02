@@ -440,6 +440,33 @@ You should see all four jobs listed.
 
 **Why this matters:** future key rotations only require `update vault.secrets set secret = ... where name = 'mcp_access_key';`. You never edit cron job command strings again, and a rotation does not silently break four cron jobs at once.
 
+### (Optional) Schedule the typed reasoning edges classifier
+
+The `classify-edges` Edge Function looks at pairs of recently captured thoughts that share topics or a project, asks an LLM whether one supports / contradicts / supersedes / evolved into the other, and writes typed edges into `thought_edges`. The MCP `get_thought_by_id` tool surfaces a brief Relationships section and `get_thought_edges` returns the full edge list. Cost is bounded per run (default cap $2.00); over a typical week the function classifies ~15 new pairs.
+
+```sql
+select cron.schedule(
+  'classify-edges-weekly',
+  '15 10 * * 0',  -- Sundays 10:15 UTC; offset for your timezone if you prefer
+  $$select public.call_edge_function('classify-edges', 'mode=incremental&since_days=8&min_overlap=2&limit=15&dry_run=false&max_cost_usd=2.00&min_confidence=0.7', 'POST') as request_id;$$
+);
+```
+
+**Why `limit=15`:** the function buffers `limit*4` candidate pairs in worker memory before filter+classify. At `limit=15` (60 pairs in memory) the worker stays well under the 256 MB Edge Function ceiling. Higher limits can hit `WORKER_RESOURCE_LIMIT`. If your weekly capture rate is high enough that `limit=15` leaves a backlog, schedule a second job at a different hour rather than raising `limit`.
+
+**Why weekly, not daily:** at typical capture rates (~50/day) the per-week pool of new high-overlap pairs is small enough that daily firing wastes LLM budget on the same pairs being re-evaluated. Sundays 10:15 UTC sits well clear of the daily 09:45 UTC `compile-pages` cron, so a worker timeout in one job will not affect the other.
+
+**Verify:**
+
+```sql
+select jobid, jobname, schedule, active from cron.job where jobname = 'classify-edges-weekly';
+-- expect 1 row with active = true.
+```
+
+After the first Sunday fire, check `select * from cron.job_run_details where jobid = (select jobid from cron.job where jobname = 'classify-edges-weekly') order by start_time desc limit 1;` and confirm `status = 'succeeded'`.
+
+Skip this if you do not plan to use the typed reasoning edge classifier. It is purely an enrichment surface; the wiki and raw thoughts remain primary retrieval paths whether or not edges exist.
+
 ---
 
 ## What's next
@@ -451,6 +478,7 @@ You now have:
 - The MCP / REST capture path verified end-to-end
 - (Optional) Slack capture + morning digest delivery
 - (Optional) Scheduled daily and weekly digests
+- (Optional) Weekly typed reasoning edges classifier
 
 Places to go from here:
 

@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Added
+
+- **Optional weekly classify-edges cron documented in `docs/deploy-from-scratch.md` Step 12.** New subsection at the end of Step 12 walks operators through scheduling the Phase 13 typed reasoning edges classifier (`classify-edges`) on Sundays 10:15 UTC at `limit=15` with a $2.00/week cost cap. Includes a verification query and an explanation of why `limit=15` is the safe ceiling (the function buffers `limit*4` candidate pairs in worker memory before classification, and higher limits can hit `WORKER_RESOURCE_LIMIT`). Mirror entry added to `skills/brain-bank-setup/references/cron-branch.md` so the brain-bank-setup skill can offer the optional schedule after the four core jobs land. The "What's next" recap gains a "(Optional) Weekly typed reasoning edges classifier" bullet. Why this matters: the `classify-edges` Edge Function shipped earlier in this Unreleased block (Phase 13.2 port) but operators had no doc-side instructions for scheduling it; this entry closes the gap so the function is discoverable and runnable from a fresh clone. Source: Open Brain Phase 13.4 (cron applied to live `dvsvzlwxhmqwhmknwmdr` as jobid 6).
+
 ## [0.1.0] - 2026-04-29
 
 ### Added
