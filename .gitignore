@@ -36,6 +36,10 @@ supabase/.branches/
 # Claude Code local settings
 .claude/settings.local.json
 
+# Operator-specific local context (forks may add CLAUDE.local.md or AGENTS.local.md)
+CLAUDE.local.md
+AGENTS.local.md
+
 # Logs
 *.log
 npm-debug.log*
