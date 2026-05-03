@@ -14,7 +14,7 @@ Internal Next.js dashboard for browsing, searching, and auditing the Brain Bank 
 
 ```
 dashboard/
-├── CLAUDE.md
+├── AGENTS.md
 ├── next.config.ts             # standalone output for Railway
 ├── package.json
 ├── postcss.config.mjs

@@ -24,7 +24,7 @@ brain-bank/
 ├── README.md                  # elevator pitch, quickstart, architecture
 ├── CHANGELOG.md               # release-by-release ground truth
 ├── LICENSE                    # MIT
-├── CLAUDE.md                  # this file
+├── AGENTS.md                  # this file (CLAUDE.md is a one-line @AGENTS.md shim)
 ├── .env.example               # every env var the engine + dashboard read
 ├── profile.example.json       # neutral profile defaults (operators copy to profile.json, gitignored)
 ├── deno.json                  # Deno workspace config for the Edge Functions
@@ -37,7 +37,7 @@ brain-bank/
 │       ├── brain-digest/      # daily / weekly digest synthesis + Slack post
 │       ├── compile-pages/     # Karpathy-style wiki compilation
 │       └── _shared/           # profile loader + profile.json bundled at deploy
-├── dashboard/                 # Next.js dashboard, see dashboard/CLAUDE.md
+├── dashboard/                 # Next.js dashboard, see dashboard/AGENTS.md
 ├── skills/
 │   └── brain-bank-setup/      # slash-command-driven first-deploy guide
 ├── integrations/              # capture-source bridges (Gmail, Calendar, Notion, etc.)
@@ -65,4 +65,4 @@ brain-bank/
 - **How do I wire up a capture source?** [`docs/capture-sources/`](./docs/capture-sources/)
 - **Something is broken.** [`docs/troubleshooting.md`](./docs/troubleshooting.md)
 - **What changed in this release?** [`CHANGELOG.md`](./CHANGELOG.md)
-- **Dashboard-specific guidance.** [`dashboard/CLAUDE.md`](./dashboard/CLAUDE.md)
+- **Dashboard-specific guidance.** [`dashboard/AGENTS.md`](./dashboard/AGENTS.md)

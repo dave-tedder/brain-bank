@@ -30,7 +30,7 @@ PRs that touch live behavior should describe the test plan: what you ran, what y
 
 ## Conventions
 
-These are the same conventions documented in [CLAUDE.md](CLAUDE.md) at the repo root.
+These are the same conventions documented in [AGENTS.md](AGENTS.md) at the repo root.
 
 - **Commit per task.** Each finished task is its own commit and a rollback point. Do not batch unrelated changes into one commit. Cosmetic sweeps (typo fixes, single-line tweaks across multiple files) can share one commit if they are clearly one task.
 - **Migrations.** Schema changes live in `supabase/migrations/` as `<NNNN>_snake_case_description.sql`. Write the file first, apply it (via the Supabase CLI or Supabase MCP), then commit.
