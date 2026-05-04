@@ -99,7 +99,6 @@ async function alreadyClassified(a: string, b: string): Promise<boolean> {
     .or(
       `and(from_thought_id.eq.${a},to_thought_id.eq.${b}),and(from_thought_id.eq.${b},to_thought_id.eq.${a})`,
     )
-    .neq("relation", "related_to")
     .limit(1);
   if (error) return false; // permissive: don't skip on transient errors
   return (data?.length ?? 0) > 0;
@@ -367,7 +366,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         break;
       }
 
-      // Skip if already classified (any non-related_to edge in either direction).
+      // Skip if already classified with any relation in either direction.
       if (await alreadyClassified(pair.a_id, pair.b_id)) {
         stats.skipped_already_classified++;
         continue;
