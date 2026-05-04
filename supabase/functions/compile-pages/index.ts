@@ -13,6 +13,23 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 // Minimum thought mentions before auto-creating a topic/project page
 const AUTO_CREATE_THRESHOLD = 5;
 
+type IndexCompileMode = "auto" | "force" | "skip";
+
+function parseIndexCompileMode(
+  raw: string | null,
+  mode: string,
+): IndexCompileMode {
+  if (mode === "index") return "force";
+  if (!raw) return "auto";
+
+  const normalized = raw.toLowerCase();
+  if (["1", "true", "yes", "force", "only"].includes(normalized)) {
+    return "force";
+  }
+  if (["0", "false", "no", "skip"].includes(normalized)) return "skip";
+  return "auto";
+}
+
 // --- LLM Call ---
 
 async function llmCall(systemPrompt: string, userContent: string): Promise<string> {
@@ -520,7 +537,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return new Response("Unauthorized", { status: 401 });
     }
 
-    const mode = url.searchParams.get("mode") || "compile"; // "compile" or "lint"
+    const mode = url.searchParams.get("mode") || "compile"; // "compile", "lint", or "index"
+    const indexMode = parseIndexCompileMode(
+      url.searchParams.get("index"),
+      mode,
+    );
 
     // Get all existing pages
     const { data: pages, error: pagesErr } = await supabase
@@ -581,43 +602,58 @@ Deno.serve(async (req: Request): Promise<Response> => {
     let errors = 0;
     const compiledSlugs: string[] = [];
 
-    for (const page of sortedPages) {
-      // Index pages are handled by compileIndexPage() below, not the
-      // per-entity loop (their content is the TOC of all other pages,
-      // not a synthesis of matching thoughts).
-      if (page.page_type === "index") continue;
-      if (compiled + errors >= maxCompilePerRun) {
-        skipped++;
-        continue;
+    if (mode !== "index") {
+      for (const page of sortedPages) {
+        // Index pages are handled by compileIndexPage() below, not the
+        // per-entity loop (their content is the TOC of all other pages,
+        // not a synthesis of matching thoughts).
+        if (page.page_type === "index") continue;
+        if (compiled + errors >= maxCompilePerRun) {
+          skipped++;
+          continue;
+        }
+        const result = await compilePage(page, allSlugs);
+        if (result.updated) {
+          compiled++;
+          compiledSlugs.push(page.slug);
+        } else if (result.error) {
+          console.error(`Compile error for ${page.slug}: ${result.error}`);
+          errors++;
+        }
+        // If not updated and no error, page had no new thoughts (not counted)
       }
-      const result = await compilePage(page, allSlugs);
-      if (result.updated) {
-        compiled++;
-        compiledSlugs.push(page.slug);
-      } else if (result.error) {
-        console.error(`Compile error for ${page.slug}: ${result.error}`);
-        errors++;
-      }
-      // If not updated and no error, page had no new thoughts (not counted)
     }
 
     // Compile the self-index page LAST so it reflects every other page's
     // current state. Best-effort: errors are logged but don't fail the run.
+    // In auto mode, only run it when this invocation did no entity-page LLM
+    // work. This keeps the daily cron from stacking index synthesis on top of
+    // a heavy entity compile batch.
     let indexCompiled = false;
-    try {
-      // Re-fetch to capture any content updates from this run
-      const { data: freshAllPages } = await supabase
-        .from("compiled_pages")
-        .select("slug, title, page_type, content, last_compiled")
-        .order("slug", { ascending: true });
-      const indexResult = await compileIndexPage(freshAllPages || []);
-      if (indexResult.updated) {
-        indexCompiled = true;
-      } else if (indexResult.error) {
-        console.error(`Index compile error: ${indexResult.error}`);
+    let indexSkippedReason: string | undefined;
+    const shouldCompileIndex = indexMode === "force" ||
+      (indexMode === "auto" && compiled === 0 && errors === 0);
+
+    if (shouldCompileIndex) {
+      try {
+        // Re-fetch to capture any content updates from this run
+        const { data: freshAllPages } = await supabase
+          .from("compiled_pages")
+          .select("slug, title, page_type, content, last_compiled")
+          .order("slug", { ascending: true });
+        const indexResult = await compileIndexPage(freshAllPages || []);
+        if (indexResult.updated) {
+          indexCompiled = true;
+        } else if (indexResult.error) {
+          console.error(`Index compile error: ${indexResult.error}`);
+        }
+      } catch (err) {
+        console.error(`Index compile threw: ${(err as Error).message}`);
       }
-    } catch (err) {
-      console.error(`Index compile threw: ${(err as Error).message}`);
+    } else if (indexMode === "skip") {
+      indexSkippedReason = "disabled by index=skip";
+    } else {
+      indexSkippedReason = "deferred after entity-page work";
     }
 
     // Lint pass (only when requested, typically weekly)
@@ -640,10 +676,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
       errors,
       compiled_slugs: compiledSlugs,
       index_compiled: indexCompiled,
+      index_mode: indexMode,
     };
+    if (indexSkippedReason) response.index_skipped_reason = indexSkippedReason;
     if (lint) response.lint = lint;
 
-    console.log(`Compilation complete: ${compiled} updated, ${autoCreated} created, ${errors} errors`);
+    console.log(
+      `Compilation complete: ${compiled} updated, ${autoCreated} created, ${errors} errors, index ${
+        indexCompiled ? "updated" : indexSkippedReason || "unchanged"
+      }`,
+    );
 
     return new Response(JSON.stringify(response), {
       headers: { "Content-Type": "application/json" },
