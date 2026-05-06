@@ -32,23 +32,98 @@ function parseIndexCompileMode(
 
 // --- LLM Call ---
 
+// Per-call ceiling. claude-sonnet-4.6 with a full page context can take
+// 60-70s on slow days, which compounds across concurrent waves and risks
+// the 150s Edge Runtime wall. Abort any single call that runs longer so the
+// batch keeps moving — the page rolls into next cron's queue.
+const LLM_CALL_TIMEOUT_MS = 60_000;
+
 async function llmCall(systemPrompt: string, userContent: string): Promise<string> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-sonnet-4.6",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-    }),
-  });
-  const d = await r.json();
-  return d.choices[0].message.content.trim();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LLM_CALL_TIMEOUT_MS);
+  try {
+    const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "anthropic/claude-sonnet-4.6",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent },
+        ],
+      }),
+      signal: controller.signal,
+    });
+    const d = await r.json();
+    return d.choices[0].message.content.trim();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// --- Concurrency Helpers ---
+
+// Bounded-parallel runner. Workers pull from a shared queue; preserves input
+// order in the result array. Worker callbacks are responsible for their own
+// error handling — uncaught throws will reject the whole batch.
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  async function pump(): Promise<void> {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  }
+  const lanes = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: lanes }, () => pump()));
+  return results;
+}
+
+// Cheap pre-filter probe: does this page have ANY thoughts since its last
+// compile? Uses head:true count so Postgres returns just a row count. The
+// metadata filters here mirror compilePage()'s SELECT filter exactly, so a
+// positive probe implies compilePage() will also see new thoughts. On error,
+// returns true to fail open — better to compile a page unnecessarily than
+// miss a real update.
+async function pageHasNewThoughts(
+  page: {
+    page_type: string;
+    title: string;
+    source_entity_id: string | null;
+    last_compiled: string | null;
+  },
+  clientNamesById: Map<string, string>,
+): Promise<boolean> {
+  const since = page.last_compiled || "2020-01-01T00:00:00Z";
+  let q = supabase
+    .from("thoughts")
+    .select("*", { count: "exact", head: true })
+    .gt("created_at", since);
+
+  if (page.page_type === "client" && page.source_entity_id) {
+    const name = clientNamesById.get(page.source_entity_id);
+    if (!name) return false; // client row gone — skip silently
+    q = q.contains("metadata", { people: [name] });
+  } else if (page.page_type === "topic") {
+    q = q.contains("metadata", { topics: [page.title.toLowerCase()] });
+  } else if (page.page_type === "project") {
+    q = q.contains("metadata", { project: page.title });
+  } else {
+    return false;
+  }
+
+  const { count, error } = await q;
+  if (error) return true; // fail open
+  return (count ?? 0) > 0;
 }
 
 // --- Slug Helpers ---
@@ -507,21 +582,31 @@ async function runLint(
     }
   }
 
-  // For cross-referencing pages, ask LLM to check for contradictions
-  const crossRefPairs = Object.values(backlinkGroups).slice(0, 5); // Limit to 5 pairs
-  for (const [slugA, slugB] of crossRefPairs) {
-    const pageA = pages.find((p) => p.slug === slugA);
-    const pageB = pages.find((p) => p.slug === slugB);
-    if (!pageA || !pageB) continue;
+  // For cross-referencing pages, ask LLM to check for contradictions in
+  // parallel. Limit to 5 pairs so a busy lint pass doesn't burn the entire
+  // wall budget on this section.
+  const crossRefPairs = Object.values(backlinkGroups).slice(0, 5);
+  const checks = await runWithConcurrency(
+    crossRefPairs,
+    5,
+    async ([slugA, slugB]) => {
+      const pageA = pages.find((p) => p.slug === slugA);
+      const pageB = pages.find((p) => p.slug === slugB);
+      if (!pageA || !pageB) return null;
 
-    const checkResult = await llmCall(
-      `You are checking two wiki pages for contradictions. If you find any factual contradictions between the pages (conflicting dates, conflicting descriptions of the same event, conflicting claims), list each one briefly. If no contradictions, respond with exactly: NONE`,
-      `Page A (${pageA.title}):\n${pageA.content.substring(0, 2000)}\n\n---\n\nPage B (${pageB.title}):\n${pageB.content.substring(0, 2000)}`
-    );
+      const checkResult = await llmCall(
+        `You are checking two wiki pages for contradictions. If you find any factual contradictions between the pages (conflicting dates, conflicting descriptions of the same event, conflicting claims), list each one briefly. If no contradictions, respond with exactly: NONE`,
+        `Page A (${pageA.title}):\n${pageA.content.substring(0, 2000)}\n\n---\n\nPage B (${pageB.title}):\n${pageB.content.substring(0, 2000)}`,
+      );
 
-    if (checkResult.trim() !== "NONE") {
-      result.contradiction_warnings.push(`${slugA} vs ${slugB}: ${checkResult.substring(0, 300)}`);
-    }
+      if (checkResult.trim() !== "NONE") {
+        return `${slugA} vs ${slugB}: ${checkResult.substring(0, 300)}`;
+      }
+      return null;
+    },
+  );
+  for (const c of checks) {
+    if (c) result.contradiction_warnings.push(c);
   }
 
   return result;
@@ -587,8 +672,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     const allSlugs = allPages.map((p) => p.slug);
 
-    // Compile stale pages (batch limit to avoid Edge Function timeout)
-    // Prioritize: never-compiled first, then oldest last_compiled
+    // Compile stale pages: parallel pre-filter + bounded-concurrency compile
+    // + wall-clock guard so we don't blow past the 150s Edge Runtime ceiling.
+    // Prioritize: never-compiled first, then oldest last_compiled.
     const maxCompilePerRun = parseInt(url.searchParams.get("batch") || "15");
     const sortedPages = [...allPages].sort((a, b) => {
       if (!a.last_compiled && !b.last_compiled) return 0;
@@ -597,30 +683,94 @@ Deno.serve(async (req: Request): Promise<Response> => {
       return new Date(a.last_compiled).getTime() - new Date(b.last_compiled).getTime();
     });
 
+    // Wall-clock budget. Edge Runtime kills at 150s. Together with the
+    // per-call LLM timeout (LLM_CALL_TIMEOUT_MS = 60s), this guarantees a
+    // worker dispatched at t<=85s finishes by t<=145s — under the wall with
+    // headroom for the index compile and response serialization.
+    const RUN_BUDGET_MS = 85_000;
+    const PROBE_CONCURRENCY = 20;
+    const COMPILE_CONCURRENCY = 5;
+    const startTime = Date.now();
+
     let compiled = 0;
     let skipped = 0;
     let errors = 0;
+    let budgetExhausted = false;
     const compiledSlugs: string[] = [];
 
     if (mode !== "index") {
-      for (const page of sortedPages) {
-        // Index pages are handled by compileIndexPage() below, not the
-        // per-entity loop (their content is the TOC of all other pages,
-        // not a synthesis of matching thoughts).
-        if (page.page_type === "index") continue;
-        if (compiled + errors >= maxCompilePerRun) {
-          skipped++;
-          continue;
-        }
-        const result = await compilePage(page, allSlugs);
-        if (result.updated) {
-          compiled++;
-          compiledSlugs.push(page.slug);
-        } else if (result.error) {
-          console.error(`Compile error for ${page.slug}: ${result.error}`);
-          errors++;
-        }
-        // If not updated and no error, page had no new thoughts (not counted)
+      // Pre-fetch client names so the parallel probe doesn't N+1 the clients
+      // table. compilePage() re-reads the full client row anyway for the
+      // supplemental-context section, so we only need names here.
+      const clientPages = sortedPages.filter(
+        (p) => p.page_type === "client" && p.source_entity_id,
+      );
+      const clientNamesById = new Map<string, string>();
+      if (clientPages.length > 0) {
+        const ids = Array.from(
+          new Set(clientPages.map((p) => p.source_entity_id!)),
+        );
+        const { data: clients } = await supabase
+          .from("clients")
+          .select("id, name")
+          .in("id", ids);
+        for (const c of clients || []) clientNamesById.set(c.id, c.name);
+      }
+
+      // Parallel pre-filter: cheap COUNT-only probes drop ~190 serial SELECTs
+      // (~50ms each, ~9.5s total) to a single parallel pass (~1-2s). Pages
+      // with no new thoughts since last_compiled never enter the LLM loop.
+      const candidatePool = sortedPages.filter(
+        (p) => p.page_type !== "index",
+      );
+      const probeResults = await runWithConcurrency(
+        candidatePool,
+        PROBE_CONCURRENCY,
+        (page) => pageHasNewThoughts(page, clientNamesById),
+      );
+      const candidatePages = candidatePool.filter((_, i) => probeResults[i]);
+
+      // Apply per-run cap. Anything past the cap counts as "skipped" — same
+      // semantic as the original loop's batch limit.
+      const candidatesToCompile = candidatePages.slice(0, maxCompilePerRun);
+      skipped = candidatePages.length - candidatesToCompile.length;
+
+      // Bounded-parallel compile. With LLM calls ~30s each at concurrency 5,
+      // a 15-page batch finishes in ~3 waves (~90s) instead of 15 × 30 = 450s
+      // serial. Each worker checks the wall budget before its LLM call so a
+      // straggler can't push us into the 150s wall.
+      await runWithConcurrency(
+        candidatesToCompile,
+        COMPILE_CONCURRENCY,
+        async (page) => {
+          if (Date.now() - startTime > RUN_BUDGET_MS) {
+            budgetExhausted = true;
+            return;
+          }
+          const result = await compilePage(page, allSlugs);
+          if (result.updated) {
+            compiled++;
+            compiledSlugs.push(page.slug);
+          } else if (result.error) {
+            console.error(`Compile error for ${page.slug}: ${result.error}`);
+            errors++;
+          }
+          // If not updated and no error, page had no new thoughts (rare
+          // after the pre-filter, but possible if a thought is deleted
+          // between probe and compile).
+        },
+      );
+
+      if (budgetExhausted) {
+        // Workers that bailed before their LLM call get rolled into skipped.
+        // Next cron run picks them up via the same NULLS-FIRST sort.
+        const processed = compiled + errors;
+        skipped += candidatesToCompile.length - processed;
+        console.log(
+          `compile-pages: wall budget reached after ${
+            Date.now() - startTime
+          }ms; deferring remainder to next run`,
+        );
       }
     }
 
@@ -633,8 +783,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     let indexSkippedReason: string | undefined;
     const shouldCompileIndex = indexMode === "force" ||
       (indexMode === "auto" && compiled === 0 && errors === 0);
+    const indexBudgetOk = Date.now() - startTime <= RUN_BUDGET_MS;
 
-    if (shouldCompileIndex) {
+    if (shouldCompileIndex && indexBudgetOk) {
       try {
         // Re-fetch to capture any content updates from this run
         const { data: freshAllPages } = await supabase
@@ -652,6 +803,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       }
     } else if (indexMode === "skip") {
       indexSkippedReason = "disabled by index=skip";
+    } else if (shouldCompileIndex && !indexBudgetOk) {
+      indexSkippedReason = "wall budget exhausted before index compile";
     } else {
       indexSkippedReason = "deferred after entity-page work";
     }
