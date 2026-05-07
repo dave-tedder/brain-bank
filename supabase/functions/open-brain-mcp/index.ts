@@ -15,6 +15,33 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// Deno Edge Runtime exposes EdgeRuntime as a global; declare it for the type
+// checker so the workspace deno check stays at 0 errors.
+declare const EdgeRuntime: {
+  waitUntil: (p: PromiseLike<unknown>) => void;
+};
+
+// Fire-and-forget telemetry write to public.mcp_tool_invocations. Never throws,
+// never blocks the tool response. Called from registered MCP tool handlers.
+// EdgeRuntime.waitUntil follows the project's existing pattern (see
+// ingest-thought handler dispatch).
+function logToolInvocation(
+  toolName: string,
+  args: Record<string, unknown>,
+): void {
+  const writePromise = supabase
+    .from("mcp_tool_invocations")
+    .insert({ tool_name: toolName, args })
+    .then((r: { error?: { message?: string } | null }) => {
+      if (r.error) {
+        console.error(
+          `[mcp-tool-log] insert failed for ${toolName}: ${r.error.message}`,
+        );
+      }
+    });
+  EdgeRuntime.waitUntil(writePromise);
+}
+
 function titleCase(s: string): string {
   return s.replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -1958,6 +1985,7 @@ server.registerTool(
   },
   async ({ slug, name, page_type }) => {
     try {
+      logToolInvocation("get_compiled_page", { slug, name, page_type });
       if (!slug && !name) {
         return { content: [{ type: "text" as const, text: "Provide either slug or name." }], isError: true };
       }
@@ -2081,6 +2109,7 @@ server.registerTool(
   },
   async ({ query, page_type, limit }) => {
     try {
+      logToolInvocation("search_compiled_pages", { query, page_type, limit });
       let q = supabase
         .from("compiled_pages")
         .select("slug, title, page_type, last_compiled, content")
@@ -2119,6 +2148,7 @@ server.registerTool(
   },
   async ({ page_type, limit }) => {
     try {
+      logToolInvocation("list_compiled_pages", { page_type, limit });
       let q = supabase
         .from("compiled_pages")
         .select("slug, title, page_type, last_compiled")
