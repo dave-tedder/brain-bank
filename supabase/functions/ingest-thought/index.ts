@@ -367,8 +367,16 @@ const LOG_TRUNC = 200;
 
 async function extractAndStoreActionItems(
   thoughtId: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  content: string
 ): Promise<void> {
+  // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
+  // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
+  // extraction LLM may still pick up advisory phrases ("should reduce volume",
+  // "needs more sleep") from prose summaries; suppress storing those as open
+  // action items so they don't pollute the digest's open-items section.
+  if (isMechanicalCapture(content)) return;
+
   const items = metadata.action_items;
   if (!Array.isArray(items) || items.length === 0) return;
 
@@ -640,7 +648,7 @@ async function postCaptureHook(
   excludeSourceThoughtIds: string[] = []
 ): Promise<string[]> {
   // Store any new action items from this thought
-  await extractAndStoreActionItems(thoughtId, metadata);
+  await extractAndStoreActionItems(thoughtId, metadata, content);
 
   // Check if this thought resolves any existing open items
   // Exclusion list prevents same-thread items from being falsely resolved

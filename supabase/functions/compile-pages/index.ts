@@ -13,6 +13,17 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 // Minimum thought mentions before auto-creating a topic/project page
 const AUTO_CREATE_THRESHOLD = 5;
 
+// Comma-separated topic/project tags to suppress from auto-page creation.
+// Use for high-volume mechanical-capture sources (fitness sync, calendar sync)
+// whose tags would otherwise spam the wiki without producing useful pages.
+// Existing pages with these slugs are not deleted; this only blocks NEW spawns.
+const PAGE_AUTO_CREATE_EXCLUDE_TAGS = new Set(
+  (Deno.env.get("PAGE_AUTO_CREATE_EXCLUDE_TAGS") || "")
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean)
+);
+
 type IndexCompileMode = "auto" | "force" | "skip";
 
 function parseIndexCompileMode(
@@ -451,6 +462,7 @@ async function autoCreatePages(existingSlugs: Set<string>): Promise<number> {
     // Create pages for topics that meet threshold
     for (const [topic, count] of Object.entries(topicCounts)) {
       if (count < AUTO_CREATE_THRESHOLD) continue;
+      if (PAGE_AUTO_CREATE_EXCLUDE_TAGS.has(topic.toLowerCase())) continue;
       const slug = makeSlug("topic", topic);
       if (existingSlugs.has(slug)) continue;
 
@@ -468,6 +480,7 @@ async function autoCreatePages(existingSlugs: Set<string>): Promise<number> {
     // Create pages for projects that meet threshold
     for (const [project, count] of Object.entries(projectCounts)) {
       if (count < AUTO_CREATE_THRESHOLD) continue;
+      if (PAGE_AUTO_CREATE_EXCLUDE_TAGS.has(project.toLowerCase())) continue;
       const slug = makeSlug("project", project);
       if (existingSlugs.has(slug)) continue;
 

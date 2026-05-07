@@ -218,8 +218,16 @@ const LOG_TRUNC = 200;
 
 async function extractAndStoreActionItems(
   thoughtId: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  content: string
 ): Promise<void> {
+  // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
+  // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
+  // extraction LLM may still pick up advisory phrases ("should reduce volume",
+  // "needs more sleep") from prose summaries; suppress storing those as open
+  // action items so they don't pollute the digest's open-items section.
+  if (isMechanicalCapture(content)) return;
+
   const items = metadata.action_items;
   if (!Array.isArray(items) || items.length === 0) return;
 
@@ -484,7 +492,7 @@ async function postCaptureHook(
   metadata: Record<string, unknown>,
   excludeSourceThoughtIds: string[] = []
 ): Promise<string[]> {
-  await extractAndStoreActionItems(thoughtId, metadata);
+  await extractAndStoreActionItems(thoughtId, metadata, content);
   return await checkAutoResolve(content, thoughtId, metadata, excludeSourceThoughtIds);
 }
 
@@ -622,23 +630,39 @@ async function handleRestCapture(req: Request): Promise<Response> {
     if (tooLong(content, MAX_CONTENT_LENGTH)) {
       return jsonResponse({ error: `content exceeds ${MAX_CONTENT_LENGTH} chars` }, 413);
     }
+
+    // Optional caller-supplied tags merge into topics. Lets sync-source
+    // integrations (calendar sync, notion sync, fitness sync) tag captures
+    // authoritatively instead of relying solely on metadata-extraction LLM
+    // re-deriving topics from prose.
+    const explicitTags = Array.isArray(body?.tags)
+      ? (body.tags as unknown[])
+        .filter((t): t is string => typeof t === "string")
+        .map((t) => t.toLowerCase().trim())
+        .filter(Boolean)
+      : [];
     const source = typeof body?.source === "string" && body.source.length > 0 ? body.source : "chatgpt";
     const hash = await contentHash(content);
     if (await isDuplicate(hash)) return jsonResponse({ status: "duplicate", message: "Already in the brain." });
     const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-    const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: { ...metadata, source } }).select("id").single();
+
+    const meta = metadata as Record<string, unknown>;
+    const extractedTopics = Array.isArray(meta.topics) ? (meta.topics as string[]) : [];
+    const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
+    const finalMetadata: Record<string, unknown> = { ...meta, topics: mergedTopics, source };
+
+    const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: finalMetadata }).select("id").single();
     if (error || !inserted) return jsonResponse({ error: error?.message || "unknown error" }, 500);
 
     // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
-    const resolved = await postCaptureHook(inserted.id, content, metadata as Record<string, unknown>, [inserted.id]);
+    const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
 
-    const meta = metadata as Record<string, unknown>;
     return jsonResponse({
       status: "captured",
-      type: meta.type,
-      topics: meta.topics,
-      people: meta.people,
-      action_items: meta.action_items,
+      type: finalMetadata.type,
+      topics: finalMetadata.topics,
+      people: finalMetadata.people,
+      action_items: finalMetadata.action_items,
       auto_resolved: resolved.length > 0 ? resolved : undefined,
     });
   } catch (err: unknown) {
