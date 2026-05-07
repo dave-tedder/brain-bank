@@ -270,6 +270,45 @@ order by created_at desc;
 
 ---
 
+## Advanced: tag intake submissions EXISTING vs NEW via wiki lookup
+
+Skip this section unless one of your Notion databases is a client intake form AND you have wiki compilation enabled (the `compile-pages` Edge Function plus the daily cron). For typical project or reading-list databases, the core walkthrough above is enough.
+
+If you run an intake workflow, knowing whether a new submission is from a returning contact or a stranger is high-signal for downstream readers (the digest, the dashboard, anything else that consumes captured thoughts). Brain Bank's wiki holds compiled `client/<slug>` pages built from prior captures, so a single REST lookup can tell you whether a submission belongs to someone the system already knows.
+
+To extend the routine, add the lookup before the `/capture` call in your STEP 2 prompt block:
+
+```
+- For each submission, BEFORE calling /capture, check the wiki for an existing client page:
+    - Apply the same client_name extraction rule from the CRM extension above (strip " - <project>" suffix, strip trailing "intake").
+    - Build the slug: lowercase(client_name), replace non-alphanumeric chars with spaces, collapse whitespace to single hyphens. Example: "Alex Rivera" -> "client/alex-rivera"; "Sarah O'Brien" -> "client/sarah-obrien".
+    - Look up via REST:
+      curl -s "$BRAIN_BASE/pages?slug=client/<slugified-name>&key=$BRAIN_KEY" -H "Content-Type: application/json"
+    - If response is HTTP 404 or has an "error" field, treat as no page found.
+    - If a page is returned (has a "content" field), set CLIENT_STATUS="EXISTING (compiled page available)". Otherwise CLIENT_STATUS="NEW (no compiled page)".
+- Embed the status in the captured thought, e.g.:
+  "[Notion Sync] Intake (<CLIENT_STATUS>): \"<title>\" -- Client: <client_name>. ..."
+```
+
+Verify by reading a recent intake-row capture and confirming the prefix landed:
+
+```sql
+select content
+from thoughts
+where metadata->>'source' = 'notion-sync'
+  and content like '[Notion Sync] Intake%'
+order by created_at desc
+limit 5;
+```
+
+**Gotchas to watch for:**
+
+- **Read-only call.** `/pages?slug=...` only reads; it never creates or modifies wiki pages. Safe to call on every sync.
+- **First sync of a fresh deploy.** Until `compile-pages` has run at least once, every lookup will return `NEW` because no client pages exist yet. The cron schedule in `docs/deploy-from-scratch.md` Step 12 produces the first compiled set.
+- **Slug mismatches.** Wiki slugs are derived from the captured client names that the compiler clusters; if your intake titles use different casing or punctuation than the rest of your captures, the lookup may miss. Same conservative-name-extraction rule applies — bad slugs miss but don't create bad data.
+
+---
+
 ## Tuning for large databases
 
 The default prompt queries with an empty body, which returns every row in the database (up to 100 per page, paginated). For databases with a few hundred rows this is fine; for databases with thousands, use a filter.
