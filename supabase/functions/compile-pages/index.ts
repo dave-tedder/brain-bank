@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { loadProfile } from "../_shared/profile.ts";
+import { applyEdits, parseEditsXml } from "./_section_merge.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -175,7 +175,7 @@ async function compileIndexPage(
     page_type: string;
     content: string;
     last_compiled: string | null;
-  }>
+  }>,
 ): Promise<{ updated: boolean; error?: string }> {
   try {
     // Filter to non-index pages (don't include the index in itself)
@@ -228,7 +228,8 @@ async function compileIndexPage(
         : []),
     ].join("\n\n");
 
-    const systemPrompt = `You are writing the table-of-contents page for a wiki-style knowledge base. Given a list of all pages grouped by type (client, topic, project), write a single coherent index page that:
+    const systemPrompt =
+      `You are writing the table-of-contents page for a wiki-style knowledge base. Given a list of all pages grouped by type (client, topic, project), write a single coherent index page that:
 - Briefly introduces what the wiki tracks (one short paragraph).
 - For each section (Clients, Topics, Projects), names the pages and gives a one-sentence sense of what each one covers (drawn from its preview).
 - Stays under 800 words total.
@@ -260,6 +261,23 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
   }
 }
 
+// Recommended H2 sections per page_type. The edit-mode prompt nudges the LLM
+// to use these names when creating new sections; existing sections keep their
+// current names. Empty array for unrecognized types so the prompt simply
+// omits the hint.
+function recommendedSectionsFor(pageType: string): string[] {
+  switch (pageType) {
+    case "client":
+      return ["Style Preferences", "Tattoo History", "Sessions", "Notes"];
+    case "topic":
+      return ["Definition", "Examples", "Recent Activity", "Open Questions"];
+    case "project":
+      return ["Status", "Architecture", "Decisions", "Recent Activity"];
+    default:
+      return [];
+  }
+}
+
 // --- Compile a Single Page ---
 
 async function compilePage(
@@ -273,7 +291,7 @@ async function compilePage(
     last_compiled: string | null;
     source_thought_ids?: string[];
   },
-  allPageSlugs: string[]
+  allPageSlugs: string[],
 ): Promise<{ updated: boolean; error?: string }> {
   try {
     // Find new thoughts since last compilation
@@ -293,9 +311,13 @@ async function compilePage(
         .eq("id", page.source_entity_id)
         .single();
       if (!client) return { updated: false, error: "Client not found" };
-      thoughtQuery = thoughtQuery.contains("metadata", { people: [client.name] });
+      thoughtQuery = thoughtQuery.contains("metadata", {
+        people: [client.name],
+      });
     } else if (page.page_type === "topic") {
-      thoughtQuery = thoughtQuery.contains("metadata", { topics: [page.title.toLowerCase()] });
+      thoughtQuery = thoughtQuery.contains("metadata", {
+        topics: [page.title.toLowerCase()],
+      });
     } else if (page.page_type === "project") {
       thoughtQuery = thoughtQuery.contains("metadata", { project: page.title });
     }
@@ -304,12 +326,35 @@ async function compilePage(
     if (qErr) return { updated: false, error: qErr.message };
     if (!newThoughts || newThoughts.length === 0) return { updated: false };
 
-    // For client pages, pull profile data
+    // For client pages, also pull session history and events
     let supplementalContext = "";
     if (page.page_type === "client" && page.source_entity_id) {
+      const { data: sessions } = await supabase
+        .from("client_sessions")
+        .select(
+          "session_date, status, piece_description, placement, style, duration_hours, notes",
+        )
+        .eq("client_id", page.source_entity_id)
+        .order("session_date", { ascending: false })
+        .limit(20);
+      if (sessions?.length) {
+        supplementalContext += "\n\nSession history:\n" + sessions.map((s) => {
+          const parts = [`${s.session_date} (${s.status})`];
+          if (s.piece_description) parts.push(s.piece_description);
+          if (s.placement) parts.push(`on ${s.placement}`);
+          if (s.style) parts.push(`[${s.style}]`);
+          if (s.duration_hours) parts.push(`${s.duration_hours}h`);
+          if (s.notes) parts.push(`Notes: ${s.notes}`);
+          return "- " + parts.join(" | ");
+        }).join("\n");
+      }
+
+      // Client profile data
       const { data: client } = await supabase
         .from("clients")
-        .select("name, email, phone, instagram, preferred_styles, notes, first_contact, last_contact")
+        .select(
+          "name, email, phone, instagram, preferred_styles, notes, first_contact, last_contact",
+        )
         .eq("id", page.source_entity_id)
         .single();
       if (client) {
@@ -317,11 +362,18 @@ async function compilePage(
         if (client.email) lines.push(`Email: ${client.email}`);
         if (client.phone) lines.push(`Phone: ${client.phone}`);
         if (client.instagram) lines.push(`Instagram: ${client.instagram}`);
-        if (client.preferred_styles?.length) lines.push(`Styles: ${client.preferred_styles.join(", ")}`);
+        if (client.preferred_styles?.length) {
+          lines.push(`Styles: ${client.preferred_styles.join(", ")}`);
+        }
         if (client.notes) lines.push(`Notes: ${client.notes}`);
-        if (client.first_contact) lines.push(`First contact: ${client.first_contact}`);
-        if (client.last_contact) lines.push(`Last contact: ${client.last_contact}`);
-        supplementalContext = "\n\nClient profile:\n" + lines.join("\n");
+        if (client.first_contact) {
+          lines.push(`First contact: ${client.first_contact}`);
+        }
+        if (client.last_contact) {
+          lines.push(`Last contact: ${client.last_contact}`);
+        }
+        supplementalContext = "\n\nClient profile:\n" + lines.join("\n") +
+          supplementalContext;
       }
     }
 
@@ -338,36 +390,93 @@ async function compilePage(
     // Available pages for backlink detection
     const otherSlugs = allPageSlugs.filter((s) => s !== page.slug);
     const backlinkList = otherSlugs.length > 0
-      ? `\n\nExisting pages that could be cross-referenced (use these slugs for backlinks):\n${otherSlugs.join("\n")}`
+      ? `\n\nExisting pages that could be cross-referenced (use these slugs for backlinks):\n${
+        otherSlugs.join("\n")
+      }`
       : "";
 
     const isNewPage = !page.content || page.content.trim() === "";
+    // Edit mode: existing page already split into H2 sections. The LLM
+    // emits a small <edits> XML block describing which sections to update,
+    // which the parser applies locally. Output cost becomes O(change_size).
+    // Pre-refactor pages without H2 markers fall through to full-rewrite,
+    // which acts as a one-time lazy migration into edit-mode shape.
+    const hasH2 = /^## .+$/m.test(page.content || "");
+    const useEditMode = !isNewPage && hasH2;
 
-    const systemPrompt = isNewPage
-      ? `You are maintaining a wiki-style reference page for ${loadProfile().persona.compile_pages}. Create a new reference page for "${page.title}" (type: ${page.page_type}).
+    const recommended = recommendedSectionsFor(page.page_type);
+    const recommendedHint = recommended.length > 0
+      ? `\nFor "${page.page_type}" pages, prefer these recommended H2 section names when creating new sections (existing sections keep their current names): ${
+        recommended.map((s) => `## ${s}`).join(", ")
+      }.`
+      : "";
 
-Write a well-organized markdown document that synthesizes all the information into a coherent reference. Structure it with clear sections. Include all factual details from the source material. Write in third person for client pages, neutral reference style for topics/projects.
+    let systemPrompt: string;
+    if (isNewPage) {
+      systemPrompt =
+        `You are maintaining a wiki-style reference page for a tattoo artist's knowledge base. Create a new reference page for "${page.title}" (type: ${page.page_type}).
+
+Write a well-organized markdown document that synthesizes all the information into a coherent reference. Structure it with H2 (##) section headers so subsequent compiles can apply targeted edits. Include all factual details from the source material. Write in third person for client pages, neutral reference style for topics/projects.${recommendedHint}
 
 At the end, on a new line, output BACKLINKS: followed by a comma-separated list of page slugs from the available pages list that this page should cross-reference. If none are relevant, output BACKLINKS: none.
 
 On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separated list of the thought UUIDs (the (id: <uuid>) values from the source material) whose content contributed to the new or updated portions of this page. Include every thought you drew on. If you did not draw on any (e.g. minor cleanup pass), output SOURCE_THOUGHTS: none.
 
-Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical). No em dashes. No emojis.`
-      : `You are maintaining a wiki-style reference page for ${loadProfile().persona.compile_pages}. Update the existing page for "${page.title}" (type: ${page.page_type}) by integrating new information.
+Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
+    } else if (useEditMode) {
+      systemPrompt =
+        `You are maintaining a wiki-style reference page for a tattoo artist's knowledge base. Update the existing page for "${page.title}" (type: ${page.page_type}) by integrating new information.
+
+The page is already organized into H2-headed sections. Output ONLY the sections that need to change, using the structured-edit XML format below. Do NOT regenerate the whole page.
+
+Format:
+
+<edits>
+<section name="Section Name" action="update"><![CDATA[
+new full content for this section
+]]></section>
+<section name="Another Section" action="append"><![CDATA[
+- new entry to append
+]]></section>
+</edits>
+
+Available actions:
+- "update": replace the entire body of an existing section with new content
+- "append": add new content to the end of an existing section
+- "prepend": add new content to the start of an existing section
+- "create": add a brand-new section with this name and content
+
+Rules:
+- Match existing section names verbatim (case + whitespace) when targeting them. Look at the H2 headers in the current page below.
+- Wrap section content in <![CDATA[ ... ]]> to keep markdown characters safe.
+- Use "append" for chronological entries (sessions, dated activity). Use "update" when the content is canonical state that should be replaced. Use "create" when no existing section fits.
+- Do not emit an edit that rewrites a section identically to its current content.
+- Do not include the page's top-level title (# heading) in any edit; only H2 (##) sections are addressable.
+- If absolutely nothing in the new thoughts changes the page, still emit at least one edit (e.g. "Recent Activity" append) so the compile records progress.${recommendedHint}
+
+After the closing </edits> tag, output BACKLINKS: followed by a comma-separated list of page slugs from the available pages list that this page should cross-reference. If none are relevant, output BACKLINKS: none.
+
+On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separated list of the thought UUIDs (the (id: <uuid>) values from the source material) whose content contributed to your edits. Include every thought you drew on. If you did not draw on any, output SOURCE_THOUGHTS: none.
+
+Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
+    } else {
+      systemPrompt =
+        `You are maintaining a wiki-style reference page for a tattoo artist's knowledge base. Update the existing page for "${page.title}" (type: ${page.page_type}) by integrating new information.
 
 Rules:
 - Preserve all existing information that is still accurate
 - Add new facts, events, and context from the new thoughts
 - If new information contradicts existing content, update to the latest version and note the change
-- Keep the document well-organized with clear sections
+- Keep the document well-organized with H2 (##) section headers so subsequent compiles can apply targeted edits
 - Write in third person for client pages, neutral reference style for topics/projects
-- Do not simply append. Integrate new information into the appropriate sections.
+- Do not simply append. Integrate new information into the appropriate sections.${recommendedHint}
 
 At the end, on a new line, output BACKLINKS: followed by a comma-separated list of page slugs from the available pages list that this page should cross-reference. If none are relevant, output BACKLINKS: none.
 
 On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separated list of the thought UUIDs (the (id: <uuid>) values from the source material) whose content contributed to the new or updated portions of this page. Include every thought you drew on. If you did not draw on any (e.g. minor cleanup pass), output SOURCE_THOUGHTS: none.
 
-Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical). No em dashes. No emojis.`;
+Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
+    }
 
     const userContent = isNewPage
       ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
@@ -390,6 +499,23 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       cleanContent = result.substring(0, backlinkMatch.index).trim();
     }
 
+    // Edit-mode override: the LLM's body was an <edits> XML block, not the
+    // full page. Parse and apply to the existing content. On parse failure
+    // (zero valid section edits), bail with an error so the page rolls into
+    // the next compile run instead of being silently rewritten as the bare
+    // XML block.
+    if (useEditMode) {
+      const edits = parseEditsXml(cleanContent);
+      if (edits.length === 0) {
+        return {
+          updated: false,
+          error:
+            "edit-mode response contained no valid <section> edits; will retry next run",
+        };
+      }
+      cleanContent = applyEdits(page.content, edits);
+    }
+
     if (backlinkMatch) {
       const backlinkStr = backlinkMatch[1].trim();
       if (backlinkStr !== "none") {
@@ -403,7 +529,8 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
     if (sourceMatch) {
       const sourceStr = sourceMatch[1].trim();
       if (sourceStr !== "none") {
-        const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const uuidPattern =
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
         const validIdsFromInput = new Set(newThoughts.map((t) => t.id));
         newSourceIds = sourceStr
           .split(",")
@@ -416,7 +543,8 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
     // Merge with existing source_thought_ids (cumulative). Read current array
     // from the page row we already loaded; older rows pre-12.D have an empty
     // default and accumulate organically.
-    const existingIds = (page as { source_thought_ids?: string[] }).source_thought_ids ?? [];
+    const existingIds =
+      (page as { source_thought_ids?: string[] }).source_thought_ids ?? [];
     const mergedIds = Array.from(new Set([...existingIds, ...newSourceIds]));
 
     // Update the page
@@ -542,7 +670,15 @@ interface LintResult {
 }
 
 async function runLint(
-  pages: Array<{ slug: string; title: string; page_type: string; content: string; last_compiled: string | null }>
+  pages: Array<
+    {
+      slug: string;
+      title: string;
+      page_type: string;
+      content: string;
+      last_compiled: string | null;
+    }
+  >,
 ): Promise<LintResult> {
   const result: LintResult = {
     stale_pages: [],
@@ -563,7 +699,9 @@ async function runLint(
     const age = now - new Date(page.last_compiled).getTime();
     if (age > thirtyDays) {
       const dayCount = Math.floor(age / 86400000);
-      result.stale_pages.push(`${page.slug} (${dayCount} days since last update)`);
+      result.stale_pages.push(
+        `${page.slug} (${dayCount} days since last update)`,
+      );
     }
   }
 
@@ -586,7 +724,8 @@ async function runLint(
           const slug = makeSlug("topic", tp as string);
           if (!existingSlugs.has(slug)) {
             const key = `topic:${tp}`;
-            entityCounts[key] = entityCounts[key] || { type: "topic", count: 0 };
+            entityCounts[key] = entityCounts[key] ||
+              { type: "topic", count: 0 };
             entityCounts[key].count++;
           }
         }
@@ -595,7 +734,8 @@ async function runLint(
         const slug = makeSlug("project", m.project);
         if (!existingSlugs.has(slug)) {
           const key = `project:${m.project}`;
-          entityCounts[key] = entityCounts[key] || { type: "project", count: 0 };
+          entityCounts[key] = entityCounts[key] ||
+            { type: "project", count: 0 };
           entityCounts[key].count++;
         }
       }
@@ -603,7 +743,9 @@ async function runLint(
 
     for (const [key, info] of Object.entries(entityCounts)) {
       if (info.count >= 3) {
-        result.gap_entities.push(`${key} (${info.count} mentions this week, no compiled page)`);
+        result.gap_entities.push(
+          `${key} (${info.count} mentions this week, no compiled page)`,
+        );
       }
     }
   }
@@ -622,8 +764,12 @@ async function runLint(
       if (backlinkGroups[key]) continue;
 
       // Simple heuristic: check if page titles appear in each other's content
-      const pageRefersOther = page.content.toLowerCase().includes(other.title.toLowerCase());
-      const otherRefersPage = other.content.toLowerCase().includes(page.title.toLowerCase());
+      const pageRefersOther = page.content.toLowerCase().includes(
+        other.title.toLowerCase(),
+      );
+      const otherRefersPage = other.content.toLowerCase().includes(
+        page.title.toLowerCase(),
+      );
       if (pageRefersOther || otherRefersPage) {
         backlinkGroups[key] = [page.slug, other.slug];
       }
@@ -645,7 +791,11 @@ async function runLint(
       try {
         const checkResult = await llmCall(
           `You are checking two wiki pages for contradictions. If you find any factual contradictions between the pages (conflicting dates, conflicting descriptions of the same event, conflicting claims), list each one briefly. If no contradictions, respond with exactly: NONE`,
-          `Page A (${pageA.title}):\n${pageA.content.substring(0, 2000)}\n\n---\n\nPage B (${pageB.title}):\n${pageB.content.substring(0, 2000)}`,
+          `Page A (${pageA.title}):\n${
+            pageA.content.substring(0, 2000)
+          }\n\n---\n\nPage B (${pageB.title}):\n${
+            pageB.content.substring(0, 2000)
+          }`,
         );
 
         if (checkResult.trim() !== "NONE") {
@@ -672,7 +822,8 @@ async function runLint(
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
-    const provided = req.headers.get("x-brain-key") || url.searchParams.get("key");
+    const provided = req.headers.get("x-brain-key") ||
+      url.searchParams.get("key");
     if (!provided || provided !== MCP_ACCESS_KEY) {
       return new Response("Unauthorized", { status: 401 });
     }
@@ -687,7 +838,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Get all existing pages
     const { data: pages, error: pagesErr } = await supabase
       .from("compiled_pages")
-      .select("id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids")
+      .select(
+        "id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids",
+      )
       .order("slug", { ascending: true });
 
     if (pagesErr) {
@@ -721,7 +874,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (autoCreated > 0) {
       const { data: refreshed } = await supabase
         .from("compiled_pages")
-        .select("id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids")
+        .select(
+          "id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids",
+        )
         .order("slug", { ascending: true });
       allPages = refreshed || [];
     }
@@ -736,7 +891,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
       if (!a.last_compiled && !b.last_compiled) return 0;
       if (!a.last_compiled) return -1;
       if (!b.last_compiled) return 1;
-      return new Date(a.last_compiled).getTime() - new Date(b.last_compiled).getTime();
+      return new Date(a.last_compiled).getTime() -
+        new Date(b.last_compiled).getTime();
     });
 
     // Wall-clock budget. Edge Runtime kills at 150s. Together with the
@@ -960,7 +1116,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
     return new Response(
       JSON.stringify({ error: msg }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+      { status: 500, headers: { "Content-Type": "application/json" } },
     );
   }
 });
