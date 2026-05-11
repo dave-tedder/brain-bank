@@ -2055,11 +2055,13 @@ server.registerTool(
         }
       }
 
-      // Read-time freshness: append thoughts captured since last_compiled that
-      // match this entity. Closes the staleness window between daily compiles.
-      // Mirrors compile-pages filter logic so the recent activity matches what
-      // would land in the page on the next compile.
-      if (page.last_compiled) {
+      // Read-time freshness: append context captured since last_compiled.
+      //
+      // For client/topic/project: append matching thoughts (mirrors compile-pages
+      // filter logic). For index: append a list of entity pages compiled since the
+      // index's own last_compiled (audit Finding 14c — previously this fell
+      // through to an unfiltered thoughts dump that leaked unrelated activity).
+      if (page.last_compiled && page.page_type !== "index") {
         try {
           let recentQ = supabase
             .from("thoughts")
@@ -2087,6 +2089,25 @@ server.registerTool(
           }
         } catch (_err) {
           // Freshness is best-effort; never fail the page read on freshness errors.
+        }
+      } else if (page.last_compiled && page.page_type === "index") {
+        try {
+          const { data: changedPages } = await supabase
+            .from("compiled_pages")
+            .select("slug, title, page_type, last_compiled")
+            .gt("last_compiled", page.last_compiled)
+            .neq("slug", "index/wiki")
+            .order("last_compiled", { ascending: false })
+            .limit(20);
+          if (changedPages && changedPages.length > 0) {
+            lines.push("", `## Pages compiled since ${new Date(page.last_compiled).toLocaleDateString()} (${changedPages.length})`);
+            for (const p of changedPages) {
+              const d = new Date(p.last_compiled!).toLocaleDateString();
+              lines.push(`- **${p.title}** (\`${p.slug}\`, ${p.page_type}) — compiled ${d}`);
+            }
+          }
+        } catch (_err) {
+          // Freshness is best-effort.
         }
       }
 

@@ -49,23 +49,29 @@ function parseIndexCompileMode(
 // batch keeps moving — the page rolls into next cron's queue.
 const LLM_CALL_TIMEOUT_MS = 60_000;
 
-async function llmCall(systemPrompt: string, userContent: string): Promise<string> {
+async function llmCall(
+  systemPrompt: string,
+  userContent: string,
+  options?: { maxTokens?: number },
+): Promise<string> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), LLM_CALL_TIMEOUT_MS);
   try {
+    const body: Record<string, unknown> = {
+      model: "anthropic/claude-sonnet-4.6",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+    };
+    if (options?.maxTokens) body.max_tokens = options.maxTokens;
     const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: "anthropic/claude-sonnet-4.6",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
-        ],
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     const d = await r.json();
@@ -172,28 +178,49 @@ async function compileIndexPage(
       return { updated: false, error: "No pages to index yet" };
     }
 
-    // Build per-page descriptors: title, slug, type, last compiled, first 200 chars of content.
-    const grouped: Record<string, typeof tocSources> = {};
-    for (const p of tocSources) {
+    // Split into compiled vs never-compiled. The LLM gets the compiled pages
+    // with previews; never-compiled pages are summarized as a count per type
+    // so they don't waste prompt budget on rows the model can't say anything
+    // about. Audit Finding 2c.
+    const compiledSources = tocSources.filter((p) => p.last_compiled && p.content);
+    const notYetCompiled = tocSources.filter((p) => !p.last_compiled || !p.content);
+
+    const grouped: Record<string, typeof compiledSources> = {};
+    for (const p of compiledSources) {
       if (!grouped[p.page_type]) grouped[p.page_type] = [];
       grouped[p.page_type].push(p);
     }
 
-    const tocText = Object.entries(grouped)
-      .map(([type, pages]) => {
+    const notYetByType: Record<string, number> = {};
+    for (const p of notYetCompiled) {
+      notYetByType[p.page_type] = (notYetByType[p.page_type] || 0) + 1;
+    }
+
+    const tocText = [
+      ...Object.entries(grouped).map(([type, pages]) => {
         const lines = [`### ${type.toUpperCase()} (${pages.length} pages)`];
         for (const p of pages) {
-          const compiled = p.last_compiled
-            ? new Date(p.last_compiled).toLocaleDateString()
-            : "never";
+          const compiled = new Date(p.last_compiled!).toLocaleDateString();
           const preview = p.content
-            ? p.content.substring(0, 200).replace(/\n+/g, " ").trim()
-            : "(not yet compiled)";
-          lines.push(`- **${p.title}** (\`${p.slug}\`, compiled ${compiled})\n  ${preview}`);
+            .substring(0, 200)
+            .replace(/\n+/g, " ")
+            .trim();
+          lines.push(
+            `- **${p.title}** (\`${p.slug}\`, compiled ${compiled})\n  ${preview}`,
+          );
         }
         return lines.join("\n");
-      })
-      .join("\n\n");
+      }),
+      ...(Object.keys(notYetByType).length > 0
+        ? [
+          `### Not yet compiled\n${
+            Object.entries(notYetByType)
+              .map(([type, count]) => `- ${type}: ${count} pages`)
+              .join("\n")
+          }`,
+        ]
+        : []),
+    ].join("\n\n");
 
     const systemPrompt = `You are writing the table-of-contents page for a wiki-style knowledge base. Given a list of all pages grouped by type (client, topic, project), write a single coherent index page that:
 - Briefly introduces what the wiki tracks (one short paragraph).
@@ -207,7 +234,7 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
 
     const userContent = `Pages currently in the wiki:\n\n${tocText}`;
 
-    const result = await llmCall(systemPrompt, userContent);
+    const result = await llmCall(systemPrompt, userContent, { maxTokens: 1200 });
 
     // No backlinks for the index — it's the root, not a member of the graph.
     const now = new Date().toISOString();
