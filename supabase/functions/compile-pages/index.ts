@@ -505,6 +505,7 @@ interface LintResult {
   stale_pages: string[];
   gap_entities: string[];
   contradiction_warnings: string[];
+  diagnostics: string[];
 }
 
 async function runLint(
@@ -514,6 +515,7 @@ async function runLint(
     stale_pages: [],
     gap_entities: [],
     contradiction_warnings: [],
+    diagnostics: [],
   };
 
   const now = Date.now();
@@ -607,15 +609,22 @@ async function runLint(
       const pageB = pages.find((p) => p.slug === slugB);
       if (!pageA || !pageB) return null;
 
-      const checkResult = await llmCall(
-        `You are checking two wiki pages for contradictions. If you find any factual contradictions between the pages (conflicting dates, conflicting descriptions of the same event, conflicting claims), list each one briefly. If no contradictions, respond with exactly: NONE`,
-        `Page A (${pageA.title}):\n${pageA.content.substring(0, 2000)}\n\n---\n\nPage B (${pageB.title}):\n${pageB.content.substring(0, 2000)}`,
-      );
+      try {
+        const checkResult = await llmCall(
+          `You are checking two wiki pages for contradictions. If you find any factual contradictions between the pages (conflicting dates, conflicting descriptions of the same event, conflicting claims), list each one briefly. If no contradictions, respond with exactly: NONE`,
+          `Page A (${pageA.title}):\n${pageA.content.substring(0, 2000)}\n\n---\n\nPage B (${pageB.title}):\n${pageB.content.substring(0, 2000)}`,
+        );
 
-      if (checkResult.trim() !== "NONE") {
-        return `${slugA} vs ${slugB}: ${checkResult.substring(0, 300)}`;
+        if (checkResult.trim() !== "NONE") {
+          return `${slugA} vs ${slugB}: ${checkResult.substring(0, 300)}`;
+        }
+        return null;
+      } catch (err) {
+        result.diagnostics.push(
+          `contradiction check failed for ${slugA} vs ${slugB}: ${(err as Error).message}`,
+        );
+        return null;
       }
-      return null;
     },
   );
   for (const c of checks) {
@@ -810,9 +819,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
           indexCompiled = true;
         } else if (indexResult.error) {
           console.error(`Index compile error: ${indexResult.error}`);
+          indexSkippedReason = `index compile failed: ${indexResult.error}`;
         }
       } catch (err) {
-        console.error(`Index compile threw: ${(err as Error).message}`);
+        const msg = (err as Error).message;
+        console.error(`Index compile threw: ${msg}`);
+        indexSkippedReason = `index compile threw: ${msg}`;
       }
     } else if (indexMode === "skip") {
       indexSkippedReason = "disabled by index=skip";

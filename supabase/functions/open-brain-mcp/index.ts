@@ -28,10 +28,11 @@ declare const EdgeRuntime: {
 function logToolInvocation(
   toolName: string,
   args: Record<string, unknown>,
+  source: "mcp" | "rest",
 ): void {
   const writePromise = supabase
     .from("mcp_tool_invocations")
-    .insert({ tool_name: toolName, args })
+    .insert({ tool_name: toolName, args, source })
     .then((r: { error?: { message?: string } | null }) => {
       if (r.error) {
         console.error(
@@ -935,6 +936,7 @@ server.registerTool(
     },
   },
   async ({ id }) => {
+    logToolInvocation("get_thought_by_id", { id }, "mcp");
     try {
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       if (!uuidPattern.test(id)) {
@@ -1985,7 +1987,7 @@ server.registerTool(
   },
   async ({ slug, name, page_type }) => {
     try {
-      logToolInvocation("get_compiled_page", { slug, name, page_type });
+      logToolInvocation("get_compiled_page", { slug, name, page_type }, "mcp");
       if (!slug && !name) {
         return { content: [{ type: "text" as const, text: "Provide either slug or name." }], isError: true };
       }
@@ -2109,7 +2111,7 @@ server.registerTool(
   },
   async ({ query, page_type, limit }) => {
     try {
-      logToolInvocation("search_compiled_pages", { query, page_type, limit });
+      logToolInvocation("search_compiled_pages", { query, page_type, limit }, "mcp");
       let q = supabase
         .from("compiled_pages")
         .select("slug, title, page_type, last_compiled, content")
@@ -2148,7 +2150,7 @@ server.registerTool(
   },
   async ({ page_type, limit }) => {
     try {
-      logToolInvocation("list_compiled_pages", { page_type, limit });
+      logToolInvocation("list_compiled_pages", { page_type, limit }, "mcp");
       let q = supabase
         .from("compiled_pages")
         .select("slug, title, page_type, last_compiled")
@@ -2195,6 +2197,7 @@ async function handleRestPages(url: URL): Promise<Response> {
     const limit = parseInt(url.searchParams.get("limit") || "20");
 
     if (slug) {
+      logToolInvocation("get_compiled_page", { slug }, "rest");
       // Get specific page by slug
       const { data, error } = await supabase
         .from("compiled_pages")
@@ -2203,6 +2206,12 @@ async function handleRestPages(url: URL): Promise<Response> {
         .single();
       if (error || !data) return jsonResponse({ error: "Page not found" }, 404);
       return jsonResponse(data);
+    }
+
+    if (query) {
+      logToolInvocation("search_compiled_pages", { query, type, limit }, "rest");
+    } else {
+      logToolInvocation("list_compiled_pages", { type, limit }, "rest");
     }
 
     // List/search pages

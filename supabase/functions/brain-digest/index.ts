@@ -930,6 +930,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
               slackMessage += `\n\n---\n:books: *Wiki Health*\n${lintLines.join("\n")}`;
             }
           }
+        } else {
+          const body = await lintRes.text().catch(() => "(body unreadable)");
+          console.error(
+            `[brain-digest] lint fetch failed: status=${lintRes.status} body=${body.substring(0, 500)}`,
+          );
         }
       } catch (err) {
         console.error("Lint results fetch failed (non-fatal):", err);
