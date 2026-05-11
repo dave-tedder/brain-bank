@@ -2,6 +2,7 @@ import { supabase } from "@/lib/supabase";
 import { notFound } from "next/navigation";
 import PageContent from "@/components/PageContent";
 import Link from "next/link";
+import { stalenessFor } from "@/lib/staleness";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +58,14 @@ export default async function WikiDetailPage({ params }: Props) {
               })}
             </span>
           )}
+          {page.last_compiled && (() => {
+            const { isStale, daysOld } = stalenessFor(page.page_type, page.last_compiled);
+            return isStale ? (
+              <span className="ml-2 inline-block rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-900">
+                STALE {daysOld}d
+              </span>
+            ) : null;
+          })()}
         </div>
         <h1
           className="font-terminal text-3xl text-glow"
