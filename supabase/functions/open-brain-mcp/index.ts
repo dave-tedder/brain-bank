@@ -848,6 +848,7 @@ server.registerTool(
     },
   },
   async ({ query, limit, threshold }) => {
+    logToolInvocation("search_thoughts", { query, limit, threshold }, "mcp");
     try {
       const qEmb = await getEmbedding(query);
       const { data, error } = await supabase.rpc("match_thoughts", {
@@ -898,6 +899,7 @@ server.registerTool(
     },
   },
   async ({ limit, type, topic, person, days }) => {
+    logToolInvocation("list_thoughts", { limit, type, topic, person, days }, "mcp");
     try {
       let q = supabase.from("thoughts").select("content, metadata, created_at").order("created_at", { ascending: false }).limit(limit);
       if (type) q = q.contains("metadata", { type });
@@ -1027,6 +1029,7 @@ server.registerTool(
     },
   },
   async ({ id, relation, min_confidence, limit }) => {
+    logToolInvocation("get_thought_edges", { id, relation, min_confidence, limit }, "mcp");
     try {
       const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       if (!uuidPattern.test(id)) {
@@ -1108,6 +1111,7 @@ server.registerTool(
     inputSchema: {},
   },
   async () => {
+    logToolInvocation("thought_stats", {}, "mcp");
     try {
       const { count } = await supabase.from("thoughts").select("*", { count: "exact", head: true });
       const { data } = await supabase.from("thoughts").select("metadata, created_at").order("created_at", { ascending: false });
@@ -1145,6 +1149,7 @@ server.registerTool(
     },
   },
   async ({ content }) => {
+    logToolInvocation("capture_thought", { content }, "mcp");
     try {
       const hash = await contentHash(content);
       if (await isDuplicate(hash)) {
@@ -1191,6 +1196,7 @@ server.registerTool(
     },
   },
   async ({ name, email, phone, instagram, preferred_styles, notes }) => {
+    logToolInvocation("add_client", { name, email, phone, instagram, preferred_styles, notes }, "mcp");
     try {
       // Check if client with same name already exists
       const { data: existing } = await supabase
@@ -1247,6 +1253,7 @@ server.registerTool(
     },
   },
   async ({ name }) => {
+    logToolInvocation("find_client", { name }, "mcp");
     try {
       const { data, error } = await supabase
         .from("clients")
@@ -1292,6 +1299,7 @@ server.registerTool(
     },
   },
   async ({ client_id, name }) => {
+    logToolInvocation("client_context", { client_id, name }, "mcp");
     try {
       if (!client_id && !name) {
         return {
@@ -1420,6 +1428,7 @@ server.registerTool(
     },
   },
   async ({ title, content_type, subject, client_id, stage, platform, notes }) => {
+    logToolInvocation("log_content", { title, content_type, subject, client_id, stage, platform, notes }, "mcp");
     try {
       const record: Record<string, unknown> = { content_type, stage: stage || "captured" };
       if (title) record.title = title;
@@ -1474,6 +1483,7 @@ server.registerTool(
     },
   },
   async ({ content_id, stage, platform, scheduled_date, published_date, performance, notes }) => {
+    logToolInvocation("update_content", { content_id, stage, platform, scheduled_date, published_date, performance, notes }, "mcp");
     try {
       const updates: Record<string, unknown> = {};
       if (stage) updates.stage = stage;
@@ -1519,6 +1529,7 @@ server.registerTool(
     },
   },
   async ({ content_type, platform, limit }) => {
+    logToolInvocation("content_status", { content_type, platform, limit }, "mcp");
     try {
       let q = supabase
         .from("content_items")
@@ -1585,6 +1596,7 @@ server.registerTool(
     },
   },
   async ({ days, limit }) => {
+    logToolInvocation("content_performance", { days, limit }, "mcp");
     try {
       const since = new Date();
       since.setDate(since.getDate() - days);
@@ -1643,6 +1655,7 @@ server.registerTool(
     },
   },
   async ({ event_type, title, date_start, date_end, location, notes }) => {
+    logToolInvocation("log_event", { event_type, title, date_start, date_end, location, notes }, "mcp");
     try {
       const record: Record<string, unknown> = { event_type, title };
       if (date_start) record.date_start = date_start;
@@ -1680,6 +1693,7 @@ server.registerTool(
     },
   },
   async ({ event_type, days }) => {
+    logToolInvocation("upcoming_events", { event_type, days }, "mcp");
     try {
       const today = new Date().toISOString().split("T")[0];
       const until = new Date();
@@ -1727,6 +1741,7 @@ server.registerTool(
     inputSchema: {},
   },
   async () => {
+    logToolInvocation("business_context", {}, "mcp");
     try {
       const today = new Date().toISOString().split("T")[0];
       const thirtyDaysAgo = new Date();
@@ -1809,6 +1824,7 @@ server.registerTool(
     },
   },
   async ({ query }) => {
+    logToolInvocation("full_context", { query }, "mcp");
     try {
       const sections: string[] = [`## Full Context: "${query}"\n`];
 

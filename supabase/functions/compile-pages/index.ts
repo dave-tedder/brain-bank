@@ -10,6 +10,12 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+// Deno Edge Runtime exposes EdgeRuntime as a global; declare it for the type
+// checker so the workspace deno check stays clean for the audit-row write.
+declare const EdgeRuntime: {
+  waitUntil: (p: PromiseLike<unknown>) => void;
+};
+
 // Minimum thought mentions before auto-creating a topic/project page
 const AUTO_CREATE_THRESHOLD = 5;
 
@@ -672,6 +678,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     const mode = url.searchParams.get("mode") || "compile"; // "compile", "lint", or "index"
+    const invoker = url.searchParams.get("invoker") || "pg_cron";
     const indexMode = parseIndexCompileMode(
       url.searchParams.get("index"),
       mode,
@@ -892,13 +899,63 @@ Deno.serve(async (req: Request): Promise<Response> => {
       }`,
     );
 
+    const durationMs = Date.now() - startTime;
+    const auditWrite = supabase
+      .from("compile_pages_runs")
+      .insert({
+        mode,
+        index_mode: indexMode,
+        batch: maxCompilePerRun,
+        pages_total: allPages.length,
+        auto_created: autoCreated,
+        compiled,
+        skipped,
+        errors,
+        index_compiled: indexCompiled,
+        index_skipped_reason: indexSkippedReason ?? null,
+        compiled_slugs: compiledSlugs,
+        status: "complete",
+        error_message: null,
+        duration_ms: durationMs,
+        invoker,
+      })
+      .then((r: { error?: { message?: string } | null }) => {
+        if (r.error) {
+          console.error(
+            `[compile-pages-runs] insert failed: ${r.error.message}`,
+          );
+        }
+      });
+    EdgeRuntime.waitUntil(auditWrite);
+
     return new Response(JSON.stringify(response), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (err) {
+    const msg = (err as Error).message;
     console.error("Compile-pages error:", err);
+    try {
+      const auditWrite = supabase
+        .from("compile_pages_runs")
+        .insert({
+          mode: "unknown",
+          index_mode: "unknown",
+          status: "errored",
+          error_message: msg,
+        })
+        .then((r: { error?: { message?: string } | null }) => {
+          if (r.error) {
+            console.error(
+              `[compile-pages-runs] error-path insert failed: ${r.error.message}`,
+            );
+          }
+        });
+      EdgeRuntime.waitUntil(auditWrite);
+    } catch (_writeErr) {
+      // best-effort: don't let audit failure mask the original error
+    }
     return new Response(
-      JSON.stringify({ error: (err as Error).message }),
+      JSON.stringify({ error: msg }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
