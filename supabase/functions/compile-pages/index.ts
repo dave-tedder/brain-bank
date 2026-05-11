@@ -751,6 +751,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     let compiled = 0;
     let skipped = 0;
     let errors = 0;
+    const errored: { slug: string; error: string }[] = [];
     let budgetExhausted = false;
     const compiledSlugs: string[] = [];
 
@@ -810,6 +811,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
           } else if (result.error) {
             console.error(`Compile error for ${page.slug}: ${result.error}`);
             errors++;
+            errored.push({ slug: page.slug, error: result.error });
           }
           // If not updated and no error, page had no new thoughts (rare
           // after the pre-filter, but possible if a thought is deleted
@@ -887,6 +889,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       skipped,
       errors,
       compiled_slugs: compiledSlugs,
+      errored,
       index_compiled: indexCompiled,
       index_mode: indexMode,
     };
@@ -914,6 +917,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         index_compiled: indexCompiled,
         index_skipped_reason: indexSkippedReason ?? null,
         compiled_slugs: compiledSlugs,
+        errored,
         status: "complete",
         error_message: null,
         duration_ms: durationMs,
