@@ -19,6 +19,17 @@ declare const EdgeRuntime: {
 // Minimum thought mentions before auto-creating a topic/project page
 const AUTO_CREATE_THRESHOLD = 5;
 
+// On the very first compile of a page (last_compiled IS NULL), the thought
+// query defaults `since` to 2020-01-01 and would otherwise pull up to 50
+// thoughts of backlog. Even in edit mode, integrating that volume on cold
+// start can blow past LLM_CALL_TIMEOUT_MS and the page death-loops on NULL
+// last_compiled. Cap intake to a small bounded window during catch-up; the
+// watermark advances to the newest processed thought's created_at so the
+// next cron run picks up the next slice. Convergence: pageN_backlog /
+// CATCHUP_THOUGHT_LIMIT cron runs to fully catch up, each well under 60s.
+const CATCHUP_THOUGHT_LIMIT = 8;
+const STEADY_THOUGHT_LIMIT = 50;
+
 // Comma-separated topic/project tags to suppress from auto-page creation.
 // Use for high-volume mechanical-capture sources (fitness sync, calendar sync)
 // whose tags would otherwise spam the wiki without producing useful pages.
@@ -294,7 +305,16 @@ async function compilePage(
   allPageSlugs: string[],
 ): Promise<{ updated: boolean; error?: string }> {
   try {
-    // Find new thoughts since last compilation
+    // Find new thoughts since last compilation. NULL last_compiled is a
+    // catch-up run; bound intake to CATCHUP_THOUGHT_LIMIT so even pages with
+    // years of backlog finish under LLM_CALL_TIMEOUT_MS. The successful-path
+    // update below advances last_compiled to the newest fetched thought's
+    // created_at (not now()), so each run chips off another slice until the
+    // watermark catches up to the present.
+    const isCatchup = !page.last_compiled;
+    const intakeLimit = isCatchup
+      ? CATCHUP_THOUGHT_LIMIT
+      : STEADY_THOUGHT_LIMIT;
     const since = page.last_compiled || "2020-01-01T00:00:00Z";
     let thoughtQuery = supabase
       .from("thoughts")
@@ -322,7 +342,9 @@ async function compilePage(
       thoughtQuery = thoughtQuery.contains("metadata", { project: page.title });
     }
 
-    const { data: newThoughts, error: qErr } = await thoughtQuery.limit(50);
+    const { data: newThoughts, error: qErr } = await thoughtQuery.limit(
+      intakeLimit,
+    );
     if (qErr) return { updated: false, error: qErr.message };
     if (!newThoughts || newThoughts.length === 0) return { updated: false };
 
@@ -547,15 +569,22 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       (page as { source_thought_ids?: string[] }).source_thought_ids ?? [];
     const mergedIds = Array.from(new Set([...existingIds, ...newSourceIds]));
 
-    // Update the page
-    const now = new Date().toISOString();
+    // Update the page. Watermark last_compiled to the newest processed
+    // thought's created_at, not now(). For steady-state runs the newest
+    // thought is from today so watermark ≈ now; for catch-up runs the
+    // watermark stays in the past until the page is fully caught up,
+    // letting subsequent cron passes keep advancing through the backlog
+    // in CATCHUP_THOUGHT_LIMIT-sized slices. Real run time is recorded
+    // separately in compile_pages_runs.
+    const newest = newThoughts[newThoughts.length - 1];
+    const watermark = newest.created_at;
     const { error: updateErr } = await supabase
       .from("compiled_pages")
       .update({
         content: cleanContent,
         backlinks,
         source_thought_ids: mergedIds,
-        last_compiled: now,
+        last_compiled: watermark,
       })
       .eq("id", page.id);
 
@@ -570,6 +599,15 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
 
 async function autoCreatePages(existingSlugs: Set<string>): Promise<number> {
   let created = 0;
+
+  // Seed every auto-created page with one recommended H2 header so the very
+  // first compile run qualifies for edit-mode (useEditMode requires non-empty
+  // content + an H2 marker). Skips the full-rewrite branch and its
+  // O(page_size) output cost on the first compile.
+  const seedContent = (pageType: string): string => {
+    const first = recommendedSectionsFor(pageType)[0];
+    return first ? `## ${first}\n` : "";
+  };
 
   // Auto-create client pages for clients without one
   const { data: clients } = await supabase
@@ -586,6 +624,7 @@ async function autoCreatePages(existingSlugs: Set<string>): Promise<number> {
         title: client.name,
         page_type: "client",
         source_entity_id: client.id,
+        content: seedContent("client"),
       });
       if (!error) {
         existingSlugs.add(slug);
@@ -631,6 +670,7 @@ async function autoCreatePages(existingSlugs: Set<string>): Promise<number> {
         slug,
         title: topic,
         page_type: "topic",
+        content: seedContent("topic"),
       });
       if (!error) {
         existingSlugs.add(slug);
@@ -649,6 +689,7 @@ async function autoCreatePages(existingSlugs: Set<string>): Promise<number> {
         slug,
         title: project,
         page_type: "project",
+        content: seedContent("project"),
       });
       if (!error) {
         existingSlugs.add(slug);
