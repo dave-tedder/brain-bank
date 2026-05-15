@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { logOpenRouterCall } from "@/lib/openrouter-log";
 import ThoughtCard from "@/components/ThoughtCard";
 
 export const dynamic = "force-dynamic";
@@ -7,20 +8,46 @@ interface Props {
   searchParams: Promise<{ q?: string }>;
 }
 
+const EMBED_MODEL = "openai/text-embedding-3-small";
+
 async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch("https://openrouter.ai/api/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
-      input: text,
-    }),
-  });
-  const d = await r.json();
-  return d.data[0].embedding;
+  const startedAt = Date.now();
+  let status: "ok" | "error_4xx" | "error_5xx" | "budget_exceeded" = "ok";
+  let errorMessage: string | null = null;
+  let promptTokens: number | null = null;
+  try {
+    const r = await fetch("https://openrouter.ai/api/v1/embeddings", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: EMBED_MODEL, input: text }),
+    });
+    if (!r.ok) {
+      errorMessage = (await r.text().catch(() => "")).slice(0, 500);
+      if (r.status === 403 && /budget.*(exceed|limit)/i.test(errorMessage)) {
+        status = "budget_exceeded";
+      } else {
+        status = r.status >= 500 ? "error_5xx" : "error_4xx";
+      }
+      throw new Error(`OpenRouter embeddings ${r.status}: ${errorMessage.slice(0, 200)}`);
+    }
+    const d = await r.json();
+    promptTokens = typeof d?.usage?.prompt_tokens === "number" ? d.usage.prompt_tokens : null;
+    return d.data[0].embedding;
+  } finally {
+    void logOpenRouterCall({
+      function_slug: "dashboard-search",
+      call_site: "getEmbedding",
+      model: EMBED_MODEL,
+      prompt_tokens: promptTokens,
+      completion_tokens: 0,
+      latency_ms: Date.now() - startedAt,
+      status,
+      error_message: errorMessage,
+    });
+  }
 }
 
 export default async function SearchPage({ searchParams }: Props) {

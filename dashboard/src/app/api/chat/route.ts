@@ -1,9 +1,12 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
 import { searchThoughts, searchPages } from "@/lib/brainBankApi";
+import { logOpenRouterCall } from "@/lib/openrouter-log";
 import { APP } from "@/config/app";
 
 export const maxDuration = 30;
+
+const CHAT_MODEL = "anthropic/claude-sonnet-4.6";
 
 const openrouter = createOpenAI({
   baseURL: "https://openrouter.ai/api/v1",
@@ -63,10 +66,36 @@ export async function POST(req: Request) {
       ? `\n\n<context>\n${contextParts.join("\n")}</context>`
       : `\n\n<context>No relevant context found in ${APP.name}.</context>`;
 
+  const startedAt = Date.now();
+
   const result = streamText({
-    model: openrouter.chat("anthropic/claude-sonnet-4.6"),
+    model: openrouter.chat(CHAT_MODEL),
     system: SYSTEM_PROMPT + contextBlock,
     messages,
+    // Vercel AI SDK fires onFinish after the stream completes (success or
+    // controlled stop). Tokens come from the upstream OpenRouter response.
+    // Errors short-circuit before this fires; onError logs those instead.
+    onFinish: (event) => {
+      void logOpenRouterCall({
+        function_slug: "dashboard-chat",
+        call_site: "chat",
+        model: CHAT_MODEL,
+        prompt_tokens: event.usage?.inputTokens ?? null,
+        completion_tokens: event.usage?.outputTokens ?? null,
+        latency_ms: Date.now() - startedAt,
+        status: "ok",
+      });
+    },
+    onError: ({ error }) => {
+      void logOpenRouterCall({
+        function_slug: "dashboard-chat",
+        call_site: "chat",
+        model: CHAT_MODEL,
+        latency_ms: Date.now() - startedAt,
+        status: "error_5xx",
+        error_message: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+      });
+    },
   });
 
   return result.toTextStreamResponse();
