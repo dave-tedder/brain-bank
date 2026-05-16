@@ -68,6 +68,24 @@ async function isDuplicate(hash: string): Promise<boolean> {
   return (data?.length ?? 0) > 0;
 }
 
+// Sync-source captures (e.g. a Notion database sync) dedup on the source
+// record's identity + last-edited timestamp instead of content hash. A sync
+// re-renders each record into a capture string that drifts on cosmetic
+// changes (whitespace, em-dash vs double-dash, a field toggling to/from
+// "N/A"), defeating the SHA-256 content hash. The source's last-edited
+// timestamp only advances when the record actually changes, so an unchanged
+// re-sync is correctly skipped while a genuine edit still lands a fresh
+// capture.
+async function isNotionDuplicate(pageId: string, lastEdited: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("thoughts")
+    .select("id")
+    .eq("metadata->>notion_page_id", pageId)
+    .eq("metadata->>notion_last_edited", lastEdited)
+    .limit(1);
+  return (data?.length ?? 0) > 0;
+}
+
 async function getEmbedding(text: string): Promise<number[]> {
   const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
     method: "POST",
@@ -670,14 +688,32 @@ async function handleRestCapture(req: Request): Promise<Response> {
         .filter(Boolean)
       : [];
     const source = typeof body?.source === "string" && body.source.length > 0 ? body.source : "chatgpt";
+
+    // Optional Notion-sync identity fields. When both are present, dedup runs
+    // on the record identity instead of the content hash (see isNotionDuplicate).
+    const notionPageId = typeof body?.notion_page_id === "string" && body.notion_page_id.trim()
+      ? body.notion_page_id.trim()
+      : null;
+    const notionLastEdited = typeof body?.notion_last_edited === "string" && body.notion_last_edited.trim()
+      ? body.notion_last_edited.trim()
+      : null;
+
     const hash = await contentHash(content);
-    if (await isDuplicate(hash)) return jsonResponse({ status: "duplicate", message: "Already in the brain." });
+    if (notionPageId && notionLastEdited) {
+      if (await isNotionDuplicate(notionPageId, notionLastEdited)) {
+        return jsonResponse({ status: "duplicate", message: "Already in the brain." });
+      }
+    } else if (await isDuplicate(hash)) {
+      return jsonResponse({ status: "duplicate", message: "Already in the brain." });
+    }
     const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
 
     const meta = metadata as Record<string, unknown>;
     const extractedTopics = Array.isArray(meta.topics) ? (meta.topics as string[]) : [];
     const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
     const finalMetadata: Record<string, unknown> = { ...meta, topics: mergedTopics, source };
+    if (notionPageId) finalMetadata.notion_page_id = notionPageId;
+    if (notionLastEdited) finalMetadata.notion_last_edited = notionLastEdited;
 
     const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: finalMetadata }).select("id").single();
     if (error || !inserted) return jsonResponse({ error: error?.message || "unknown error" }, 500);

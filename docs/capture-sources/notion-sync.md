@@ -149,14 +149,16 @@ STEP 2: For each row returned, capture a thought via POST /capture
 - Extract the title: find the property whose type is "title" and concatenate its plain_text segments.
 - Extract the Status value if present: look for a property named "Status" (case-insensitive). For select type, read .select.name. For status type, read .status.name. If absent, use "N/A".
 - Extract Created: page.created_time (ISO 8601).
+- Extract the page id: page.id, and the last-edited timestamp: page.last_edited_time (ISO 8601).
 - Compose the thought content:
   "[Notion Sync] <title> -- Status: <status>. Created: <created_time>. Source: Notion <DATABASE_NAME> database."
-- POST to $BRAIN_BASE/capture with header auth:
+- POST to $BRAIN_BASE/capture with header auth. Include notion_page_id + notion_last_edited so dedup keys on the record identity, not the rendered string:
   curl -s -X POST "$BRAIN_BASE/capture" \
     -H "x-brain-key: $BRAIN_KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"content\":\"<thought content>\",\"source\":\"notion-sync\"}"
-- Expected success: HTTP 200 with {"status":"captured",...} or {"status":"duplicate",...}. Both are success; SHA-256 dedup is intentional.
+    -d "{\"content\":\"<thought content>\",\"source\":\"notion-sync\",\"notion_page_id\":\"<page id>\",\"notion_last_edited\":\"<last_edited_time>\"}"
+- Expected success: HTTP 200 with {"status":"captured",...} or {"status":"duplicate",...}. Both are success.
+- Why notion_page_id + notion_last_edited: when both are present, Brain Bank dedups on the Notion record identity plus its last-edited timestamp instead of a SHA-256 of the content. A Notion row re-rendered into a thought string drifts on cosmetic changes (whitespace, an em-dash, a field toggling to/from "N/A"), which mints a new content hash and slips past content-hash dedup. last_edited_time only advances on a real edit, so an unchanged row is skipped and a genuinely edited row re-captures.
 
 STEP 3: Post a summary thought
 - After all rows are processed, POST once more to /capture:
