@@ -1179,28 +1179,40 @@ server.registerTool(
   "capture_thought",
   {
     title: "Capture Thought",
-    description: "Save a new thought to Brain Bank. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client.",
+    description: "Save a new thought to Brain Bank. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client. Pass `tags` to pin explicit topic tags (e.g. a project slug) onto the capture — they merge with the auto-extracted topics.",
     inputSchema: {
       content: z.string().describe("The thought to capture"),
+      tags: z.array(z.string()).optional().describe("Optional explicit topic tags to attach (merged with the auto-extracted topics). Use underscores, not hyphens, for multi-word slugs."),
     },
   },
-  async ({ content }) => {
+  async ({ content, tags }: { content: string; tags?: string[] }) => {
     logToolInvocation("capture_thought", { content }, "mcp");
     try {
       const hash = await contentHash(content);
       if (await isDuplicate(hash)) {
         return { content: [{ type: "text" as const, text: "Already in the brain (duplicate detected)." }] };
       }
+      // Optional caller-supplied tags merge into the auto-extracted topics —
+      // mirrors the explicitTags logic in handleRestCapture.
+      const explicitTags = Array.isArray(tags)
+        ? tags
+          .filter((t): t is string => typeof t === "string")
+          .map((t) => t.toLowerCase().trim())
+          .filter(Boolean)
+        : [];
       const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-      const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: { ...metadata, source: "mcp" } }).select("id").single();
+      const meta = metadata as Record<string, unknown>;
+      const extractedTopics = Array.isArray(meta.topics) ? (meta.topics as string[]) : [];
+      const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
+      const finalMetadata: Record<string, unknown> = { ...meta, topics: mergedTopics, source: "mcp" };
+      const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: finalMetadata }).select("id").single();
       if (error || !inserted) return { content: [{ type: "text" as const, text: `Failed to capture: ${error?.message || "unknown error"}` }], isError: true };
 
       // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
-      const resolved = await postCaptureHook(inserted.id, content, metadata as Record<string, unknown>, [inserted.id]);
+      const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
 
-      const meta = metadata as Record<string, unknown>;
       let confirmation = `Captured as ${meta.type || "thought"}`;
-      if (Array.isArray(meta.topics) && meta.topics.length) confirmation += ` - ${(meta.topics as string[]).join(", ")}`;
+      if (mergedTopics.length) confirmation += ` - ${mergedTopics.join(", ")}`;
       if (Array.isArray(meta.people) && meta.people.length) confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
       if (Array.isArray(meta.action_items) && meta.action_items.length) confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
       if (resolved.length > 0) confirmation += ` | Auto-resolved: ${resolved.join("; ")}`;
