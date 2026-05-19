@@ -70,10 +70,10 @@ export const PROJECT_STATUS_FILTERS: {
   { token: "dormant", value: "DORMANT", label: "DORMANT" },
 ];
 
+// Single string literal (not concatenated) so supabase-js can parse the
+// column list at the type level — same convention as lib/digest.ts.
 const ROLLUP_COLS =
-  "slug, display_name, type, status_derived, status_explicit, " +
-  "last_activity_at, captures, captures_7d, next_step, blocker_text, " +
-  "blocked_at, pinned, roi_band, working_dirs, sources";
+  "slug, display_name, type, status_derived, status_explicit, last_activity_at, captures, captures_7d, next_step, blocker_text, blocked_at, pinned, roi_band, working_dirs, sources";
 
 interface ListProjectsOpts {
   type?: string[];
