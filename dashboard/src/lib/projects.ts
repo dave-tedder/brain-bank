@@ -171,6 +171,19 @@ export async function listProjectOpenActions(
   return (data as ProjectAction[] | null) ?? [];
 }
 
+// vision_md lives on the projects table, not the projects_rollup view, so
+// the detail page fetches it separately. Returns null for implicit projects
+// (topics with no explicit projects row).
+export async function getProjectVision(slug: string): Promise<string | null> {
+  const { data } = await supabase()
+    .from("projects")
+    .select("vision_md")
+    .eq("slug", slug)
+    .maybeSingle();
+
+  return (data as { vision_md: string | null } | null)?.vision_md ?? null;
+}
+
 // Compact age label for index rows: "2h", "3d", "42d".
 export function formatAge(iso: string | null): string {
   if (!iso) return "—";
