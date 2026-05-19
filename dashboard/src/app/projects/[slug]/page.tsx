@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import {
   getProjectBySlug,
   getProjectVision,
@@ -29,7 +28,27 @@ export default async function ProjectDetailPage({
   const expanded = history === "all";
 
   const project = await getProjectBySlug(slug);
-  if (!project) notFound();
+  if (!project) {
+    return (
+      <div className="space-y-6 max-w-6xl">
+        <div
+          className="card text-center py-12 animate-in"
+          style={{ fontFamily: "'IBM Plex Mono', monospace" }}
+        >
+          <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+            &gt; NO PROJECT :: {slug}
+          </p>
+          <Link
+            href="/projects"
+            className="text-xs inline-block mt-4"
+            style={{ color: "var(--text-muted)" }}
+          >
+            &larr; back to projects
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   const total = await countProjectTimeline(slug);
   const limit = expanded
