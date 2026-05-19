@@ -5,21 +5,21 @@ import {
   type ProjectStatusDerived,
 } from "@/lib/projects";
 
-// Status colors for the index/detail surfaces. Phase 3 promotes these to
-// --status-* tokens in globals.css and rewires; for now they live here so
-// ProjectRow, ProjectCard and the detail header share one source.
+// Status colors for the index/detail surfaces. Resolves to the --status-*
+// tokens in globals.css; ProjectRow, ProjectCard and the detail header all
+// share this one source.
 export function statusColor(status: ProjectStatusDerived): string {
   switch (status) {
     case "ACTIVE":
-      return "var(--text-primary)";
+      return "var(--status-active)";
     case "STALE":
-      return "var(--warning)";
+      return "var(--status-stale)";
     case "BLOCKER":
-      return "#ff8c42";
+      return "var(--status-blocker)";
     case "DORMANT":
-      return "var(--text-muted)";
+      return "var(--status-dormant)";
     default:
-      return "var(--text-muted)";
+      return "var(--status-dormant)";
   }
 }
 

@@ -25,6 +25,12 @@
   --radius: 8px;
   --radius-sm: 6px;
   --phosphor-glow: #5ff79d;
+
+  /* Projects dashboard status classification (projects_rollup.status_derived) */
+  --status-active: #00ff41;
+  --status-stale: #fbbf24;
+  --status-blocker: #ff8c42;
+  --status-dormant: #22543d;
 }
 
 /* ------------------------------------------------------------------ */
