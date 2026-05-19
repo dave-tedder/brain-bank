@@ -23,14 +23,20 @@ dashboard/
 │   ├── middleware.ts          # Auth: password cookie check. MUST live here (see Conventions)
 │   ├── lib/
 │   │   ├── supabase.ts        # Server-side Supabase client (service_role, lazy-init)
-│   │   └── digest.ts          # Digest data-access helpers
+│   │   ├── digest.ts          # Digest data-access helpers
+│   │   └── projects.ts        # Projects rollup data-access helpers
 │   ├── components/
 │   │   ├── NavSidebar.tsx     # Client component: sidebar nav, LOGOUT form
 │   │   ├── ThoughtCard.tsx
 │   │   ├── DigestHeroCard.tsx # Homepage digest hero (ASCII frame, 4 states)
 │   │   ├── DigestMarkdown.tsx
 │   │   ├── DigestRow.tsx
-│   │   └── DigestMetadataRail.tsx
+│   │   ├── DigestMetadataRail.tsx
+│   │   ├── ProjectFilters.tsx # /projects type + status filter pills
+│   │   ├── ProjectRow.tsx     # /projects log-layout row; exports statusColor()
+│   │   ├── ProjectCard.tsx    # /projects grid-layout card
+│   │   ├── ProjectTimeline.tsx
+│   │   └── ProjectMetadataRail.tsx
 │   └── app/
 │       ├── layout.tsx
 │       ├── globals.css
@@ -43,7 +49,9 @@ dashboard/
 │       ├── clients/page.tsx
 │       ├── clients/[id]/page.tsx
 │       ├── digest/page.tsx
-│       └── digest/[date]/page.tsx
+│       ├── digest/[date]/page.tsx
+│       ├── projects/page.tsx        # Projects index (log/grid, filters)
+│       └── projects/[slug]/page.tsx # Project detail (70/30, timeline + rail)
 ```
 
 ## Key Files
@@ -60,6 +68,9 @@ dashboard/
 - `src/components/DigestMarkdown.tsx`: Client component wrapping `react-markdown` + `remark-gfm`. Neural-terminal component overrides (VT323 headers, IBM Plex Mono body, tree-character lists, `[REF :: <name>]` phosphor chips for `/clients/<id>` links). `linkifyClients()` pre-processes markdown with a case-insensitive regex to wrap client-name matches in chip anchors; passes the matched text through so case variants in prose (e.g., "jane doe" vs canonical "Jane Doe") still render naturally.
 - `src/app/digest/page.tsx`: Archive. `?type=daily|weekly` tabs, paginated via `?offset=N`. Differentiates "fetch failed" (DB error) from "no entries" (cron not running / wrong type) in the terminal log.
 - `src/app/digest/[date]/page.tsx`: Detail. `getDigestByDate(date, type)` → 404 if null. `resolveClientLinks()` looks up `metadata.referenced_client_names` against the `clients` table and passes matched pairs to `DigestMarkdown` for auto-linking.
+- `src/lib/projects.ts`: Server-only projects data access against the `projects_rollup` view. `listProjects({type,status,includeArchived,limit,offset})`, `getProjectBySlug`, `getProjectVision`, `listProjectTimeline`, `countProjectTimeline`, `listProjectOpenActions`, plus a `formatAge` helper. Exports the `PROJECT_TYPE_FILTERS` / `PROJECT_STATUS_FILTERS` pill config (URL token ↔ rollup value mapping, e.g. token `llm` ↔ type `llm-build`). `ROLLUP_COLS` must stay a single string literal so supabase-js parses the column list at the type level.
+- `src/app/projects/page.tsx`: Projects index. Reads `?type/&status/&view/&offset/&include`, renders `ProjectFilters` + log rows or `?view=grid` card grid, `[LOG / GRID]` toggle, `LOAD EARLIER ENTRIES` pagination. Empty + error states inline (`NO PROJECTS YET` / `NO PROJECTS MATCH` / `ROLLUP FETCH FAILED`). Archived rows hidden unless `?include=archived`.
+- `src/app/projects/[slug]/page.tsx`: Project detail. `getProjectBySlug(slug)` → inline themed `> NO PROJECT :: <slug>` block if null. 70/30 layout: `ProjectTimeline` main column + sticky `ProjectMetadataRail`. `vision_md` collapsed in a native `<details>`; `?history=all` expands the full capture timeline.
 
 ## Environment Variables
 
@@ -88,6 +99,8 @@ Reads from the Brain Bank Supabase project (read-only from the dashboard):
 - `action_items`: open / resolved tracked actions
 - `compiled_pages`: Karpathy-style wiki pages
 - `digests`: persisted daily / weekly digest markdown + metadata (populated by the brain-digest Edge Function; powers the hero card, `/digest` archive, `/digest/[date]` detail)
+- `projects`: tracked projects (slug, type, status, vision_md, working_dirs); rows are auto-promoted from topics with enough captures
+- `projects_rollup`: view joining `projects` to `thoughts` — derives `status_derived` (ACTIVE / STALE / BLOCKER / DORMANT), `next_step`, `blocker_text`, capture counts. Powers `/projects` and `/projects/[slug]`.
 
 Uses `match_thoughts` RPC for semantic search.
 
