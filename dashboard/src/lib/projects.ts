@@ -1,0 +1,185 @@
+import { supabase } from "@/lib/supabase";
+
+// Server-only data access for the /projects route. Reads the projects_rollup
+// Postgres view (see Open Brain migration 20260518_create_projects_table_and_rollup.sql)
+// plus the thoughts and action_items tables for the detail page.
+
+export type ProjectStatusDerived = "ACTIVE" | "STALE" | "BLOCKER" | "DORMANT";
+
+export type ProjectType =
+  | "llm-build"
+  | "client"
+  | "ops"
+  | "content"
+  | "idea"
+  | "uncategorized";
+
+export interface ProjectRollup {
+  slug: string;
+  display_name: string;
+  type: ProjectType;
+  status_derived: ProjectStatusDerived;
+  status_explicit: string;
+  last_activity_at: string;
+  captures: number;
+  captures_7d: number;
+  next_step: string | null;
+  blocker_text: string | null;
+  blocked_at: string | null;
+  pinned: boolean | null;
+  roi_band: string | null;
+  working_dirs: string[] | null;
+  sources: string[] | null;
+}
+
+export interface ProjectCapture {
+  id: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ProjectAction {
+  id: string;
+  description: string;
+  created_at: string;
+}
+
+// Filter pills. The URL carries short tokens (?type=llm,client); the rollup's
+// `type` column carries the real values, so "llm" maps to "llm-build".
+export const PROJECT_TYPE_FILTERS: {
+  token: string;
+  value: ProjectType;
+  label: string;
+}[] = [
+  { token: "llm", value: "llm-build", label: "LLM" },
+  { token: "client", value: "client", label: "CLIENT" },
+  { token: "ops", value: "ops", label: "OPS" },
+  { token: "content", value: "content", label: "CONTENT" },
+  { token: "idea", value: "idea", label: "IDEA" },
+];
+
+export const PROJECT_STATUS_FILTERS: {
+  token: string;
+  value: ProjectStatusDerived;
+  label: string;
+}[] = [
+  { token: "active", value: "ACTIVE", label: "ACTIVE" },
+  { token: "stale", value: "STALE", label: "STALE" },
+  { token: "blocker", value: "BLOCKER", label: "BLOCKER" },
+  { token: "dormant", value: "DORMANT", label: "DORMANT" },
+];
+
+const ROLLUP_COLS =
+  "slug, display_name, type, status_derived, status_explicit, " +
+  "last_activity_at, captures, captures_7d, next_step, blocker_text, " +
+  "blocked_at, pinned, roi_band, working_dirs, sources";
+
+interface ListProjectsOpts {
+  type?: string[];
+  status?: string[];
+  includeArchived?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listProjects(
+  opts: ListProjectsOpts = {}
+): Promise<ProjectRollup[]> {
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+
+  let query = supabase()
+    .from("projects_rollup")
+    .select(ROLLUP_COLS)
+    .order("pinned", { ascending: false, nullsFirst: false })
+    .order("last_activity_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (opts.type && opts.type.length > 0) {
+    query = query.in("type", opts.type);
+  }
+  if (opts.status && opts.status.length > 0) {
+    query = query.in("status_derived", opts.status);
+  }
+  if (!opts.includeArchived) {
+    query = query.neq("status_explicit", "archive");
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data as ProjectRollup[] | null) ?? [];
+}
+
+export async function getProjectBySlug(
+  slug: string
+): Promise<ProjectRollup | null> {
+  const { data } = await supabase()
+    .from("projects_rollup")
+    .select(ROLLUP_COLS)
+    .eq("slug", slug)
+    .maybeSingle();
+
+  return (data as ProjectRollup | null) ?? null;
+}
+
+export async function listProjectTimeline(
+  slug: string,
+  limit = 20,
+  offset = 0
+): Promise<ProjectCapture[]> {
+  const { data, error } = await supabase()
+    .from("thoughts")
+    .select("id, content, metadata, created_at")
+    .contains("metadata", { topics: [slug] })
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) throw error;
+  return (data as ProjectCapture[] | null) ?? [];
+}
+
+export async function countProjectTimeline(slug: string): Promise<number> {
+  const { count } = await supabase()
+    .from("thoughts")
+    .select("id", { count: "exact", head: true })
+    .contains("metadata", { topics: [slug] });
+
+  return count ?? 0;
+}
+
+export async function listProjectOpenActions(
+  slug: string,
+  limit = 8
+): Promise<ProjectAction[]> {
+  const { data: thoughts } = await supabase()
+    .from("thoughts")
+    .select("id")
+    .contains("metadata", { topics: [slug] });
+
+  const ids = ((thoughts as { id: string }[] | null) ?? []).map((t) => t.id);
+  if (ids.length === 0) return [];
+
+  const { data } = await supabase()
+    .from("action_items")
+    .select("id, description, created_at")
+    .in("source_thought_id", ids)
+    .eq("status", "open")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  return (data as ProjectAction[] | null) ?? [];
+}
+
+// Compact age label for index rows: "2h", "3d", "42d".
+export function formatAge(iso: string | null): string {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return "now";
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}
