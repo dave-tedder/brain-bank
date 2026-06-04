@@ -6,6 +6,15 @@ import { supabase } from "@/lib/supabase";
 
 export type ProjectStatusDerived = "ACTIVE" | "STALE" | "BLOCKER" | "DORMANT";
 
+// The unified status the view exposes: the computed activity status, OR a
+// terminal operator lifecycle state (projects.status done/paused/archive)
+// when one is set. The dashboard renders and sorts on this, not status_derived.
+export type ProjectStatus =
+  | ProjectStatusDerived
+  | "DONE"
+  | "PAUSED"
+  | "ARCHIVE";
+
 export type ProjectType =
   | "llm-build"
   | "client"
@@ -20,6 +29,8 @@ export interface ProjectRollup {
   type: ProjectType;
   status_derived: ProjectStatusDerived;
   status_explicit: string;
+  status: ProjectStatus;
+  status_rank: number;
   last_activity_at: string;
   captures: number;
   captures_7d: number;
@@ -73,7 +84,7 @@ export const PROJECT_STATUS_FILTERS: {
 // Single string literal (not concatenated) so supabase-js can parse the
 // column list at the type level — same convention as lib/digest.ts.
 const ROLLUP_COLS =
-  "slug, display_name, type, status_derived, status_explicit, last_activity_at, captures, captures_7d, next_step, blocker_text, blocked_at, pinned, roi_band, working_dirs, sources";
+  "slug, display_name, type, status_derived, status_explicit, status, status_rank, last_activity_at, captures, captures_7d, next_step, blocker_text, blocked_at, pinned, roi_band, working_dirs, sources";
 
 interface ListProjectsOpts {
   type?: string[];
@@ -92,7 +103,7 @@ export async function listProjects(
   let query = supabase()
     .from("projects_rollup")
     .select(ROLLUP_COLS)
-    .order("pinned", { ascending: false, nullsFirst: false })
+    .order("status_rank", { ascending: true })
     .order("last_activity_at", { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -100,10 +111,10 @@ export async function listProjects(
     query = query.in("type", opts.type);
   }
   if (opts.status && opts.status.length > 0) {
-    query = query.in("status_derived", opts.status);
+    query = query.in("status", opts.status);
   }
   if (!opts.includeArchived) {
-    query = query.neq("status_explicit", "archive");
+    query = query.not("status_explicit", "in", "(done,archive)");
   }
 
   const { data, error } = await query;
