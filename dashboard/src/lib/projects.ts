@@ -163,22 +163,16 @@ export async function listProjectOpenActions(
   slug: string,
   limit = 8
 ): Promise<ProjectAction[]> {
-  const { data: thoughts } = await supabase()
-    .from("thoughts")
-    .select("id")
-    .contains("metadata", { topics: [slug] });
+  // Bounded server-side join (get_project_open_actions RPC) replaces the old
+  // unbounded two-query fetch (all thought IDs for the slug, then a large
+  // IN(...) against action_items). Slug normalization inside the RPC matches
+  // the projects_rollup view's thought_facts CTE.
+  const { data, error } = await supabase().rpc("get_project_open_actions", {
+    p_slug: slug,
+    p_limit: limit,
+  });
 
-  const ids = ((thoughts as { id: string }[] | null) ?? []).map((t) => t.id);
-  if (ids.length === 0) return [];
-
-  const { data } = await supabase()
-    .from("action_items")
-    .select("id, description, created_at")
-    .in("source_thought_id", ids)
-    .eq("status", "open")
-    .order("created_at", { ascending: false })
-    .limit(limit);
-
+  if (error) throw error;
   return (data as ProjectAction[] | null) ?? [];
 }
 
