@@ -8,6 +8,7 @@ interface Props {
   selectedTypes: string[];
   selectedStatuses: string[];
   view: string;
+  includeArchived: boolean;
 }
 
 /**
@@ -15,17 +16,25 @@ interface Props {
  * the current URL with that pill's token toggled in a comma-separated param
  * (?type=llm,client&status=active,stale). No onClick — safe in a server
  * component. Changing a filter drops ?offset so paging resets to the top.
+ * The [+ closed] pill toggles ?include=archived, which reveals the otherwise-
+ * hidden done/archive projects.
  */
 export default function ProjectFilters({
   selectedTypes,
   selectedStatuses,
   view,
+  includeArchived,
 }: Props) {
-  function buildHref(types: string[], statuses: string[]): string {
+  function buildHref(
+    types: string[],
+    statuses: string[],
+    archived: boolean
+  ): string {
     const parts: string[] = [];
     if (types.length > 0) parts.push(`type=${types.join(",")}`);
     if (statuses.length > 0) parts.push(`status=${statuses.join(",")}`);
     if (view === "grid") parts.push("view=grid");
+    if (archived) parts.push("include=archived");
     return `/projects${parts.length > 0 ? `?${parts.join("&")}` : ""}`;
   }
 
@@ -41,7 +50,11 @@ export default function ProjectFilters({
   return (
     <div className="animate-in stagger-1 card">
       <div className="flex gap-2 flex-wrap items-center">
-        <Pill href={buildHref([], [])} active={noFilters} label="ALL" />
+        <Pill
+          href={buildHref([], [], includeArchived)}
+          active={noFilters}
+          label="ALL"
+        />
 
         <span className="w-px h-4 bg-[var(--border)] mx-1" aria-hidden="true" />
 
@@ -50,7 +63,11 @@ export default function ProjectFilters({
           return (
             <Pill
               key={token}
-              href={buildHref(toggle(selectedTypes, token), selectedStatuses)}
+              href={buildHref(
+                toggle(selectedTypes, token),
+                selectedStatuses,
+                includeArchived
+              )}
               active={active}
               label={label}
             />
@@ -69,12 +86,29 @@ export default function ProjectFilters({
           return (
             <Pill
               key={token}
-              href={buildHref(selectedTypes, toggle(selectedStatuses, token))}
+              href={buildHref(
+                selectedTypes,
+                toggle(selectedStatuses, token),
+                includeArchived
+              )}
               active={active}
               label={label}
             />
           );
         })}
+
+        <span
+          className="mx-1 text-[var(--text-muted)] select-none"
+          aria-hidden="true"
+        >
+          ·
+        </span>
+
+        <Pill
+          href={buildHref(selectedTypes, selectedStatuses, !includeArchived)}
+          active={includeArchived}
+          label="+ closed"
+        />
       </div>
     </div>
   );

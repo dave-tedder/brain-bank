@@ -61,7 +61,7 @@ export default async function ProjectDetailPage({
     getProjectVision(slug),
   ]);
 
-  const color = statusColor(project.status_derived);
+  const color = statusColor(project.status);
 
   return (
     <div className="space-y-6 max-w-6xl">
@@ -106,7 +106,7 @@ export default async function ProjectDetailPage({
               fontFamily: "'IBM Plex Mono', monospace",
             }}
           >
-            [{project.status_derived}]
+            [{project.status}]
           </span>
         </div>
         <h1

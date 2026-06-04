@@ -17,7 +17,7 @@ export default function ProjectCard({ project, stagger = 0 }: Props) {
     slug,
     display_name,
     type,
-    status_derived,
+    status,
     last_activity_at,
     next_step,
     blocker_text,
@@ -25,12 +25,12 @@ export default function ProjectCard({ project, stagger = 0 }: Props) {
     captures_7d,
   } = project;
 
-  const isBlocked = status_derived === "BLOCKER";
+  const isBlocked = status === "BLOCKER";
   const detail = isBlocked
     ? blocker_text ?? "blocked"
     : next_step ?? "no open next step";
   const marker = isBlocked ? "⚠" : next_step ? "⟶" : "·";
-  const color = statusColor(status_derived);
+  const color = statusColor(status);
 
   return (
     <div
@@ -60,7 +60,7 @@ export default function ProjectCard({ project, stagger = 0 }: Props) {
             className="text-[10px] uppercase tracking-wider shrink-0"
             style={{ color }}
           >
-            [{status_derived}]
+            [{status}]
           </span>
         </div>
 

@@ -2,13 +2,13 @@ import Link from "next/link";
 import {
   formatAge,
   type ProjectRollup,
-  type ProjectStatusDerived,
+  type ProjectStatus,
 } from "@/lib/projects";
 
 // Status colors for the index/detail surfaces. Resolves to the --status-*
 // tokens in globals.css; ProjectRow, ProjectCard and the detail header all
 // share this one source.
-export function statusColor(status: ProjectStatusDerived): string {
+export function statusColor(status: ProjectStatus): string {
   switch (status) {
     case "ACTIVE":
       return "var(--status-active)";
@@ -18,6 +18,12 @@ export function statusColor(status: ProjectStatusDerived): string {
       return "var(--status-blocker)";
     case "DORMANT":
       return "var(--status-dormant)";
+    case "PAUSED":
+      return "var(--status-paused)";
+    case "DONE":
+      return "var(--status-done)";
+    case "ARCHIVE":
+      return "var(--status-archive)";
     default:
       return "var(--status-dormant)";
   }
@@ -37,18 +43,18 @@ export default function ProjectRow({ project, stagger = 0 }: Props) {
   const {
     slug,
     display_name,
-    status_derived,
+    status,
     last_activity_at,
     next_step,
     blocker_text,
   } = project;
 
-  const isBlocked = status_derived === "BLOCKER";
+  const isBlocked = status === "BLOCKER";
   const detail = isBlocked
     ? blocker_text ?? "blocked"
     : next_step ?? "no open next step";
   const marker = isBlocked ? "⚠" : next_step ? "⟶" : "·";
-  const color = statusColor(status_derived);
+  const color = statusColor(status);
 
   return (
     <div
@@ -82,7 +88,7 @@ export default function ProjectRow({ project, stagger = 0 }: Props) {
           className="text-[10px] uppercase tracking-wider tabular-nums"
           style={{ color }}
         >
-          [{status_derived}]
+          [{status}]
         </span>
 
         <span

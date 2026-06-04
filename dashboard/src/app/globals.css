@@ -26,11 +26,14 @@
   --radius-sm: 6px;
   --phosphor-glow: #5ff79d;
 
-  /* Projects dashboard status classification (projects_rollup.status_derived) */
+  /* Projects dashboard status classification (projects_rollup.status) */
   --status-active: #00ff41;
   --status-stale: #fbbf24;
   --status-blocker: #ff8c42;
   --status-dormant: #22543d;
+  --status-paused: #94a3a0;   /* cool grey — on hold, resumable */
+  --status-done: #2f855a;     /* settled sea-green — completed/at rest */
+  --status-archive: #4a5568;  /* slate — filed away (hidden by default) */
 }
 
 /* ------------------------------------------------------------------ */

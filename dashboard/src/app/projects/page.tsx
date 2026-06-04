@@ -152,6 +152,7 @@ export default async function ProjectsIndexPage({ searchParams }: Props) {
         selectedTypes={selectedTypes}
         selectedStatuses={selectedStatuses}
         view={view}
+        includeArchived={includeArchived}
       />
 
       {loadError ? (
