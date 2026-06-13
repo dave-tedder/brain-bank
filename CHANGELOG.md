@@ -10,6 +10,12 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ### Added
 
+- **90-day retention for operational audit logs.** A locked-down `purge_old_audit_logs()` maintenance function and weekly pg_cron job bound `mcp_tool_invocations`, `compile_pages_runs`, and the optional `openrouter_calls` table without touching durable thoughts, actions, digests, or business records. The migration remains replayable before the optional OpenRouter telemetry table is installed. Source: Open Brain commit `5315c58`.
+
+- **Covering index for resolved action-item references.** `action_items.resolved_by_thought_id` now has an idempotent index for faster foreign-key checks and lookups. Source: Open Brain commit `e367832`.
+
+- **Digest input and wiki auto-create quality controls.** Digest synthesis now uses the 40 newest open actions plus the exact remaining count, excludes Gmail captures from deadline detection, and stops copying weekly reviews back into `thoughts`. Wiki auto-create counts also ignore Gmail captures while preserving client creation, non-email topic/project counts, truthful Slack delivery responses, compile-health warnings, and curated contradiction lint. Sources: Open Brain commits `6681e22` and `3ea63db`.
+
 - **Digest warnings for unhealthy wiki compilation.** Daily and weekly digests inspect the latest full scheduled `compile_pages_runs` row and append a concise warning when the run is missing, older than 26 hours, explicitly failed, or completed with page errors. Later one-page maintenance runs do not mask the full batch, and health lookup failures remain advisory so Slack delivery still proceeds. Source: Open Brain commit `36e1e0a`.
 
 - **Weekly contradiction lint now focuses on client pages and curated project pages.** Broad topic and index pages no longer consume the five-call contradiction-check budget. Project pages qualify only when their slug exists in the curated `projects` table; staleness and missing-page lint checks are unchanged. Source: Open Brain commit `00e7fea`.
