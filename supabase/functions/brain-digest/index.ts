@@ -117,16 +117,26 @@ async function synthesizeDigest(
     }
   }
 
-  // Pull open action items from the action_items table (source of truth)
-  const { data: openActions } = await supabase
+  // Cap the open-action dump so a large backlog cannot dominate the prompt.
+  // Newest-first plus an exact total preserves the true scale.
+  const ACTION_ITEM_DIGEST_CAP = 40;
+  const { data: openActions, count: openActionsTotal } = await supabase
     .from("action_items")
-    .select("description, created_at")
+    .select("description, created_at", { count: "exact" })
     .eq("status", "open")
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: false })
+    .limit(ACTION_ITEM_DIGEST_CAP);
 
-  const actionItemsText = openActions && openActions.length > 0
-    ? openActions.map((a) => a.description).join("; ")
-    : "none";
+  let actionItemsText: string;
+  if (openActions && openActions.length > 0) {
+    actionItemsText = openActions.map((a) => a.description).join("; ");
+    const total = openActionsTotal ?? openActions.length;
+    if (total > openActions.length) {
+      actionItemsText += ` (+${total - openActions.length} more open)`;
+    }
+  } else {
+    actionItemsText = "none";
+  }
 
   const structuredLines = [
     `Open action items (verified, not yet resolved): ${actionItemsText}`,
@@ -316,11 +326,13 @@ async function getApproachingDeadlines(): Promise<
   const todayStr = now.toISOString().split("T")[0];
   const cutoffStr = twoWeeksOut.toISOString().split("T")[0];
 
-  // Query thoughts that have dates_mentioned in metadata
+  // Exclude Gmail captures so marketing and sale-end dates do not surface as
+  // digest deadlines. Null or absent sources still count.
   const { data } = await supabase
     .from("thoughts")
     .select("content, metadata")
     .not("metadata->dates_mentioned", "is", null)
+    .neq("metadata->>source", "gmail")
     .order("created_at", { ascending: false })
     .limit(200);
 
@@ -974,27 +986,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     const slackResult = await postToSlack(SLACK_DIGEST_CHANNEL, slackMessage);
 
-    // Self-capture: save weekly review as a thought for future reference
-    if (mode === "weekly") {
-      try {
-        const captureUrl = `${SUPABASE_URL}/functions/v1/open-brain-mcp/capture`;
-        const captureRes = await fetch(captureUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-brain-key": MCP_ACCESS_KEY,
-          },
-          body: JSON.stringify({
-            content: `[Weekly Review] ${digest}`,
-          }),
-        });
-        if (!captureRes.ok) {
-          console.error("Self-capture failed:", captureRes.status, await captureRes.text());
-        }
-      } catch (err) {
-        console.error("Self-capture error (non-fatal):", err);
-      }
-    }
+    // Weekly reviews are already persisted in the digests table. Do not copy
+    // them into thoughts, where they would feed future digests and wiki counts.
 
     // Notion insight push (weekly mode only, opt-in via push_to_notion=true)
     let notionResult: { pushed: number; errors: number } | undefined;
