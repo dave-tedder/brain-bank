@@ -2127,22 +2127,34 @@ server.registerTool(
       // through to an unfiltered thoughts dump that leaked unrelated activity).
       if (page.last_compiled && page.page_type !== "index") {
         try {
-          let recentQ = supabase
-            .from("thoughts")
-            .select("content, created_at")
-            .gt("created_at", page.last_compiled)
-            .order("created_at", { ascending: false })
-            .limit(20);
+          let recent: Array<{ content: string; created_at: string }> | null;
 
-          if (page.page_type === "client") {
-            recentQ = recentQ.contains("metadata", { people: [page.title] });
-          } else if (page.page_type === "topic") {
-            recentQ = recentQ.contains("metadata", { topics: [page.title.toLowerCase()] });
-          } else if (page.page_type === "project") {
-            recentQ = recentQ.contains("metadata", { project: page.title });
+          if (page.page_type === "project") {
+            const { data } = await supabase.rpc("get_project_page_thoughts", {
+              p_slug: page.slug.replace(/^project\//, ""),
+              p_since: page.last_compiled,
+              p_limit: 20,
+              p_ascending: false,
+            });
+            recent = data;
+          } else {
+            let recentQ = supabase
+              .from("thoughts")
+              .select("content, created_at")
+              .gt("created_at", page.last_compiled)
+              .order("created_at", { ascending: false })
+              .limit(20);
+
+            if (page.page_type === "client") {
+              recentQ = recentQ.contains("metadata", { people: [page.title] });
+            } else {
+              recentQ = recentQ.contains("metadata", { topics: [page.title.toLowerCase()] });
+            }
+
+            const result = await recentQ;
+            recent = result.data;
           }
 
-          const { data: recent } = await recentQ;
           if (recent && recent.length > 0) {
             lines.push("", `## Recent activity since last compile (${recent.length})`);
             for (const t of recent) {

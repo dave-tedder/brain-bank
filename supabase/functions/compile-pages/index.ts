@@ -70,18 +70,23 @@ function parseIndexCompileMode(
 // 60-70s on slow days, which compounds across concurrent waves and risks
 // the 150s Edge Runtime wall. Abort any single call that runs longer so the
 // batch keeps moving — the page rolls into next cron's queue.
-const LLM_CALL_TIMEOUT_MS = 60_000;
+const LLM_CALL_TIMEOUT_MS = 75_000;
+const DEFAULT_COMPILE_MODEL = "anthropic/claude-sonnet-4.6";
+const ALLOWED_COMPILE_MODELS = new Set([
+  DEFAULT_COMPILE_MODEL,
+  "openai/gpt-4.1-mini",
+]);
 
 async function llmCall(
   systemPrompt: string,
   userContent: string,
-  options?: { maxTokens?: number },
+  options?: { maxTokens?: number; model?: string },
 ): Promise<string> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), LLM_CALL_TIMEOUT_MS);
   try {
     const body: Record<string, unknown> = {
-      model: "anthropic/claude-sonnet-4.6",
+      model: options?.model || DEFAULT_COMPILE_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
@@ -136,6 +141,7 @@ async function runWithConcurrency<T, R>(
 // miss a real update.
 async function pageHasNewThoughts(
   page: {
+    slug: string;
     page_type: string;
     title: string;
     source_entity_id: string | null;
@@ -144,6 +150,18 @@ async function pageHasNewThoughts(
   clientNamesById: Map<string, string>,
 ): Promise<boolean> {
   const since = page.last_compiled || "2020-01-01T00:00:00Z";
+
+  if (page.page_type === "project") {
+    const { data, error } = await supabase.rpc("get_project_page_thoughts", {
+      p_slug: pageSlugToProjectSlug(page.slug),
+      p_since: since,
+      p_limit: 1,
+      p_ascending: true,
+    });
+    if (error) return true;
+    return (data?.length ?? 0) > 0;
+  }
+
   let q = supabase
     .from("thoughts")
     .select("*", { count: "exact", head: true })
@@ -155,8 +173,6 @@ async function pageHasNewThoughts(
     q = q.contains("metadata", { people: [name] });
   } else if (page.page_type === "topic") {
     q = q.contains("metadata", { topics: [page.title.toLowerCase()] });
-  } else if (page.page_type === "project") {
-    q = q.contains("metadata", { project: page.title });
   } else {
     return false;
   }
@@ -179,6 +195,10 @@ function slugify(text: string): string {
 
 function makeSlug(pageType: string, name: string): string {
   return `${pageType}/${slugify(name)}`;
+}
+
+function pageSlugToProjectSlug(pageSlug: string): string {
+  return pageSlug.replace(/^project\//, "");
 }
 
 // --- Compile the Self-Index Page ---
@@ -309,6 +329,8 @@ async function compilePage(
     source_thought_ids?: string[];
   },
   allPageSlugs: string[],
+  compileModel: string = DEFAULT_COMPILE_MODEL,
+  targetedIntakeLimit?: number,
 ): Promise<{ updated: boolean; error?: string }> {
   try {
     // Find new thoughts since last compilation. Missing or stale watermarks
@@ -318,39 +340,57 @@ async function compilePage(
     // (not now()), so each run chips off another slice until the watermark
     // catches up to the present.
     const isCatchup = shouldUseCatchupLimit(page.last_compiled);
-    const intakeLimit = isCatchup
+    const intakeLimit = targetedIntakeLimit ?? (isCatchup
       ? CATCHUP_THOUGHT_LIMIT
-      : STEADY_THOUGHT_LIMIT;
+      : STEADY_THOUGHT_LIMIT);
     const since = page.last_compiled || "2020-01-01T00:00:00Z";
-    let thoughtQuery = supabase
-      .from("thoughts")
-      .select("id, content, metadata, created_at")
-      .gt("created_at", since)
-      .order("created_at", { ascending: true });
+    let newThoughts: Array<{
+      id: string;
+      content: string;
+      metadata: Record<string, unknown> | null;
+      created_at: string;
+    }> | null = null;
+    let qErr: { message: string } | null = null;
 
     // Filter by page type
-    if (page.page_type === "client" && page.source_entity_id) {
+    if (page.page_type === "project") {
+      const result = await supabase.rpc("get_project_page_thoughts", {
+        p_slug: pageSlugToProjectSlug(page.slug),
+        p_since: since,
+        p_limit: intakeLimit,
+        p_ascending: true,
+      });
+      newThoughts = result.data;
+      qErr = result.error;
+    } else {
+      let thoughtQuery = supabase
+        .from("thoughts")
+        .select("id, content, metadata, created_at")
+        .gt("created_at", since)
+        .order("created_at", { ascending: true });
+
+      if (page.page_type === "client" && page.source_entity_id) {
       // Get client name for metadata matching
-      const { data: client } = await supabase
-        .from("clients")
-        .select("name")
-        .eq("id", page.source_entity_id)
-        .single();
-      if (!client) return { updated: false, error: "Client not found" };
-      thoughtQuery = thoughtQuery.contains("metadata", {
-        people: [client.name],
-      });
-    } else if (page.page_type === "topic") {
-      thoughtQuery = thoughtQuery.contains("metadata", {
-        topics: [page.title.toLowerCase()],
-      });
-    } else if (page.page_type === "project") {
-      thoughtQuery = thoughtQuery.contains("metadata", { project: page.title });
+        const { data: client } = await supabase
+          .from("clients")
+          .select("name")
+          .eq("id", page.source_entity_id)
+          .single();
+        if (!client) return { updated: false, error: "Client not found" };
+        thoughtQuery = thoughtQuery.contains("metadata", {
+          people: [client.name],
+        });
+      } else if (page.page_type === "topic") {
+        thoughtQuery = thoughtQuery.contains("metadata", {
+          topics: [page.title.toLowerCase()],
+        });
+      }
+
+      const result = await thoughtQuery.limit(intakeLimit);
+      newThoughts = result.data;
+      qErr = result.error;
     }
 
-    const { data: newThoughts, error: qErr } = await thoughtQuery.limit(
-      intakeLimit,
-    );
     if (qErr) return { updated: false, error: qErr.message };
     if (!newThoughts || newThoughts.length === 0) return { updated: false };
 
@@ -510,7 +550,9 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
       : `Current page content:\n\n${page.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`;
 
-    const result = await llmCall(systemPrompt, userContent);
+    const result = await llmCall(systemPrompt, userContent, {
+      model: compileModel,
+    });
 
     // Parse backlinks and source_thought_ids from the result. Both lines are
     // line-anchored at the end of the LLM response. Order: cleanContent,
@@ -876,6 +918,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     const mode = url.searchParams.get("mode") || "compile"; // "compile", "lint", or "index"
+    const targetSlug = url.searchParams.get("slug");
     const invoker = url.searchParams.get("invoker") || "pg_cron";
     const indexMode = parseIndexCompileMode(
       url.searchParams.get("index"),
@@ -914,7 +957,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     }
 
     // Auto-create pages for new entities
-    const autoCreated = await autoCreatePages(existingSlugs);
+    const autoCreated = targetSlug ? 0 : await autoCreatePages(existingSlugs);
 
     // Re-fetch if new pages were created
     let allPages = pages || [];
@@ -934,6 +977,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // + wall-clock guard so we don't blow past the 150s Edge Runtime ceiling.
     // Prioritize: never-compiled first, then oldest last_compiled.
     const maxCompilePerRun = parseInt(url.searchParams.get("batch") || "15");
+    const requestedModel = url.searchParams.get("model");
+    const requestedIntake = parseInt(url.searchParams.get("intake") || "0");
+    const maintenanceModel = targetSlug ? requestedModel : null;
+    const compileModel = maintenanceModel &&
+        ALLOWED_COMPILE_MODELS.has(maintenanceModel)
+      ? maintenanceModel
+      : DEFAULT_COMPILE_MODEL;
+    const targetedIntakeLimit = targetSlug && requestedIntake > 0
+      ? Math.min(requestedIntake, STEADY_THOUGHT_LIMIT)
+      : undefined;
     const sortedPages = [...allPages].sort((a, b) => {
       if (!a.last_compiled && !b.last_compiled) return 0;
       if (!a.last_compiled) return -1;
@@ -943,10 +996,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     });
 
     // Wall-clock budget. Edge Runtime kills at 150s. Together with the
-    // per-call LLM timeout (LLM_CALL_TIMEOUT_MS = 60s), this guarantees a
-    // worker dispatched at t<=85s finishes by t<=145s — under the wall with
+    // per-call LLM timeout (LLM_CALL_TIMEOUT_MS = 75s), this guarantees a
+    // worker dispatched at t<=70s finishes by t<=145s — under the wall with
     // headroom for the index compile and response serialization.
-    const RUN_BUDGET_MS = 85_000;
+    const RUN_BUDGET_MS = 70_000;
     const PROBE_CONCURRENCY = 20;
     const COMPILE_CONCURRENCY = 5;
     const startTime = Date.now();
@@ -981,7 +1034,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       // (~50ms each, ~9.5s total) to a single parallel pass (~1-2s). Pages
       // with no new thoughts since last_compiled never enter the LLM loop.
       const candidatePool = sortedPages.filter(
-        (p) => p.page_type !== "index",
+        (page) =>
+          page.page_type !== "index" &&
+          (!targetSlug || page.slug === targetSlug),
       );
       const probeResults = await runWithConcurrency(
         candidatePool,
@@ -1007,7 +1062,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
             budgetExhausted = true;
             return;
           }
-          const result = await compilePage(page, allSlugs);
+          const result = await compilePage(
+            page,
+            allSlugs,
+            compileModel,
+            targetedIntakeLimit,
+          );
           if (result.updated) {
             compiled++;
             compiledSlugs.push(page.slug);
