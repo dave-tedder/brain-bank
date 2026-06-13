@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { applyEdits, parseEditsXml } from "./_section_merge.ts";
+import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -768,6 +769,7 @@ async function runLint(
       last_compiled: string | null;
     }
   >,
+  curatedProjectSlugs: Set<string>,
 ): Promise<LintResult> {
   const result: LintResult = {
     stale_pages: [],
@@ -839,13 +841,20 @@ async function runLint(
     }
   }
 
-  // Contradiction detection: check pages that share backlinks
+  // Broad topic/index pages create low-signal comparisons. Keep contradiction
+  // checks to client pages and projects explicitly curated in `projects`.
+  const contradictionPages = selectContradictionLintPages(
+    pages,
+    curatedProjectSlugs,
+  );
+
+  // Contradiction detection: check eligible pages that reference each other.
   // Group pages by shared backlinks
   const backlinkGroups: Record<string, string[]> = {};
-  for (const page of pages) {
+  for (const page of contradictionPages) {
     if (!page.content || page.content.length < 100) continue;
     // Find pages that reference each other
-    for (const other of pages) {
+    for (const other of contradictionPages) {
       if (page.slug === other.slug) continue;
       if (!other.content || other.content.length < 100) continue;
       // Check if they share any backlink targets or reference each other
@@ -873,8 +882,8 @@ async function runLint(
     crossRefPairs,
     5,
     async ([slugA, slugB]) => {
-      const pageA = pages.find((p) => p.slug === slugA);
-      const pageB = pages.find((p) => p.slug === slugB);
+      const pageA = contradictionPages.find((p) => p.slug === slugA);
+      const pageB = contradictionPages.find((p) => p.slug === slugB);
       if (!pageA || !pageB) return null;
 
       try {
@@ -1137,11 +1146,23 @@ Deno.serve(async (req: Request): Promise<Response> => {
     let lint: LintResult | undefined;
     if (mode === "lint") {
       // Re-fetch pages with updated content for lint
-      const { data: freshPages } = await supabase
-        .from("compiled_pages")
-        .select("slug, title, page_type, content, last_compiled")
-        .order("slug", { ascending: true });
-      lint = await runLint(freshPages || []);
+      const [{ data: freshPages }, { data: curatedProjects, error: projectsError }] =
+        await Promise.all([
+          supabase
+            .from("compiled_pages")
+            .select("slug, title, page_type, content, last_compiled")
+            .order("slug", { ascending: true }),
+          supabase.from("projects").select("slug"),
+        ]);
+      if (projectsError) {
+        console.error(
+          `[compile-pages] curated project lookup failed: ${projectsError.message}`,
+        );
+      }
+      const curatedProjectSlugs = new Set(
+        (curatedProjects || []).map((project) => project.slug),
+      );
+      lint = await runLint(freshPages || [], curatedProjectSlugs);
     }
 
     const response: Record<string, unknown> = {
