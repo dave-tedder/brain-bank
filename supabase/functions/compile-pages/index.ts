@@ -698,6 +698,10 @@ async function autoCreatePages(existingSlugs: Set<string>): Promise<number> {
 
     for (const t of recentThoughts) {
       const m = t.metadata || {};
+      // Email captures do not count toward wiki auto-create thresholds. This
+      // prevents repeated marketing messages from creating topic pages while
+      // still counting captures with null or absent sources.
+      if (m.source === "gmail") continue;
       if (Array.isArray(m.topics)) {
         for (const tp of m.topics as string[]) {
           topicCounts[tp] = (topicCounts[tp] || 0) + 1;
