@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { loadProfile } from "../_shared/profile.ts";
+import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -18,6 +19,29 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 // for cross-referencing with the clients table. Sourced from profile so
 // operators can configure their own event semantics.
 const clientEventTypes = loadProfile().client_event_types;
+
+async function loadCompileHealthWarning(): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from("compile_pages_runs")
+      .select(
+        "created_at, mode, index_mode, batch, compiled, errors, status, error_message",
+      )
+      .eq("mode", "compile")
+      .order("created_at", { ascending: false })
+      .limit(20);
+
+    if (error) {
+      console.error("compile health query failed (non-fatal):", error);
+      return "*Wiki compile health unavailable:* latest run could not be checked.";
+    }
+
+    return getCompileRunHealthWarning(data || []);
+  } catch (err) {
+    console.error("compile health check failed (non-fatal):", err);
+    return "*Wiki compile health unavailable:* latest run could not be checked.";
+  }
+}
 
 // --- Slack ---
 
@@ -941,6 +965,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
       }
     }
 
+    // Compile health is advisory. A failed lookup or degraded compile adds a
+    // concise warning but never blocks the digest from reaching Slack.
+    const compileHealthWarning = await loadCompileHealthWarning();
+    if (compileHealthWarning) {
+      slackMessage += `\n\n---\n${compileHealthWarning}`;
+    }
+
     const slackResult = await postToSlack(SLACK_DIGEST_CHANNEL, slackMessage);
 
     // Self-capture: save weekly review as a thought for future reference
@@ -981,6 +1012,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         mode,
         thoughts_count: data.length,
         channel: SLACK_DIGEST_CHANNEL,
+        compile_health_warning: compileHealthWarning,
         ...(slackResult.ok ? {} : { slack_error: slackResult.error }),
         ...(notionResult ? { notion_push: notionResult } : {}),
       }),
