@@ -29,36 +29,25 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { callOpenRouter, computeCost } from "../_shared/openrouter.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+const FUNCTION_SLUG = "classify-edges";
 const FILTER_MODEL = "openai/gpt-4.1-mini";
 const CLASSIFY_MODEL = "anthropic/claude-sonnet-4.6";
 const CLASSIFIER_VERSION = "phase-13-classifier-1.0.0";
 
-// OpenRouter pricing per 1M tokens, sourced 2026-05-01.
-const PRICING: Record<string, { in: number; out: number }> = {
-  "openai/gpt-4.1-mini": { in: 0.40, out: 1.60 },
-  "anthropic/claude-sonnet-4.6": { in: 3.00, out: 15.00 },
-};
-
-function estimateCost(model: string, inTok: number, outTok: number): number {
-  const p = PRICING[model];
-  if (!p) return 0; // unknown model: cap silently disables (intentional)
-  return (inTok * p.in + outTok * p.out) / 1_000_000;
-}
-
 // Worst case: filter at full max_tokens (128) + classify at full max_tokens (512),
-// using the upper bound on input chars converted to tokens.
+// using the upper bound on input chars converted to tokens. Unknown-model
+// pricing still falls back to zero, preserving the existing cap behavior.
 const WORST_PER_PAIR =
-  estimateCost(FILTER_MODEL, 500, 128) +
-  estimateCost(CLASSIFY_MODEL, 800, 512);
+  (computeCost(FILTER_MODEL, 500, 128) ?? 0) +
+  (computeCost(CLASSIFY_MODEL, 800, 512) ?? 0);
 
 const ALLOWED_RELATIONS = new Set([
   "supports",
@@ -110,36 +99,27 @@ interface LlmResponse {
   outTokens: number;
 }
 
-async function callOpenRouter(
+async function classifyEdgesCall(
+  callSite: "filter_pair" | "classify_pair",
   model: string,
   systemPrompt: string,
   userMsg: string,
   maxTokens: number,
 ): Promise<LlmResponse> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMsg },
-      ],
-      max_tokens: maxTokens,
-    }),
+  const { data, prompt_tokens, completion_tokens } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: callSite,
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMsg },
+    ],
+    max_tokens: maxTokens,
   });
-  if (!r.ok) {
-    const text = await r.text();
-    throw new Error(`${model} ${r.status}: ${text.slice(0, 200)}`);
-  }
-  const d = await r.json();
   return {
-    raw: d.choices[0].message.content.trim(),
-    inTokens: d.usage?.prompt_tokens ?? 0,
-    outTokens: d.usage?.completion_tokens ?? 0,
+    raw: (data.choices?.[0]?.message?.content ?? "").trim(),
+    inTokens: prompt_tokens,
+    outTokens: completion_tokens,
   };
 }
 
@@ -177,7 +157,8 @@ async function filterPair(
     `Thought B (id=${b.id}, date=${b.created_at.slice(0, 10)}):\n` +
     `${b.content.slice(0, 400)}\n\n` +
     `Is there a meaningful relation? Return strict JSON.`;
-  const { raw, inTokens, outTokens } = await callOpenRouter(
+  const { raw, inTokens, outTokens } = await classifyEdgesCall(
+    "filter_pair",
     FILTER_MODEL,
     FILTER_SYSTEM,
     userMsg,
@@ -187,7 +168,7 @@ async function filterPair(
   return {
     worth: Boolean(parsed.worth_classifying),
     hunch: typeof parsed.hunch === "string" ? parsed.hunch : "none",
-    cost: estimateCost(FILTER_MODEL, inTokens, outTokens),
+    cost: computeCost(FILTER_MODEL, inTokens, outTokens) ?? 0,
   };
 }
 
@@ -256,7 +237,8 @@ async function classifyPair(
     `Thought B (id=${b.id}, date=${b.created_at.slice(0, 10)}):\n` +
     `${b.content.slice(0, 800)}\n\n` +
     `Classify the relationship.`;
-  const { raw, inTokens, outTokens } = await callOpenRouter(
+  const { raw, inTokens, outTokens } = await classifyEdgesCall(
+    "classify_pair",
     CLASSIFY_MODEL,
     CLASSIFY_SYSTEM,
     userMsg,
@@ -276,7 +258,7 @@ async function classifyPair(
     valid_until: typeof parsed.valid_until === "string" && parsed.valid_until !== "null"
       ? parsed.valid_until
       : null,
-    cost: estimateCost(CLASSIFY_MODEL, inTokens, outTokens),
+    cost: computeCost(CLASSIFY_MODEL, inTokens, outTokens) ?? 0,
   };
 }
 

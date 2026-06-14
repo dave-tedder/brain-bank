@@ -38,3 +38,23 @@ for (const target of captureFunctions) {
     }
   });
 }
+
+Deno.test("classify-edges keeps capped budget math while adding both telemetry stages", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../supabase/functions/classify-edges/index.ts", import.meta.url),
+  );
+  assertStringIncludes(
+    source,
+    'import { callOpenRouter, computeCost } from "../_shared/openrouter.ts";',
+  );
+  assertStringIncludes(source, 'const FUNCTION_SLUG = "classify-edges";');
+  assertStringIncludes(source, 'callSite: "filter_pair" | "classify_pair"');
+  assertStringIncludes(source, '"filter_pair"');
+  assertStringIncludes(source, '"classify_pair"');
+  assertStringIncludes(source, "computeCost(FILTER_MODEL, 500, 128) ?? 0");
+  assertStringIncludes(source, "computeCost(CLASSIFY_MODEL, 800, 512) ?? 0");
+  assertStringIncludes(source, "computeCost(FILTER_MODEL, inTokens, outTokens) ?? 0");
+  assertStringIncludes(source, "computeCost(CLASSIFY_MODEL, inTokens, outTokens) ?? 0");
+  assertEquals(source.includes("https://openrouter.ai"), false);
+  assertEquals(source.includes("OPENROUTER_API_KEY"), false);
+});
