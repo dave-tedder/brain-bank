@@ -340,69 +340,27 @@ async function checkAutoResolve(
 
   if (!newProject && newTopics.length === 0 && newPeople.length === 0) return [];
 
-  // Pull recent open items (cap at 100, newest first). Descriptions only at this stage.
-  const { data: openItems, error } = await supabase
-    .from("action_items")
-    .select("id, description, source_thought_id")
-    .eq("status", "open")
-    .order("created_at", { ascending: false })
-    .limit(100);
-  if (error || !openItems || openItems.length === 0) return [];
-
-  // Drop excluded (self / thread parent) and rows with no source thought.
-  const preFiltered = openItems.filter(
-    (item) =>
-      !!item.source_thought_id &&
-      !excludeSourceThoughtIds.includes(item.source_thought_id)
-  );
-  if (preFiltered.length === 0) return [];
-
-  // Batch-fetch source thought metadata for scoping.
-  const sourceIds = Array.from(new Set(preFiltered.map((i) => i.source_thought_id as string)));
-  const { data: sourceThoughts } = await supabase
-    .from("thoughts")
-    .select("id, metadata")
-    .in("id", sourceIds);
-
-  const sourceMetaById = new Map<string, Record<string, unknown>>();
-  for (const t of sourceThoughts || []) {
-    sourceMetaById.set(t.id as string, (t.metadata as Record<string, unknown>) || {});
-  }
-
+  // Scope by project, topic, or person in SQL before LIMIT so older matching
+  // items remain reachable without loading the full open queue.
   type EnrichedItem = {
     id: string;
     description: string;
     source_thought_id: string;
-    srcProject: string | null;
-    srcTopics: string[];
-    srcPeople: string[];
+    src_project: string | null;
+    src_topics: string[];
+    src_people: string[];
   };
 
-  const enriched: EnrichedItem[] = preFiltered.map((row) => {
-    const meta = sourceMetaById.get(row.source_thought_id as string) || {};
-    const srcTopicsRaw = meta.topics;
-    const srcPeopleRaw = meta.people;
-    return {
-      id: row.id as string,
-      description: row.description as string,
-      source_thought_id: row.source_thought_id as string,
-      srcProject: (meta.project as string | null) ?? null,
-      srcTopics: Array.isArray(srcTopicsRaw) ? (srcTopicsRaw as string[]) : [],
-      srcPeople: Array.isArray(srcPeopleRaw) ? (srcPeopleRaw as string[]) : [],
-    };
+  const { data: enrichedRaw, error } = await supabase.rpc("find_candidate_action_items", {
+    p_project: newProject,
+    p_topics: newTopics,
+    p_people: newPeople,
+    p_exclude_source_ids: excludeSourceThoughtIds,
   });
 
-  // LAYER 1: hard scoping.
-  // Keep an item only if it shares a project, a topic, or a person with the new thought.
-  // Items whose source thought has none of those three fields are unscoped and excluded.
-  let candidateItems = enriched.filter((item) => {
-    const projectMatch = !!newProject && !!item.srcProject && newProject === item.srcProject;
-    const topicMatch = item.srcTopics.some((t) => newTopics.includes(t));
-    const personMatch = item.srcPeople.some((p) => newPeople.includes(p));
-    return projectMatch || topicMatch || personMatch;
-  });
+  if (error || !enrichedRaw || (enrichedRaw as EnrichedItem[]).length === 0) return [];
 
-  if (candidateItems.length === 0) return [];
+  let candidateItems = enrichedRaw as EnrichedItem[];
 
   // LAYER 1.5: restatement guard. If the new thought's own extracted action_items
   // are semantically similar to a candidate's description, the new thought is
@@ -437,9 +395,9 @@ async function checkAutoResolve(
   const itemList = candidateItems
     .map((item, i) => {
       const ctx = [
-        item.srcProject ? `project=${item.srcProject}` : null,
-        item.srcTopics.length > 0 ? `topics=${item.srcTopics.join("/")}` : null,
-        item.srcPeople.length > 0 ? `people=${item.srcPeople.join("/")}` : null,
+        item.src_project ? `project=${item.src_project}` : null,
+        item.src_topics.length > 0 ? `topics=${item.src_topics.join("/")}` : null,
+        item.src_people.length > 0 ? `people=${item.src_people.join("/")}` : null,
       ].filter(Boolean).join(", ");
       return `${i + 1}. [${ctx || "no-context"}] ${item.description}`;
     })
