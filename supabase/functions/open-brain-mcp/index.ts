@@ -11,6 +11,7 @@ import {
   loadKnownSlugs,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
+import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -487,6 +488,15 @@ For each match you return, the "reason" field must quote the specific phrase in 
         `checkAutoResolve: LAYER 3 quote-overlap guard dropped item ${item.id} ` +
           `(overlap=${overlap.toFixed(3)}, quote=${JSON.stringify(claim.reason.slice(0, LOG_TRUNC))}, ` +
           `desc=${JSON.stringify(item.description.slice(0, LOG_TRUNC))})`
+      );
+      continue;
+    }
+    const stillOwed = stillOwedAdjacencyVeto(newThoughtContent, item.description, stem);
+    if (stillOwed.vetoed) {
+      console.log(
+        `checkAutoResolve: LAYER 3.5 still-owed veto dropped item ${item.id} ` +
+          `(marker=${stillOwed.marker}, subject=${stillOwed.subject}, dist=${stillOwed.distance}, ` +
+          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`
       );
       continue;
     }

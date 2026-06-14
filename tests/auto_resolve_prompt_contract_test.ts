@@ -45,3 +45,22 @@ Deno.test("sanitized harness snapshots the prompt and FP #4 case", async () => {
   assertEquals(harness.includes("dvsvzlwxhmqwhmknwmdr"), false);
   assertEquals(harness.includes("A2/A3"), false);
 });
+
+Deno.test("mirrored capture functions share the LAYER 3.5 call block", async () => {
+  const sources = await Promise.all(functionPaths.map((path) =>
+    Deno.readTextFile(new URL(path, import.meta.url))
+  ));
+  const startMarker = "const stillOwed = stillOwedAdjacencyVeto(";
+  const endMarker = "      continue;\n    }";
+  const blocks = sources.map((source) => {
+    assertStringIncludes(source, 'import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";');
+    const start = source.indexOf(startMarker);
+    const end = source.indexOf(endMarker, start);
+    if (start < 0 || end < 0) throw new Error("LAYER 3.5 call block not found");
+    return source.slice(start, end + endMarker.length);
+  });
+
+  assertEquals(blocks[0], blocks[1]);
+  assertStringIncludes(blocks[0], "newThoughtContent, item.description, stem");
+  assertStringIncludes(blocks[0], "LAYER 3.5 still-owed veto dropped item");
+});
