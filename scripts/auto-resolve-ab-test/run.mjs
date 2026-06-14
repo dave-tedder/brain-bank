@@ -17,6 +17,7 @@ const MODELS = [
   "openai/gpt-4o-mini",
   "openai/gpt-4.1-mini",
   "anthropic/claude-haiku-4-5",
+  "anthropic/claude-sonnet-4.6",
 ];
 
 // Keep this snapshot byte-identical to the prompt in both capture functions.
@@ -142,7 +143,14 @@ async function runOne(model, testCase) {
   const body = await response.json();
   const raw = body?.choices?.[0]?.message?.content ?? "";
   try {
-    const parsed = JSON.parse(raw);
+    const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    const candidate = fenceMatch ? fenceMatch[1] : raw;
+    const braceStart = candidate.indexOf("{");
+    const braceEnd = candidate.lastIndexOf("}");
+    const json = braceStart >= 0 && braceEnd > braceStart
+      ? candidate.slice(braceStart, braceEnd + 1)
+      : candidate.trim();
+    const parsed = JSON.parse(json);
     const entries = Array.isArray(parsed.resolved) ? parsed.resolved : [];
     const resolved = entries
       .map((entry) => typeof entry === "number" ? entry : entry?.num)
