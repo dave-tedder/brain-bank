@@ -1,0 +1,10 @@
+{
+  "notionProjectsDbId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "model": "openai/gpt-4.1-mini",
+  "doneStatuses": ["done", "complete", "completed", "closed", "archived", "finished"],
+  "protectedPhrases": ["do not resolve", "canary", "tripwire"],
+  "workItemShapeTerms": ["appointment", "client", "contract", "customer", "deadline", "deposit", "invoice", "legal"],
+  "projectAliases": {
+    "Acme Launch - Website migration": ["Acme Launch", "website migration"]
+  }
+}

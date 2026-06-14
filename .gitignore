@@ -61,5 +61,9 @@ tests/_shared/fixtures/private/
 # Projects sync operator config (local paths and Notion database ID)
 integrations/projects-sync/config.json
 
+# Action-item triage operator config and generated reports
+integrations/action-item-triage/config.json
+integrations/action-item-triage/out/
+
 # Handoff scratch files
 HANDOFF-*.md
