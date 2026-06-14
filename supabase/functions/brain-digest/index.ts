@@ -2,17 +2,17 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { loadProfile } from "../_shared/profile.ts";
 import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
+import { callOpenRouter } from "../_shared/openrouter.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_DIGEST_CHANNEL =
   Deno.env.get("SLACK_DIGEST_CHANNEL") || Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const NOTION_API_TOKEN = Deno.env.get("NOTION_API_TOKEN") || "";
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const FUNCTION_SLUG = "brain-digest";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Daily-mode pre-brief filter: which event_types count as "client-facing"
@@ -236,26 +236,20 @@ Review all thoughts captured yesterday, plus any business context provided (upco
 
 Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Keep it under 300 words.`;
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-sonnet-4.6",
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: `Here are the ${thoughts.length} thoughts from the ${timeframe}:\n\n${context}\n\n---\nStructured metadata:\n${structuredContext}${extensionContext ? "\n\n---\nBusiness context (from extensions):\n" + extensionContext : ""}`,
-        },
-      ],
-    }),
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: mode === "weekly" ? "digest_synth_weekly" : "digest_synth_daily",
+    model: "anthropic/claude-sonnet-4.6",
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: `Here are the ${thoughts.length} thoughts from the ${timeframe}:\n\n${context}\n\n---\nStructured metadata:\n${structuredContext}${extensionContext ? "\n\n---\nBusiness context (from extensions):\n" + extensionContext : ""}`,
+      },
+    ],
   });
 
-  const d = await r.json();
-  return d.choices[0].message.content.trim();
+  return (data.choices?.[0]?.message?.content ?? "").trim();
 }
 
 // --- Previous Week Context (week-over-week comparison) ---

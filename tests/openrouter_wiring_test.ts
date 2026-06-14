@@ -77,3 +77,20 @@ Deno.test("compile-pages preserves abort timeout and exposes three telemetry lab
   assertEquals(source.includes("https://openrouter.ai"), false);
   assertEquals(source.includes("OPENROUTER_API_KEY"), false);
 });
+
+Deno.test("brain-digest labels daily and weekly synthesis separately", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../supabase/functions/brain-digest/index.ts", import.meta.url),
+  );
+  assertStringIncludes(
+    source,
+    'import { callOpenRouter } from "../_shared/openrouter.ts";',
+  );
+  assertStringIncludes(source, 'const FUNCTION_SLUG = "brain-digest";');
+  assertStringIncludes(
+    source,
+    'call_site: mode === "weekly" ? "digest_synth_weekly" : "digest_synth_daily"',
+  );
+  assertEquals(source.includes("https://openrouter.ai"), false);
+  assertEquals(source.includes("OPENROUTER_API_KEY"), false);
+});
