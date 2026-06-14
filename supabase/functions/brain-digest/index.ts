@@ -1,23 +1,47 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { loadProfile } from "../_shared/profile.ts";
+import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
+import { callOpenRouter } from "../_shared/openrouter.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_DIGEST_CHANNEL =
   Deno.env.get("SLACK_DIGEST_CHANNEL") || Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const NOTION_API_TOKEN = Deno.env.get("NOTION_API_TOKEN") || "";
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const FUNCTION_SLUG = "brain-digest";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Daily-mode pre-brief filter: which event_types count as "client-facing"
 // for cross-referencing with the clients table. Sourced from profile so
 // operators can configure their own event semantics.
 const clientEventTypes = loadProfile().client_event_types;
+
+async function loadCompileHealthWarning(): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from("compile_pages_runs")
+      .select(
+        "created_at, mode, index_mode, batch, compiled, errors, status, error_message",
+      )
+      .eq("mode", "compile")
+      .order("created_at", { ascending: false })
+      .limit(20);
+
+    if (error) {
+      console.error("compile health query failed (non-fatal):", error);
+      return "*Wiki compile health unavailable:* latest run could not be checked.";
+    }
+
+    return getCompileRunHealthWarning(data || []);
+  } catch (err) {
+    console.error("compile health check failed (non-fatal):", err);
+    return "*Wiki compile health unavailable:* latest run could not be checked.";
+  }
+}
 
 // --- Slack ---
 
@@ -93,16 +117,26 @@ async function synthesizeDigest(
     }
   }
 
-  // Pull open action items from the action_items table (source of truth)
-  const { data: openActions } = await supabase
+  // Cap the open-action dump so a large backlog cannot dominate the prompt.
+  // Newest-first plus an exact total preserves the true scale.
+  const ACTION_ITEM_DIGEST_CAP = 40;
+  const { data: openActions, count: openActionsTotal } = await supabase
     .from("action_items")
-    .select("description, created_at")
+    .select("description, created_at", { count: "exact" })
     .eq("status", "open")
-    .order("created_at", { ascending: true });
+    .order("created_at", { ascending: false })
+    .limit(ACTION_ITEM_DIGEST_CAP);
 
-  const actionItemsText = openActions && openActions.length > 0
-    ? openActions.map((a) => a.description).join("; ")
-    : "none";
+  let actionItemsText: string;
+  if (openActions && openActions.length > 0) {
+    actionItemsText = openActions.map((a) => a.description).join("; ");
+    const total = openActionsTotal ?? openActions.length;
+    if (total > openActions.length) {
+      actionItemsText += ` (+${total - openActions.length} more open)`;
+    }
+  } else {
+    actionItemsText = "none";
+  }
 
   const structuredLines = [
     `Open action items (verified, not yet resolved): ${actionItemsText}`,
@@ -202,26 +236,20 @@ Review all thoughts captured yesterday, plus any business context provided (upco
 
 Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Keep it under 300 words.`;
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-sonnet-4.6",
-      messages: [
-        { role: "system", content: systemPrompt },
-        {
-          role: "user",
-          content: `Here are the ${thoughts.length} thoughts from the ${timeframe}:\n\n${context}\n\n---\nStructured metadata:\n${structuredContext}${extensionContext ? "\n\n---\nBusiness context (from extensions):\n" + extensionContext : ""}`,
-        },
-      ],
-    }),
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: mode === "weekly" ? "digest_synth_weekly" : "digest_synth_daily",
+    model: "anthropic/claude-sonnet-4.6",
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: `Here are the ${thoughts.length} thoughts from the ${timeframe}:\n\n${context}\n\n---\nStructured metadata:\n${structuredContext}${extensionContext ? "\n\n---\nBusiness context (from extensions):\n" + extensionContext : ""}`,
+      },
+    ],
   });
 
-  const d = await r.json();
-  return d.choices[0].message.content.trim();
+  return (data.choices?.[0]?.message?.content ?? "").trim();
 }
 
 // --- Previous Week Context (week-over-week comparison) ---
@@ -292,11 +320,13 @@ async function getApproachingDeadlines(): Promise<
   const todayStr = now.toISOString().split("T")[0];
   const cutoffStr = twoWeeksOut.toISOString().split("T")[0];
 
-  // Query thoughts that have dates_mentioned in metadata
+  // Exclude Gmail captures so marketing and sale-end dates do not surface as
+  // digest deadlines. Null or absent sources still count.
   const { data } = await supabase
     .from("thoughts")
     .select("content, metadata")
     .not("metadata->dates_mentioned", "is", null)
+    .neq("metadata->>source", "gmail")
     .order("created_at", { ascending: false })
     .limit(200);
 
@@ -930,35 +960,28 @@ Deno.serve(async (req: Request): Promise<Response> => {
               slackMessage += `\n\n---\n:books: *Wiki Health*\n${lintLines.join("\n")}`;
             }
           }
+        } else {
+          const body = await lintRes.text().catch(() => "(body unreadable)");
+          console.error(
+            `[brain-digest] lint fetch failed: status=${lintRes.status} body=${body.substring(0, 500)}`,
+          );
         }
       } catch (err) {
         console.error("Lint results fetch failed (non-fatal):", err);
       }
     }
 
+    // Compile health is advisory. A failed lookup or degraded compile adds a
+    // concise warning but never blocks the digest from reaching Slack.
+    const compileHealthWarning = await loadCompileHealthWarning();
+    if (compileHealthWarning) {
+      slackMessage += `\n\n---\n${compileHealthWarning}`;
+    }
+
     const slackResult = await postToSlack(SLACK_DIGEST_CHANNEL, slackMessage);
 
-    // Self-capture: save weekly review as a thought for future reference
-    if (mode === "weekly") {
-      try {
-        const captureUrl = `${SUPABASE_URL}/functions/v1/open-brain-mcp/capture`;
-        const captureRes = await fetch(captureUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-brain-key": MCP_ACCESS_KEY,
-          },
-          body: JSON.stringify({
-            content: `[Weekly Review] ${digest}`,
-          }),
-        });
-        if (!captureRes.ok) {
-          console.error("Self-capture failed:", captureRes.status, await captureRes.text());
-        }
-      } catch (err) {
-        console.error("Self-capture error (non-fatal):", err);
-      }
-    }
+    // Weekly reviews are already persisted in the digests table. Do not copy
+    // them into thoughts, where they would feed future digests and wiki counts.
 
     // Notion insight push (weekly mode only, opt-in via push_to_notion=true)
     let notionResult: { pushed: number; errors: number } | undefined;
@@ -976,6 +999,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         mode,
         thoughts_count: data.length,
         channel: SLACK_DIGEST_CHANNEL,
+        compile_health_warning: compileHealthWarning,
         ...(slackResult.ok ? {} : { slack_error: slackResult.error }),
         ...(notionResult ? { notion_push: notionResult } : {}),
       }),

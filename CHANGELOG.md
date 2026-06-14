@@ -2,11 +2,43 @@
 
 All notable changes to Brain Bank are documented here.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it leaves pre-release.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries are written for operators considering a fork. If you see "Breaking" on a change, upgrading will require action on your side (schema migration, env var addition, config edit). Anything else is a quiet improvement.
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-06-14
+
+### Added
+
+- **Per-call OpenRouter telemetry across all Edge Functions.** A shared wrapper now records model, token usage, estimated cost, latency, function, call site, and sanitized outcome for every embedding and chat-completion call. Telemetry is best-effort and non-blocking, provider errors still propagate to callers, compile timeouts remain intact, and the edge classifier keeps its existing cost cap. Stable labels distinguish all 15 logical paths across capture, digest, wiki compilation, and typed-edge classification. The `openrouter_calls` migration was already present. Source: Open Brain commit `cce9cb7`.
+
+- **Generic action-item triage CLI with offline verification.** New `integrations/action-item-triage/` tooling runs protected-phrase, external-project, newest-wins deduplication, and configurable work-shape rules before an optional `openai/gpt-4.1-mini` classifier. Dry run is the default, pending items block apply, changes are reversible status updates recorded in CSV, and fixture mode verifies the full path without credentials or network access. Sources: Open Brain commits `7b0a7d4` and `040ddee`.
+
+- **Gmail supply-receipt exception with tested precedence.** The public Gmail bridge now lets configured supply-vendor receipts pass while continuing to block the same vendors' marketing mail. GoDaddy promotional mail no longer bypasses filtering through the broad allowlist. Fictional vendor defaults and executable precedence tests keep the integration operator-neutral. Source: Open Brain commit `39a63f7`.
+
+- **Six-layer auto-resolve protection with Sonnet 4.6.** LAYER 2 now uses `anthropic/claude-sonnet-4.6`, the model that cleared the upstream 600-call false-positive and legitimate-case ablation. New deterministic LAYER 3.5 logic blocks resolutions when a candidate subject sits beside an unambiguous still-owed marker, and a shared fenced-JSON extractor handles Anthropic responses that ignore JSON mode while failing closed on malformed output. Both capture functions retain byte-identical prompt, model, parser, and guard wiring; focused helper and source-contract tests cover the invariants. This improves resolution accuracy at a small recurring model-cost increase. Sources: Open Brain commits `42c78d8`, `9398abc`, `ed3e89a`, `921bbb6`, `6a7987b`, `1947ddc`, `70e9073`, `3cd7720`, `74ba7df`, `94f7823`, and `064e651`.
+
+- **Auto-resolve rejects explicit still-to-do markers.** The mirrored LAYER 2 prompt now treats `remaining`, `outstanding`, `to-do`, `todo`, `deferred`, `pending`, `yet to`, `still to`, `still need`, `next`, `follows`, and `to follow` as evidence that matching work is still owed, not completed. A sanitized OpenRouter comparison harness and source-contract tests keep the prompt byte-identical across both capture functions and pin the false-positive case. Source: Open Brain commit `a179fb6`.
+
+- **Capture classification, action-item scaling, and project-sync ports.** Added the generic `openrouter_calls` audit schema, a sanitized Gmail-source history correction, dependency-free filesystem/Notion project synchronization, shared metadata coercion with project-slug validation, SQL-scoped auto-resolve candidates, an `archived` action status, and a bounded keyword pre-filter for Slack `done:` commands. Capture wiring remains mirrored across `ingest-thought` and `open-brain-mcp`, with focused tests for Slack, REST, RPC, and done-command behavior. Sources: Open Brain commits `cce9cb7`, `e9a2190`, `07ebb38`, `abc2fc6` through `5b84fb7`, `2b195b2`, `97e8a51`, `9787f47`, `bdecb0e`, `2a30397`, and `337924c`.
+
+- **90-day retention for operational audit logs.** A locked-down `purge_old_audit_logs()` maintenance function and weekly pg_cron job bound `mcp_tool_invocations`, `compile_pages_runs`, and the optional `openrouter_calls` table without touching durable thoughts, actions, digests, or business records. The migration remains replayable before the optional OpenRouter telemetry table is installed. Source: Open Brain commit `5315c58`.
+
+- **Covering index for resolved action-item references.** `action_items.resolved_by_thought_id` now has an idempotent index for faster foreign-key checks and lookups. Source: Open Brain commit `e367832`.
+
+- **Digest input and wiki auto-create quality controls.** Digest synthesis now uses the 40 newest open actions plus the exact remaining count, excludes Gmail captures from deadline detection, and stops copying weekly reviews back into `thoughts`. Wiki auto-create counts also ignore Gmail captures while preserving client creation, non-email topic/project counts, truthful Slack delivery responses, compile-health warnings, and curated contradiction lint. Sources: Open Brain commits `6681e22` and `3ea63db`.
+
+- **Digest warnings for unhealthy wiki compilation.** Daily and weekly digests inspect the latest full scheduled `compile_pages_runs` row and append a concise warning when the run is missing, older than 26 hours, explicitly failed, or completed with page errors. Later one-page maintenance runs do not mask the full batch, and health lookup failures remain advisory so Slack delivery still proceeds. Source: Open Brain commit `36e1e0a`.
+
+- **Weekly contradiction lint now focuses on client pages and curated project pages.** Broad topic and index pages no longer consume the five-call contradiction-check budget. Project pages qualify only when their slug exists in the curated `projects` table; staleness and missing-page lint checks are unchanged. Source: Open Brain commit `00e7fea`.
+
+- **New `get_thought_edges` MCP tool (Phase 13.6).** Returns the full typed-edge list for a thought, with optional `relation` / `min_confidence` / `limit` filters. Each edge entry shows direction, relation type, confidence, support_count, classifier version, validity window, rationale, and a 200-char counterpart-thought preview (saving an extra `get_thought_by_id` call when the preview is enough). The McpServer `instructions` field gains a brief "Edges between thoughts" paragraph between "Drill between them" and "Default heuristic" so MCP clients reading the initialization handshake see a one-paragraph orientation. Framing preserves the wiki + raw thoughts as primary retrieval surfaces; the tool description ends with "Edges are an enrichment signal — fall back to `search_thoughts` or `get_compiled_page` for primary retrieval." `tools/list` now returns 21 tools (was 20 post-12.D). Why this matters: `get_thought_by_id` already shows a Relationships summary (Phase 13.5); `get_thought_edges` is the drill-down for when a relation type or counterpart deserves a closer look. The hybrid framing is preserved end-to-end. Source: Open Brain commit f18ee70.
+
+- **`get_thought_by_id` MCP tool now appends a brief `## Relationships` section when the thought has typed edges (Phase 13.5).** When `thought_edges` contains rows pointing to or from the requested thought, the tool emits a per-relation breakdown with the top 3 counterparts and confidence scores, ordered `contradicts > supersedes > depends_on > supports > evolved_into > related_to`. Footer line directs the agent to `get_thought_edges` for full inspection. The query is best-effort and bounded (`LIMIT 20`); enrichment errors are silently swallowed so the primary thought-content response always renders. The tool description now mentions the Relationships section. Why this matters: agents that drill from a wiki Sources citation now see a one-shot hint that more relationship context exists, without having to call a separate edge tool to find out. Edges are an enrichment signal; the wiki + raw thoughts remain primary retrieval surfaces. Source: Open Brain commit 4490efb.
+
+- **Optional weekly classify-edges cron documented in `docs/deploy-from-scratch.md` Step 12.** New subsection at the end of Step 12 walks operators through scheduling the Phase 13 typed reasoning edges classifier (`classify-edges`) on Sundays 10:15 UTC at `limit=15` with a $2.00/week cost cap. Includes a verification query and an explanation of why `limit=15` is the safe ceiling (the function buffers `limit*4` candidate pairs in worker memory before classification, and higher limits can hit `WORKER_RESOURCE_LIMIT`). Mirror entry added to `skills/brain-bank-setup/references/cron-branch.md` so the brain-bank-setup skill can offer the optional schedule after the four core jobs land. The "What's next" recap gains a "(Optional) Weekly typed reasoning edges classifier" bullet. Why this matters: the `classify-edges` Edge Function shipped earlier in this Unreleased block (Phase 13.2 port) but operators had no doc-side instructions for scheduling it; this entry closes the gap so the function is discoverable and runnable from a fresh clone. Source: Open Brain Phase 13.4.
 
 ## [0.1.0] - 2026-04-29
 
@@ -98,11 +130,12 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 
 - **Edge Function deploys now include `profile.json` in the upload bundle.** The first attempted brain-bank swap returned 500 WORKER_ERROR because the Supabase CLI bundler only uploads files reachable through the import graph, and the earlier runtime `Deno.readTextFileSync` approach left `profile.json` outside that graph. Replaced with a JSON module import (`import profileDefaults from "./profile.json" with { type: "json" }`), which the bundler recognizes as a module-graph edge. A throwaway test function verified the fix before the retry deploy. Why this matters: if you build anything that reads a local file from an Edge Function, make it a module import, not a filesystem read.
 
-### Notes for future readers
+### Historical notes
 
-- This is a pre-release. The engine is live for the author, but the deploy-from-scratch walkthrough (`docs/deploy-from-scratch.md`) is still being written. The first tagged release (`v0.1.0`) ships once a friend deploys successfully from a cold clone using only the shipped docs.
-- The dashboard (Next.js on Railway) is still a separate private repo. It will merge into `dashboard/` via `git subtree add` during Phase 5, after which dashboard env vars get added to `.env.example`.
+- This snapshot preceded the public `v0.1.0` release, which shipped on 2026-04-30 after the deploy-from-scratch walkthrough was verified against fresh Supabase projects.
+- The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dave-tedder/brain-bank/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0
 [0.1.0-pre]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0-pre

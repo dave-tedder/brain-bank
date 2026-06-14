@@ -3,8 +3,9 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { CompiledPageRow } from "@/lib/graph-data";
+import { stalenessFor } from "@/lib/staleness";
 
-const PAGE_TYPES = ["client", "topic", "project"];
+const PAGE_TYPES = ["client", "topic", "project", "index"];
 
 export default function WikiList({ pages }: { pages: CompiledPageRow[] }) {
   const [activeType, setActiveType] = useState<string | null>(null);
@@ -110,13 +111,23 @@ export default function WikiList({ pages }: { pages: CompiledPageRow[] }) {
             </div>
             {page.last_compiled && (
               <div
-                className="text-[10px] mt-2"
+                className="text-[10px] mt-2 flex items-center"
                 style={{ color: "var(--text-muted)", fontFamily: "'IBM Plex Mono', monospace" }}
               >
-                compiled {new Date(page.last_compiled).toLocaleDateString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                })}
+                <span>
+                  compiled {new Date(page.last_compiled).toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                  })}
+                </span>
+                {(() => {
+                  const { isStale, daysOld } = stalenessFor(page.page_type, page.last_compiled);
+                  return isStale ? (
+                    <span className="ml-2 inline-block rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-900">
+                      STALE {daysOld}d
+                    </span>
+                  ) : null;
+                })()}
               </div>
             )}
           </Link>

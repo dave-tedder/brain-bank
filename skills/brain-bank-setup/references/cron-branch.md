@@ -20,6 +20,10 @@ Reached from SKILL.md cron branch menu, option 1. State on entry:
 | **Schedule 4 cron jobs** | "Finally, the four cron schedules. Default is 6 AM ET during EDT (10:00 UTC). Want that, or adjust for your timezone / DST?" | If operator adjusts: offer a quick translation (e.g., "6 AM PT during PDT = `0 13 * * *`"). Emit the 4 `select cron.schedule(...);` blocks from `docs/deploy-from-scratch.md` Step 12 with the chosen UTC offset applied. After operator runs: `select jobid, jobname, schedule, command from cron.job order by jobid;`, expect 4 rows. | Run the 4 `cron.schedule` calls. |
 | **Done** | "Scheduled digests live. First fire at [calculated next-fire time based on cron schedule]. If it doesn't land, check `select * from cron.job_run_details order by start_time desc limit 5;`, the `status` and `return_message` columns tell you what went wrong." | | Wait for next fire. |
 
+## Optional: classify-edges-weekly
+
+After the four core cron jobs are scheduled, offer the operator the optional weekly typed reasoning edges classifier (Phase 13). Reference is `docs/deploy-from-scratch.md` Step 12 final subsection. Schedule shape: `'15 10 * * 0'` (Sundays 10:15 UTC), `limit=15`, `max_cost_usd=2.00`. Skip without prompt if the operator declines; this is purely an enrichment surface and the wiki + raw thoughts remain primary retrieval.
+
 ## Failure handling
 
 Failures (vault missing, permission denied, extension not enabled, cron fires but fails) forward-link to `references/error-recovery.md` "Cron branch" section.

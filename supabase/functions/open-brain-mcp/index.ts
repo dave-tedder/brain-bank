@@ -6,14 +6,49 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import { loadProfile } from "../_shared/profile.ts";
+import {
+  coerceMetadata,
+  loadKnownSlugs,
+  shouldExtractActionItems,
+} from "../_shared/metadata-validation.ts";
+import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
+import { extractJsonObject } from "../_shared/extract-json.ts";
+import { callOpenRouter } from "../_shared/openrouter.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const FUNCTION_SLUG = "open-brain-mcp";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// Deno Edge Runtime exposes EdgeRuntime as a global; declare it for the type
+// checker so the workspace deno check stays at 0 errors.
+declare const EdgeRuntime: {
+  waitUntil: (p: PromiseLike<unknown>) => void;
+};
+
+// Fire-and-forget telemetry write to public.mcp_tool_invocations. Never throws,
+// never blocks the tool response. Called from registered MCP tool handlers.
+// EdgeRuntime.waitUntil follows the project's existing pattern (see
+// ingest-thought handler dispatch).
+function logToolInvocation(
+  toolName: string,
+  args: Record<string, unknown>,
+  source: "mcp" | "rest",
+): void {
+  const writePromise = supabase
+    .from("mcp_tool_invocations")
+    .insert({ tool_name: toolName, args, source })
+    .then((r: { error?: { message?: string } | null }) => {
+      if (r.error) {
+        console.error(
+          `[mcp-tool-log] insert failed for ${toolName}: ${r.error.message}`,
+        );
+      }
+    });
+  EdgeRuntime.waitUntil(writePromise);
+}
 
 function titleCase(s: string): string {
   return s.replace(/\b\w/g, (c) => c.toUpperCase());
@@ -40,37 +75,42 @@ async function isDuplicate(hash: string): Promise<boolean> {
   return (data?.length ?? 0) > 0;
 }
 
+// Sync-source captures (e.g. a Notion database sync) dedup on the source
+// record's identity + last-edited timestamp instead of content hash. A sync
+// re-renders each record into a capture string that drifts on cosmetic
+// changes (whitespace, em-dash vs double-dash, a field toggling to/from
+// "N/A"), defeating the SHA-256 content hash. The source's last-edited
+// timestamp only advances when the record actually changes, so an unchanged
+// re-sync is correctly skipped while a genuine edit still lands a fresh
+// capture.
+async function isNotionDuplicate(pageId: string, lastEdited: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("thoughts")
+    .select("id")
+    .eq("metadata->>notion_page_id", pageId)
+    .eq("metadata->>notion_last_edited", lastEdited)
+    .limit(1);
+  return (data?.length ?? 0) > 0;
+}
+
 async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
-      input: text,
-    }),
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "getEmbedding",
+    model: "openai/text-embedding-3-small",
+    endpoint: "embeddings",
+    input: text,
   });
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
-  }
-  const d = await r.json();
-  return d.data[0].embedding;
+  return data.data![0].embedding!;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "extractMetadata",
+    model: "openai/gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `Extract metadata from the user's captured thought. Return JSON with:
@@ -82,7 +122,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
     * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one)
+- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one). Preserve hyphenated tokens as a single tag: "fitness-training" stays as one tag, never split into ["fitness", "training"].
 - "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
 - "project": the project or system this note is ABOUT, e.g. ${loadProfile().example_projects.map((p) => `"${p}"`).join(", ")}, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
 - "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
@@ -92,12 +132,11 @@ Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or 
 Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
         },
         { role: "user", content: text },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
+  const d = data as { choices: Array<{ message: { content: string } }> };
   try {
-    return JSON.parse(d.choices[0].message.content);
+    return JSON.parse(d.choices![0].message!.content!);
   } catch {
     return { topics: ["uncategorized"], type: "observation" };
   }
@@ -218,8 +257,20 @@ const LOG_TRUNC = 200;
 
 async function extractAndStoreActionItems(
   thoughtId: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  content: string
 ): Promise<void> {
+  // Observations, references, and email-sourced captures are descriptive,
+  // not commitment-shaped, so they must not create open action items.
+  if (!shouldExtractActionItems(metadata)) return;
+
+  // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
+  // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
+  // extraction LLM may still pick up advisory phrases ("should reduce volume",
+  // "needs more sleep") from prose summaries; suppress storing those as open
+  // action items so they don't pollute the digest's open-items section.
+  if (isMechanicalCapture(content)) return;
+
   const items = metadata.action_items;
   if (!Array.isArray(items) || items.length === 0) return;
 
@@ -277,69 +328,27 @@ async function checkAutoResolve(
 
   if (!newProject && newTopics.length === 0 && newPeople.length === 0) return [];
 
-  // Pull recent open items (cap at 100, newest first). Descriptions only at this stage.
-  const { data: openItems, error } = await supabase
-    .from("action_items")
-    .select("id, description, source_thought_id")
-    .eq("status", "open")
-    .order("created_at", { ascending: false })
-    .limit(100);
-  if (error || !openItems || openItems.length === 0) return [];
-
-  // Drop excluded (self / thread parent) and rows with no source thought.
-  const preFiltered = openItems.filter(
-    (item) =>
-      !!item.source_thought_id &&
-      !excludeSourceThoughtIds.includes(item.source_thought_id)
-  );
-  if (preFiltered.length === 0) return [];
-
-  // Batch-fetch source thought metadata for scoping.
-  const sourceIds = Array.from(new Set(preFiltered.map((i) => i.source_thought_id as string)));
-  const { data: sourceThoughts } = await supabase
-    .from("thoughts")
-    .select("id, metadata")
-    .in("id", sourceIds);
-
-  const sourceMetaById = new Map<string, Record<string, unknown>>();
-  for (const t of sourceThoughts || []) {
-    sourceMetaById.set(t.id as string, (t.metadata as Record<string, unknown>) || {});
-  }
-
+  // Scope by project, topic, or person in SQL before LIMIT so older matching
+  // items remain reachable without loading the full open queue.
   type EnrichedItem = {
     id: string;
     description: string;
     source_thought_id: string;
-    srcProject: string | null;
-    srcTopics: string[];
-    srcPeople: string[];
+    src_project: string | null;
+    src_topics: string[];
+    src_people: string[];
   };
 
-  const enriched: EnrichedItem[] = preFiltered.map((row) => {
-    const meta = sourceMetaById.get(row.source_thought_id as string) || {};
-    const srcTopicsRaw = meta.topics;
-    const srcPeopleRaw = meta.people;
-    return {
-      id: row.id as string,
-      description: row.description as string,
-      source_thought_id: row.source_thought_id as string,
-      srcProject: (meta.project as string | null) ?? null,
-      srcTopics: Array.isArray(srcTopicsRaw) ? (srcTopicsRaw as string[]) : [],
-      srcPeople: Array.isArray(srcPeopleRaw) ? (srcPeopleRaw as string[]) : [],
-    };
+  const { data: enrichedRaw, error } = await supabase.rpc("find_candidate_action_items", {
+    p_project: newProject,
+    p_topics: newTopics,
+    p_people: newPeople,
+    p_exclude_source_ids: excludeSourceThoughtIds,
   });
 
-  // LAYER 1: hard scoping.
-  // Keep an item only if it shares a project, a topic, or a person with the new thought.
-  // Items whose source thought has none of those three fields are unscoped and excluded.
-  let candidateItems = enriched.filter((item) => {
-    const projectMatch = !!newProject && !!item.srcProject && newProject === item.srcProject;
-    const topicMatch = item.srcTopics.some((t) => newTopics.includes(t));
-    const personMatch = item.srcPeople.some((p) => newPeople.includes(p));
-    return projectMatch || topicMatch || personMatch;
-  });
+  if (error || !enrichedRaw || (enrichedRaw as EnrichedItem[]).length === 0) return [];
 
-  if (candidateItems.length === 0) return [];
+  let candidateItems = enrichedRaw as EnrichedItem[];
 
   // LAYER 1.5: restatement guard. If the new thought's own extracted action_items
   // are semantically similar to a candidate's description, the new thought is
@@ -374,9 +383,9 @@ async function checkAutoResolve(
   const itemList = candidateItems
     .map((item, i) => {
       const ctx = [
-        item.srcProject ? `project=${item.srcProject}` : null,
-        item.srcTopics.length > 0 ? `topics=${item.srcTopics.join("/")}` : null,
-        item.srcPeople.length > 0 ? `people=${item.srcPeople.join("/")}` : null,
+        item.src_project ? `project=${item.src_project}` : null,
+        item.src_topics.length > 0 ? `topics=${item.src_topics.join("/")}` : null,
+        item.src_people.length > 0 ? `people=${item.src_people.join("/")}` : null,
       ].filter(Boolean).join(", ");
       return `${i + 1}. [${ctx || "no-context"}] ${item.description}`;
     })
@@ -388,13 +397,12 @@ async function checkAutoResolve(
     newPeople.length > 0 ? `people=${newPeople.join("/")}` : null,
   ].filter(Boolean).join(", ");
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "openai/gpt-4.1-mini",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "checkAutoResolve",
+    model: "anthropic/claude-sonnet-4.6",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `You check whether a new note explicitly resolves any open action items.
@@ -407,23 +415,22 @@ HARD RULES — a match requires ALL of these:
 2. The note describes the action as DONE, SCHEDULED, or EXPLICITLY CANCELLED. Progress reports, related work, or similar-sounding updates do not count.
 3. The new note and the action item must be about the same concrete thing. If the action item is a specific bug, file, feature, client, or errand, the note must name or unambiguously describe that same thing.
 4. If the candidate context says "project=X" and the note's context is a different project, do NOT mark it resolved even if wording overlaps. Cross-project auto-resolves are forbidden unless the note explicitly names the other project.
-5. READINESS or UNBLOCKING SIGNALS NEVER resolve anything. A note phrased with a verb that describes the PRE-WORK state — "unblocked", "cleared", "un-gated", "ready", "readied", "prepped", "prepared", "queued", "slated", "planned", "staged", "teed up", "lined up", "kicked off", "approved", or "authorized" — is announcing that work is about to BEGIN, not that it has been completed. Even if the subject matches a candidate exactly, do NOT resolve — "X unblocked" means X is now doable, not that X has been done. Return [] for this entry.
+5. READINESS, UNBLOCKING, or STILL-TO-DO SIGNALS NEVER resolve anything. A note phrased with a verb or marker that describes the PRE-WORK state — "unblocked", "cleared", "un-gated", "ready", "readied", "prepped", "prepared", "queued", "slated", "planned", "staged", "teed up", "lined up", "kicked off", "approved", or "authorized" — OR a marker that explicitly frames work as NOT YET DONE — "remaining", "outstanding", "to-do", "todo", "deferred", "pending", "yet to", "still to", "still need", "next", "follows", "to follow" — is announcing that work is about to BEGIN or is still owed, not that it has been completed. Even if the subject matches a candidate exactly, do NOT resolve — "X unblocked" or "Remaining: X" means X is still on the list, not that X has been done. Return [] for this entry.
 6. When unsure, do NOT resolve. Empty array is the correct default.
 
-For each match you return, the "reason" field must quote the specific phrase in the note that PROVES completion. The quote must contain an explicit past-tense completion verb ("shipped", "fixed", "finished", "deployed", "merged", "submitted", "completed", "cancelled", "closed", "sent") or an explicit forward-reference ("scheduled for Friday"). Readiness verbs — "unblocked", "cleared", "ready", "prepped", "queued", "staged", "kicked off", "approved" — do NOT count as completion; they describe the state before the work, not the work being done. If you cannot produce such a quote, do not include the match.`,
+For each match you return, the "reason" field must quote the specific phrase in the note that PROVES completion. The quote must contain an explicit past-tense completion verb ("shipped", "fixed", "finished", "deployed", "merged", "submitted", "completed", "cancelled", "closed", "sent") or an explicit forward-reference ("scheduled for Friday"). Readiness or still-to-do markers — "unblocked", "cleared", "ready", "prepped", "queued", "staged", "kicked off", "approved", "remaining", "outstanding", "pending", "to-do", "deferred", "yet to", "still to", "still need", "next", "follows" — do NOT count as completion; they describe the state before the work, or work that is still owed. If you cannot produce such a quote, do not include the match.`,
         },
         {
           role: "user",
           content: `New note context: ${newCtx || "no-context"}\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
         },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
+  const d = data as { choices: Array<{ message: { content: string } }> };
   type Claim = { num: number; reason: string };
   let claims: Claim[] = [];
   try {
-    const parsed = JSON.parse(d.choices[0].message.content);
+    const parsed = JSON.parse(extractJsonObject(d.choices[0].message.content));
     const arr = Array.isArray(parsed.resolved) ? parsed.resolved : [];
     claims = arr
       .map((entry: unknown): Claim | null => {
@@ -439,7 +446,13 @@ For each match you return, the "reason" field must quote the specific phrase in 
         return null;
       })
       .filter((c: Claim | null): c is Claim => c !== null);
-  } catch { return []; }
+  } catch (error) {
+    console.log(
+      `checkAutoResolve: LAYER 2 JSON parse failed: ${error instanceof Error ? error.message : String(error)} ` +
+        `(raw=${JSON.stringify((d.choices?.[0]?.message?.content ?? "").slice(0, LOG_TRUNC))})`
+    );
+    return [];
+  }
 
   // LAYER 3: quote-overlap guard. The LLM's `reason` quote must share
   // substantive vocabulary with the candidate's description (stemmed
@@ -469,6 +482,15 @@ For each match you return, the "reason" field must quote the specific phrase in 
       );
       continue;
     }
+    const stillOwed = stillOwedAdjacencyVeto(newThoughtContent, item.description, stem);
+    if (stillOwed.vetoed) {
+      console.log(
+        `checkAutoResolve: LAYER 3.5 still-owed veto dropped item ${item.id} ` +
+          `(marker=${stillOwed.marker}, subject=${stillOwed.subject}, dist=${stillOwed.distance}, ` +
+          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`
+      );
+      continue;
+    }
     await supabase
       .from("action_items")
       .update({ status: "resolved", resolved_by_thought_id: newThoughtId, resolved_at: now })
@@ -484,7 +506,7 @@ async function postCaptureHook(
   metadata: Record<string, unknown>,
   excludeSourceThoughtIds: string[] = []
 ): Promise<string[]> {
-  await extractAndStoreActionItems(thoughtId, metadata);
+  await extractAndStoreActionItems(thoughtId, metadata, content);
   return await checkAutoResolve(content, thoughtId, metadata, excludeSourceThoughtIds);
 }
 
@@ -622,23 +644,57 @@ async function handleRestCapture(req: Request): Promise<Response> {
     if (tooLong(content, MAX_CONTENT_LENGTH)) {
       return jsonResponse({ error: `content exceeds ${MAX_CONTENT_LENGTH} chars` }, 413);
     }
+
+    // Optional caller-supplied tags merge into topics. Lets sync-source
+    // integrations (calendar sync, notion sync, fitness sync) tag captures
+    // authoritatively instead of relying solely on metadata-extraction LLM
+    // re-deriving topics from prose.
+    const explicitTags = Array.isArray(body?.tags)
+      ? (body.tags as unknown[])
+        .filter((t): t is string => typeof t === "string")
+        .map((t) => t.toLowerCase().trim())
+        .filter(Boolean)
+      : [];
     const source = typeof body?.source === "string" && body.source.length > 0 ? body.source : "chatgpt";
+
+    // Optional Notion-sync identity fields. When both are present, dedup runs
+    // on the record identity instead of the content hash (see isNotionDuplicate).
+    const notionPageId = typeof body?.notion_page_id === "string" && body.notion_page_id.trim()
+      ? body.notion_page_id.trim()
+      : null;
+    const notionLastEdited = typeof body?.notion_last_edited === "string" && body.notion_last_edited.trim()
+      ? body.notion_last_edited.trim()
+      : null;
+
     const hash = await contentHash(content);
-    if (await isDuplicate(hash)) return jsonResponse({ status: "duplicate", message: "Already in the brain." });
-    const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-    const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: { ...metadata, source } }).select("id").single();
+    if (notionPageId && notionLastEdited) {
+      if (await isNotionDuplicate(notionPageId, notionLastEdited)) {
+        return jsonResponse({ status: "duplicate", message: "Already in the brain." });
+      }
+    } else if (await isDuplicate(hash)) {
+      return jsonResponse({ status: "duplicate", message: "Already in the brain." });
+    }
+    const [embedding, rawMetadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
+    const knownSlugs = await loadKnownSlugs(supabase);
+    const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
+    const extractedTopics = coerced.topics;
+    const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
+    const finalMetadata: Record<string, unknown> = { ...coerced, topics: mergedTopics, source };
+    if (notionPageId) finalMetadata.notion_page_id = notionPageId;
+    if (notionLastEdited) finalMetadata.notion_last_edited = notionLastEdited;
+
+    const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: finalMetadata }).select("id").single();
     if (error || !inserted) return jsonResponse({ error: error?.message || "unknown error" }, 500);
 
     // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
-    const resolved = await postCaptureHook(inserted.id, content, metadata as Record<string, unknown>, [inserted.id]);
+    const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
 
-    const meta = metadata as Record<string, unknown>;
     return jsonResponse({
       status: "captured",
-      type: meta.type,
-      topics: meta.topics,
-      people: meta.people,
-      action_items: meta.action_items,
+      type: finalMetadata.type,
+      topics: finalMetadata.topics,
+      people: finalMetadata.people,
+      action_items: finalMetadata.action_items,
       auto_resolved: resolved.length > 0 ? resolved : undefined,
     });
   } catch (err: unknown) {
@@ -761,24 +817,42 @@ async function handleRestEvent(req: Request): Promise<Response> {
 
 // --- MCP Server Setup ---
 
-const server = new McpServer({
-  name: "brain-bank",
-  version: "1.0.0",
-});
+const server = new McpServer(
+  {
+    name: "brain-bank",
+    version: "1.0.0",
+  },
+  {
+    instructions: `# Brain Bank — How to use these tools
+
+Brain Bank exposes two retrieval surfaces. Choose based on the shape of the question.
+
+**Wiki (compiled pages)** — \`get_compiled_page\`, \`search_compiled_pages\`, \`list_compiled_pages\`. Pre-synthesized markdown reference docs about specific entities: a client, a topic, a project. One page per entity, regenerated daily, plus a read-time tail of activity captured since the last compile. Use the wiki when the question is entity-shaped: "what do we know about Alex?", "what's our position on knowledge retention?", "where are we with the Phoenix project?". The wiki gives you a synthesized summary in one call instead of forcing you to re-read 50 raw thoughts.
+
+**Thoughts (raw captures)** — \`search_thoughts\`, \`list_thoughts\`. Individual captured moments: an email, a note, a Slack message, a calendar event. Use thoughts when the question is moment-shaped: "what did I think about that estimate yesterday?", "did anyone DM about the booth?", "find the message where we agreed on color palette". Wiki pages don't preserve the texture of an individual moment; thoughts do.
+
+**Drill between them.** Wiki pages list the thought IDs that contributed to them in a "Sources" section. When the wiki gives you a synthesized fact and you need the underlying capture, follow the citation — \`get_thought_by_id\` returns the raw thought. Going the other way: a raw thought matching a known entity is summarized into that entity's wiki page on the next compile run.
+
+**Edges between thoughts.** Some thoughts are linked by typed semantic relations: \`supports\`, \`contradicts\`, \`supersedes\`, \`evolved_into\`, \`depends_on\`, \`related_to\`. \`get_thought_by_id\` shows a brief Relationships summary; \`get_thought_edges\` returns the full edge list with counterpart previews. Edges enrich retrieval — they are one signal among many, not a primary surface. The wiki and raw thoughts remain the first thing to check.
+
+**Default heuristic.** Try \`search_compiled_pages\` or \`get_compiled_page\` first when a known entity is named in the question. Fall back to \`search_thoughts\` if no compiled page exists or if the question is moment-shaped.`,
+  }
+);
 
 server.registerTool(
   "search_thoughts",
   {
     title: "Search Thoughts",
     description:
-      "Search captured thoughts by meaning. Use this when the user asks about a topic, person, or idea they've previously captured.",
+      "Semantic vector search across all captured raw thoughts. Use this when the question is moment-shaped ('what did I write about X yesterday?', 'find the message where Y was decided'). For entity-shaped questions about a known client / topic / project, prefer `get_compiled_page` or `search_compiled_pages` first — those return synthesized summaries instead of forcing you to re-read individual captures.",
     inputSchema: {
       query: z.string().describe("What to search for"),
-      limit: z.number().optional().default(10),
-      threshold: z.number().optional().default(0.5),
+      limit: z.coerce.number().optional().default(10),
+      threshold: z.coerce.number().optional().default(0.5),
     },
   },
   async ({ query, limit, threshold }) => {
+    logToolInvocation("search_thoughts", { query, limit, threshold }, "mcp");
     try {
       const qEmb = await getEmbedding(query);
       const { data, error } = await supabase.rpc("match_thoughts", {
@@ -821,14 +895,15 @@ server.registerTool(
     title: "List Recent Thoughts",
     description: "List recently captured thoughts with optional filters by type, topic, person, or time range.",
     inputSchema: {
-      limit: z.number().optional().default(10),
+      limit: z.coerce.number().optional().default(10),
       type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
-      days: z.number().optional().describe("Only thoughts from the last N days"),
+      days: z.coerce.number().optional().describe("Only thoughts from the last N days"),
     },
   },
   async ({ limit, type, topic, person, days }) => {
+    logToolInvocation("list_thoughts", { limit, type, topic, person, days }, "mcp");
     try {
       let q = supabase.from("thoughts").select("content, metadata, created_at").order("created_at", { ascending: false }).limit(limit);
       if (type) q = q.contains("metadata", { type });
@@ -857,6 +932,182 @@ server.registerTool(
 );
 
 server.registerTool(
+  "get_thought_by_id",
+  {
+    title: "Get Thought By ID",
+    description:
+      "Fetch a single raw thought by its UUID. **Use this when drilling from a wiki page's 'Sources' section to inspect the original capture** — the get_compiled_page output lists the source thought IDs and this tool reads them back. Returns the full content + metadata + capture date + source. After Phase 13, also includes a brief 'Relationships' section listing typed edges (supports / contradicts / supersedes / etc.) to other thoughts; use `get_thought_edges` for full edge inspection.",
+    inputSchema: {
+      id: z.string().describe("Thought UUID. Get these from the 'Sources' section of a get_compiled_page response."),
+    },
+  },
+  async ({ id }) => {
+    logToolInvocation("get_thought_by_id", { id }, "mcp");
+    try {
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(id)) {
+        return {
+          content: [{ type: "text" as const, text: `Invalid thought ID format. Expected a UUID; got "${id}".` }],
+          isError: true,
+        };
+      }
+      const { data, error } = await supabase
+        .from("thoughts")
+        .select("id, content, metadata, created_at")
+        .eq("id", id)
+        .single();
+      if (error || !data) {
+        return { content: [{ type: "text" as const, text: `No thought found with id "${id}".` }] };
+      }
+      const m = (data.metadata || {}) as Record<string, unknown>;
+      const parts = [
+        `## Thought ${data.id}`,
+        `Captured: ${new Date(data.created_at).toLocaleString()}`,
+        `Source: ${(m.source as string) || "unknown"}`,
+        `Type: ${m.type || "unknown"}`,
+      ];
+      if (Array.isArray(m.topics) && m.topics.length) parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+      if (Array.isArray(m.people) && m.people.length) parts.push(`People: ${(m.people as string[]).join(", ")}`);
+      if (m.project) parts.push(`Project: ${m.project}`);
+      if (Array.isArray(m.action_items) && m.action_items.length) {
+        parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
+      }
+      parts.push("", data.content);
+
+      // Phase 13.5: append a brief Relationships section if the thought has
+      // any typed edges. Best-effort: errors swallowed, since this is an
+      // enrichment to the primary thought-content response. Edges are one
+      // signal among many; the wiki and raw thoughts remain primary.
+      try {
+        const { data: edges, error: eErr } = await supabase
+          .from("thought_edges")
+          .select("relation, from_thought_id, to_thought_id, confidence, classifier_version")
+          .or(`from_thought_id.eq.${id},to_thought_id.eq.${id}`)
+          .order("confidence", { ascending: false })
+          .limit(20);
+        if (!eErr && edges && edges.length > 0) {
+          const byRelation: Record<string, Array<{ counterpart: string; confidence: number; direction: "out" | "in" }>> = {};
+          for (const e of edges) {
+            const isOutgoing = e.from_thought_id === id;
+            const counterpart = isOutgoing ? e.to_thought_id : e.from_thought_id;
+            const direction: "out" | "in" = isOutgoing ? "out" : "in";
+            byRelation[e.relation] = byRelation[e.relation] || [];
+            byRelation[e.relation].push({ counterpart, confidence: e.confidence ?? 0, direction });
+          }
+          parts.push("", `## Relationships (${edges.length} edge${edges.length === 1 ? "" : "s"})`);
+          const rOrder = ["contradicts", "supersedes", "depends_on", "supports", "evolved_into", "related_to"];
+          for (const r of rOrder) {
+            const list = byRelation[r];
+            if (!list || list.length === 0) continue;
+            const top = list.slice(0, 3);
+            const formatted = top.map(x =>
+              `${x.direction === "out" ? "->" : "<-"} ${x.counterpart} (${(x.confidence * 100).toFixed(0)}%)`
+            ).join(", ");
+            const more = list.length > 3 ? ` +${list.length - 3} more` : "";
+            parts.push(`- **${r}** (${list.length}): ${formatted}${more}`);
+          }
+          parts.push("", `_Use \`get_thought_edges(id="${id}")\` to inspect all relationships in detail._`);
+        }
+      } catch {
+        // Silent: edge enrichment is best-effort.
+      }
+
+      return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
+  "get_thought_edges",
+  {
+    title: "Get Thought Edges",
+    description:
+      "Inspect the typed semantic edges for a single thought. Returns each edge's relation, direction, confidence, and a short preview of the counterpart thought. Use this when the **'Relationships'** summary in `get_thought_by_id` flags an interesting edge and you want details. Optional filters: `relation` (one of supports/contradicts/evolved_into/supersedes/depends_on/related_to), `min_confidence`, `limit`. Edges are an enrichment signal — fall back to `search_thoughts` or `get_compiled_page` for primary retrieval.",
+    inputSchema: {
+      id: z.string().describe("Thought UUID. Get these from get_thought_by_id, get_compiled_page Sources, or list_thoughts."),
+      relation: z.enum(["supports", "contradicts", "evolved_into", "supersedes", "depends_on", "related_to"]).optional().describe("Optional: filter by edge relation type."),
+      min_confidence: z.coerce.number().optional().default(0.0).describe("Optional: minimum confidence floor (0.0-1.0)."),
+      limit: z.coerce.number().optional().default(50).describe("Max edges to return (capped at 100)."),
+    },
+  },
+  async ({ id, relation, min_confidence, limit }) => {
+    logToolInvocation("get_thought_edges", { id, relation, min_confidence, limit }, "mcp");
+    try {
+      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidPattern.test(id)) {
+        return {
+          content: [{ type: "text" as const, text: `Invalid thought ID format. Expected a UUID; got "${id}".` }],
+          isError: true,
+        };
+      }
+      const cap = Math.min(100, Math.max(1, limit ?? 50));
+      const conf = Math.max(0, Math.min(1, min_confidence ?? 0.0));
+
+      let q = supabase
+        .from("thought_edges")
+        .select("relation, from_thought_id, to_thought_id, confidence, valid_from, valid_until, classifier_version, support_count, metadata, created_at")
+        .or(`from_thought_id.eq.${id},to_thought_id.eq.${id}`)
+        .gte("confidence", conf)
+        .order("confidence", { ascending: false })
+        .limit(cap);
+      if (relation) q = q.eq("relation", relation);
+
+      const { data: edges, error } = await q;
+      if (error) {
+        return { content: [{ type: "text" as const, text: `Error fetching edges: ${error.message}` }], isError: true };
+      }
+      if (!edges || edges.length === 0) {
+        const filterDesc = relation ? ` of type '${relation}'` : "";
+        return { content: [{ type: "text" as const, text: `No edges${filterDesc} found for thought "${id}".` }] };
+      }
+
+      // Fetch counterpart previews
+      const counterpartIds = Array.from(new Set(
+        edges.map(e => e.from_thought_id === id ? e.to_thought_id : e.from_thought_id)
+      ));
+      const { data: counterparts } = await supabase
+        .from("thoughts")
+        .select("id, content, created_at")
+        .in("id", counterpartIds);
+      const cMap = new Map((counterparts || []).map(t => [t.id, t]));
+
+      const lines: string[] = [
+        `## Edges for thought ${id}`,
+        `Total: ${edges.length} edge${edges.length === 1 ? "" : "s"}${relation ? ` (filtered: ${relation})` : ""}, min_confidence=${conf}`,
+        "",
+      ];
+      for (const e of edges) {
+        const isOut = e.from_thought_id === id;
+        const counterpartId = isOut ? e.to_thought_id : e.from_thought_id;
+        const cp = cMap.get(counterpartId);
+        const arrow = isOut ? "->" : "<-";
+        lines.push(`### ${e.relation} ${arrow} ${counterpartId}`);
+        lines.push(`Confidence: ${(e.confidence ?? 0).toFixed(2)} | Support: ${e.support_count} | Classifier: ${e.classifier_version || "unknown"}`);
+        if (e.valid_from || e.valid_until) {
+          lines.push(`Validity: ${e.valid_from || "always"} -> ${e.valid_until || "current"}`);
+        }
+        const rationale = (e.metadata as Record<string, unknown> | null)?.rationale;
+        if (typeof rationale === "string" && rationale.length > 0) {
+          lines.push(`Rationale: ${rationale}`);
+        }
+        if (cp) {
+          const preview = cp.content.length > 200 ? cp.content.slice(0, 200) + "..." : cp.content;
+          lines.push(`Counterpart preview: ${preview}`);
+        }
+        lines.push("");
+      }
+      lines.push(`_Use \`get_thought_by_id(id="<counterpart_id>")\` to read a counterpart in full._`);
+
+      return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+    } catch (err: unknown) {
+      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+    }
+  }
+);
+
+server.registerTool(
   "thought_stats",
   {
     title: "Thought Statistics",
@@ -864,6 +1115,7 @@ server.registerTool(
     inputSchema: {},
   },
   async () => {
+    logToolInvocation("thought_stats", {}, "mcp");
     try {
       const { count } = await supabase.from("thoughts").select("*", { count: "exact", head: true });
       const { data } = await supabase.from("thoughts").select("metadata, created_at").order("created_at", { ascending: false });
@@ -895,29 +1147,43 @@ server.registerTool(
   "capture_thought",
   {
     title: "Capture Thought",
-    description: "Save a new thought to Brain Bank. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client.",
+    description: "Save a new thought to Brain Bank. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client. Pass `tags` to pin explicit topic tags (e.g. a project slug) onto the capture — they merge with the auto-extracted topics.",
     inputSchema: {
       content: z.string().describe("The thought to capture"),
+      tags: z.array(z.string()).optional().describe("Optional explicit topic tags to attach (merged with the auto-extracted topics). Use underscores, not hyphens, for multi-word slugs."),
     },
   },
-  async ({ content }) => {
+  async ({ content, tags }: { content: string; tags?: string[] }) => {
+    logToolInvocation("capture_thought", { content }, "mcp");
     try {
       const hash = await contentHash(content);
       if (await isDuplicate(hash)) {
         return { content: [{ type: "text" as const, text: "Already in the brain (duplicate detected)." }] };
       }
-      const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-      const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: { ...metadata, source: "mcp" } }).select("id").single();
+      // Optional caller-supplied tags merge into the auto-extracted topics —
+      // mirrors the explicitTags logic in handleRestCapture.
+      const explicitTags = Array.isArray(tags)
+        ? tags
+          .filter((t): t is string => typeof t === "string")
+          .map((t) => t.toLowerCase().trim())
+          .filter(Boolean)
+        : [];
+      const [embedding, rawMetadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
+      const knownSlugs = await loadKnownSlugs(supabase);
+      const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
+      const extractedTopics = coerced.topics;
+      const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
+      const finalMetadata: Record<string, unknown> = { ...coerced, topics: mergedTopics, source: "mcp" };
+      const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: finalMetadata }).select("id").single();
       if (error || !inserted) return { content: [{ type: "text" as const, text: `Failed to capture: ${error?.message || "unknown error"}` }], isError: true };
 
       // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
-      const resolved = await postCaptureHook(inserted.id, content, metadata as Record<string, unknown>, [inserted.id]);
+      const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
 
-      const meta = metadata as Record<string, unknown>;
-      let confirmation = `Captured as ${meta.type || "thought"}`;
-      if (Array.isArray(meta.topics) && meta.topics.length) confirmation += ` - ${(meta.topics as string[]).join(", ")}`;
-      if (Array.isArray(meta.people) && meta.people.length) confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
-      if (Array.isArray(meta.action_items) && meta.action_items.length) confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+      let confirmation = `Captured as ${finalMetadata.type || "thought"}`;
+      if (mergedTopics.length) confirmation += ` - ${mergedTopics.join(", ")}`;
+      if (Array.isArray(finalMetadata.people) && finalMetadata.people.length) confirmation += ` | People: ${(finalMetadata.people as string[]).join(", ")}`;
+      if (Array.isArray(finalMetadata.action_items) && finalMetadata.action_items.length) confirmation += ` | Actions: ${(finalMetadata.action_items as string[]).join("; ")}`;
       if (resolved.length > 0) confirmation += ` | Auto-resolved: ${resolved.join("; ")}`;
       return { content: [{ type: "text" as const, text: confirmation }] };
     } catch (err: unknown) {
@@ -947,6 +1213,7 @@ server.registerTool(
     },
   },
   async ({ name, email, phone, instagram, preferred_styles, notes }) => {
+    logToolInvocation("add_client", { name, email, phone, instagram, preferred_styles, notes }, "mcp");
     try {
       // Check if client with same name already exists
       const { data: existing } = await supabase
@@ -1003,6 +1270,7 @@ server.registerTool(
     },
   },
   async ({ name }) => {
+    logToolInvocation("find_client", { name }, "mcp");
     try {
       const { data, error } = await supabase
         .from("clients")
@@ -1048,6 +1316,7 @@ server.registerTool(
     },
   },
   async ({ client_id, name }) => {
+    logToolInvocation("client_context", { client_id, name }, "mcp");
     try {
       if (!client_id && !name) {
         return {
@@ -1176,6 +1445,7 @@ server.registerTool(
     },
   },
   async ({ title, content_type, subject, client_id, stage, platform, notes }) => {
+    logToolInvocation("log_content", { title, content_type, subject, client_id, stage, platform, notes }, "mcp");
     try {
       const record: Record<string, unknown> = { content_type, stage: stage || "captured" };
       if (title) record.title = title;
@@ -1219,10 +1489,10 @@ server.registerTool(
       published_date: z.string().optional().describe("Published date YYYY-MM-DD"),
       performance: z
         .object({
-          likes: z.number().optional(),
-          saves: z.number().optional(),
-          comments: z.number().optional(),
-          reach: z.number().optional(),
+          likes: z.coerce.number().optional(),
+          saves: z.coerce.number().optional(),
+          comments: z.coerce.number().optional(),
+          reach: z.coerce.number().optional(),
         })
         .optional()
         .describe("Performance metrics"),
@@ -1230,6 +1500,7 @@ server.registerTool(
     },
   },
   async ({ content_id, stage, platform, scheduled_date, published_date, performance, notes }) => {
+    logToolInvocation("update_content", { content_id, stage, platform, scheduled_date, published_date, performance, notes }, "mcp");
     try {
       const updates: Record<string, unknown> = {};
       if (stage) updates.stage = stage;
@@ -1271,10 +1542,11 @@ server.registerTool(
     inputSchema: {
       content_type: z.string().optional().describe(`Filter by type: ${contentTypes.join(", ")}`),
       platform: z.string().optional().describe("Filter by platform"),
-      limit: z.number().optional().default(20),
+      limit: z.coerce.number().optional().default(20),
     },
   },
   async ({ content_type, platform, limit }) => {
+    logToolInvocation("content_status", { content_type, platform, limit }, "mcp");
     try {
       let q = supabase
         .from("content_items")
@@ -1336,11 +1608,12 @@ server.registerTool(
     description:
       "See how published content is performing. Shows top content by engagement metrics.",
     inputSchema: {
-      days: z.number().optional().default(30).describe("Look back N days"),
-      limit: z.number().optional().default(10),
+      days: z.coerce.number().optional().default(30).describe("Look back N days"),
+      limit: z.coerce.number().optional().default(10),
     },
   },
   async ({ days, limit }) => {
+    logToolInvocation("content_performance", { days, limit }, "mcp");
     try {
       const since = new Date();
       since.setDate(since.getDate() - days);
@@ -1399,6 +1672,7 @@ server.registerTool(
     },
   },
   async ({ event_type, title, date_start, date_end, location, notes }) => {
+    logToolInvocation("log_event", { event_type, title, date_start, date_end, location, notes }, "mcp");
     try {
       const record: Record<string, unknown> = { event_type, title };
       if (date_start) record.date_start = date_start;
@@ -1432,10 +1706,11 @@ server.registerTool(
       "Show upcoming business events. Optionally filter by event type.",
     inputSchema: {
       event_type: z.string().optional().describe(`Filter: ${eventTypes.join(", ")}`),
-      days: z.number().optional().default(90).describe("Look ahead N days"),
+      days: z.coerce.number().optional().default(90).describe("Look ahead N days"),
     },
   },
   async ({ event_type, days }) => {
+    logToolInvocation("upcoming_events", { event_type, days }, "mcp");
     try {
       const today = new Date().toISOString().split("T")[0];
       const until = new Date();
@@ -1483,6 +1758,7 @@ server.registerTool(
     inputSchema: {},
   },
   async () => {
+    logToolInvocation("business_context", {}, "mcp");
     try {
       const today = new Date().toISOString().split("T")[0];
       const thirtyDaysAgo = new Date();
@@ -1565,6 +1841,7 @@ server.registerTool(
     },
   },
   async ({ query }) => {
+    logToolInvocation("full_context", { query }, "mcp");
     try {
       const sections: string[] = [`## Full Context: "${query}"\n`];
 
@@ -1734,7 +2011,7 @@ server.registerTool(
   {
     title: "Get Compiled Page",
     description:
-      "Read a pre-synthesized wiki page by slug or by name and type. Compiled pages are persistent reference documents maintained by the digest engine. Use this for client context, topic overviews, or project summaries instead of searching raw thoughts.",
+      "Read a pre-synthesized wiki page about a known entity (client, topic, or project). **Prefer this over `search_thoughts` when the question is entity-shaped** ('what do we know about X?', 'what's our history with Y?'). Returns synthesized markdown plus a tail of new activity captured since the last compile. After Phase 12.D, includes a 'Sources' section with thought IDs you can drill into via `get_thought_by_id`. If no compiled page exists, fall back to `search_thoughts`.",
     inputSchema: {
       slug: z.string().optional().describe(`Page slug, e.g. 'client/${slugify(loadProfile().example_person_name)}' or 'topic/${slugify(loadProfile().domain.vocabulary[0])}'`),
       name: z.string().optional().describe("Page title to search for (used if slug not provided)"),
@@ -1743,6 +2020,7 @@ server.registerTool(
   },
   async ({ slug, name, page_type }) => {
     try {
+      logToolInvocation("get_compiled_page", { slug, name, page_type }, "mcp");
       if (!slug && !name) {
         return { content: [{ type: "text" as const, text: "Provide either slug or name." }], isError: true };
       }
@@ -1751,7 +2029,7 @@ server.registerTool(
       if (slug) {
         const { data, error } = await supabase
           .from("compiled_pages")
-          .select("slug, title, page_type, content, backlinks, last_compiled")
+          .select("slug, title, page_type, content, backlinks, last_compiled, source_thought_ids")
           .eq("slug", slug)
           .single();
         if (error || !data) {
@@ -1761,7 +2039,7 @@ server.registerTool(
       } else {
         let q = supabase
           .from("compiled_pages")
-          .select("slug, title, page_type, content, backlinks, last_compiled")
+          .select("slug, title, page_type, content, backlinks, last_compiled, source_thought_ids")
           .ilike("title", `%${name}%`);
         if (page_type) q = q.eq("page_type", page_type);
         const { data, error } = await q.limit(1);
@@ -1781,6 +2059,103 @@ server.registerTool(
       }
       lines.push("", page.content || "(empty page, not yet compiled)");
 
+      // Phase 12.D: Sources section. Drill from synthesized page → raw thought.
+      // Show up to 20 most-recent source thought IDs with truncated previews.
+      // Hint at get_thought_by_id for full reads. Best-effort: errors swallowed
+      // so the page read never fails on Sources alone.
+      if (Array.isArray((page as { source_thought_ids?: string[] }).source_thought_ids)
+        && (page as { source_thought_ids: string[] }).source_thought_ids.length > 0) {
+        try {
+          const allIds = (page as { source_thought_ids: string[] }).source_thought_ids;
+          // Most-recent 20 by capture order: query thoughts by id, take 20 most recent.
+          const { data: sources } = await supabase
+            .from("thoughts")
+            .select("id, content, created_at")
+            .in("id", allIds)
+            .order("created_at", { ascending: false })
+            .limit(20);
+          if (sources && sources.length > 0) {
+            lines.push("", `## Sources (${allIds.length} total, showing ${sources.length} most recent)`);
+            for (const s of sources) {
+              const d = new Date(s.created_at).toLocaleDateString();
+              const preview = s.content.length > 200 ? s.content.substring(0, 200) + "..." : s.content;
+              lines.push(`- \`${s.id}\` [${d}] ${preview}`);
+            }
+            lines.push("", `_Drill into any source with \`get_thought_by_id(id)\`._`);
+          }
+        } catch (_err) {
+          // Sources is best-effort.
+        }
+      }
+
+      // Read-time freshness: append context captured since last_compiled.
+      //
+      // For client/topic/project: append matching thoughts (mirrors compile-pages
+      // filter logic). For index: append a list of entity pages compiled since the
+      // index's own last_compiled (audit Finding 14c — previously this fell
+      // through to an unfiltered thoughts dump that leaked unrelated activity).
+      if (page.last_compiled && page.page_type !== "index") {
+        try {
+          let recent: Array<{ content: string; created_at: string }> | null;
+
+          if (page.page_type === "project") {
+            const { data } = await supabase.rpc("get_project_page_thoughts", {
+              p_slug: page.slug.replace(/^project\//, ""),
+              p_since: page.last_compiled,
+              p_limit: 20,
+              p_ascending: false,
+            });
+            recent = data;
+          } else {
+            let recentQ = supabase
+              .from("thoughts")
+              .select("content, created_at")
+              .gt("created_at", page.last_compiled)
+              .order("created_at", { ascending: false })
+              .limit(20);
+
+            if (page.page_type === "client") {
+              recentQ = recentQ.contains("metadata", { people: [page.title] });
+            } else {
+              recentQ = recentQ.contains("metadata", { topics: [page.title.toLowerCase()] });
+            }
+
+            const result = await recentQ;
+            recent = result.data;
+          }
+
+          if (recent && recent.length > 0) {
+            lines.push("", `## Recent activity since last compile (${recent.length})`);
+            for (const t of recent) {
+              const d = new Date(t.created_at).toLocaleString();
+              const preview = t.content.length > 300 ? t.content.substring(0, 300) + "..." : t.content;
+              lines.push(`- [${d}] ${preview}`);
+            }
+          }
+        } catch (_err) {
+          // Freshness is best-effort; never fail the page read on freshness errors.
+        }
+      } else if (page.last_compiled && page.page_type === "index") {
+        try {
+          const { data: changedPages } = await supabase
+            .from("compiled_pages")
+            .select("slug, title, page_type, last_compiled")
+            .gt("last_compiled", page.last_compiled)
+            .neq("slug", "index/wiki")
+            .order("last_compiled", { ascending: false })
+            .limit(20);
+          if (changedPages && changedPages.length > 0) {
+            lines.push("", `## Pages compiled since ${new Date(page.last_compiled).toLocaleDateString()} (${changedPages.length})`);
+            for (const p of changedPages) {
+              const d = new Date(p.last_compiled!).toLocaleDateString();
+              lines.push(`- **${p.title}** (\`${p.slug}\`, ${p.page_type}) — compiled ${d}`);
+            }
+          }
+        } catch (_err) {
+          // Freshness is best-effort.
+        }
+      }
+
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
       return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
@@ -1793,15 +2168,16 @@ server.registerTool(
   {
     title: "Search Compiled Pages",
     description:
-      "Search wiki pages by keyword in title or content. Returns page summaries, not full content. Use to find which compiled pages exist on a subject.",
+      "Find which wiki pages exist on a subject. Returns titles + 150-char previews (use `get_compiled_page` for full content). **Prefer this over `search_thoughts` when you want to know whether an entity is written up at all** ('is there a page on X?', 'what topics have I been logging about?').",
     inputSchema: {
       query: z.string().describe("Search term"),
       page_type: z.string().optional().describe("Filter by type: client, topic, project"),
-      limit: z.number().optional().default(10),
+      limit: z.coerce.number().optional().default(10),
     },
   },
   async ({ query, page_type, limit }) => {
     try {
+      logToolInvocation("search_compiled_pages", { query, page_type, limit }, "mcp");
       let q = supabase
         .from("compiled_pages")
         .select("slug, title, page_type, last_compiled, content")
@@ -1832,14 +2208,15 @@ server.registerTool(
   {
     title: "List Compiled Pages",
     description:
-      "List all wiki pages, optionally filtered by type. Shows titles, types, and compilation status.",
+      "Browse the wiki's full table of contents, optionally filtered by type (client / topic / project / index). **Use this for orientation when starting a session** — gives a one-screen view of every entity the wiki tracks. For a curated narrative version, get the page at slug `index/wiki` (auto-compiled).",
     inputSchema: {
       page_type: z.string().optional().describe("Filter by type: client, topic, project"),
-      limit: z.number().optional().default(50),
+      limit: z.coerce.number().optional().default(50),
     },
   },
   async ({ page_type, limit }) => {
     try {
+      logToolInvocation("list_compiled_pages", { page_type, limit }, "mcp");
       let q = supabase
         .from("compiled_pages")
         .select("slug, title, page_type, last_compiled")
@@ -1886,6 +2263,7 @@ async function handleRestPages(url: URL): Promise<Response> {
     const limit = parseInt(url.searchParams.get("limit") || "20");
 
     if (slug) {
+      logToolInvocation("get_compiled_page", { slug }, "rest");
       // Get specific page by slug
       const { data, error } = await supabase
         .from("compiled_pages")
@@ -1894,6 +2272,12 @@ async function handleRestPages(url: URL): Promise<Response> {
         .single();
       if (error || !data) return jsonResponse({ error: "Page not found" }, 404);
       return jsonResponse(data);
+    }
+
+    if (query) {
+      logToolInvocation("search_compiled_pages", { query, type, limit }, "rest");
+    } else {
+      logToolInvocation("list_compiled_pages", { type, limit }, "rest");
     }
 
     // List/search pages

@@ -36,6 +36,10 @@ supabase/.branches/
 # Claude Code local settings
 .claude/settings.local.json
 
+# Operator-specific local context (forks may add CLAUDE.local.md or AGENTS.local.md)
+CLAUDE.local.md
+AGENTS.local.md
+
 # Logs
 *.log
 npm-debug.log*
@@ -53,6 +57,13 @@ profile.*.json
 
 # Operator-local fixtures (live PII values; never commit)
 tests/_shared/fixtures/private/
+
+# Projects sync operator config (local paths and Notion database ID)
+integrations/projects-sync/config.json
+
+# Action-item triage operator config and generated reports
+integrations/action-item-triage/config.json
+integrations/action-item-triage/out/
 
 # Handoff scratch files
 HANDOFF-*.md

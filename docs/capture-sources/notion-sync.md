@@ -149,14 +149,16 @@ STEP 2: For each row returned, capture a thought via POST /capture
 - Extract the title: find the property whose type is "title" and concatenate its plain_text segments.
 - Extract the Status value if present: look for a property named "Status" (case-insensitive). For select type, read .select.name. For status type, read .status.name. If absent, use "N/A".
 - Extract Created: page.created_time (ISO 8601).
+- Extract the page id: page.id, and the last-edited timestamp: page.last_edited_time (ISO 8601).
 - Compose the thought content:
   "[Notion Sync] <title> -- Status: <status>. Created: <created_time>. Source: Notion <DATABASE_NAME> database."
-- POST to $BRAIN_BASE/capture with header auth:
+- POST to $BRAIN_BASE/capture with header auth. Include notion_page_id + notion_last_edited so dedup keys on the record identity, not the rendered string:
   curl -s -X POST "$BRAIN_BASE/capture" \
     -H "x-brain-key: $BRAIN_KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"content\":\"<thought content>\",\"source\":\"notion-sync\"}"
-- Expected success: HTTP 200 with {"status":"captured",...} or {"status":"duplicate",...}. Both are success; SHA-256 dedup is intentional.
+    -d "{\"content\":\"<thought content>\",\"source\":\"notion-sync\",\"notion_page_id\":\"<page id>\",\"notion_last_edited\":\"<last_edited_time>\"}"
+- Expected success: HTTP 200 with {"status":"captured",...} or {"status":"duplicate",...}. Both are success.
+- Why notion_page_id + notion_last_edited: when both are present, Brain Bank dedups on the Notion record identity plus its last-edited timestamp instead of a SHA-256 of the content. A Notion row re-rendered into a thought string drifts on cosmetic changes (whitespace, an em-dash, a field toggling to/from "N/A"), which mints a new content hash and slips past content-hash dedup. last_edited_time only advances on a real edit, so an unchanged row is skipped and a genuinely edited row re-captures.
 
 STEP 3: Post a summary thought
 - After all rows are processed, POST once more to /capture:
@@ -267,6 +269,45 @@ order by created_at desc;
 - **Bad name extraction creates bad rows.** The heuristics above are conservative on purpose; when in doubt, skip rather than insert. If you find a bad row, delete it with `delete from clients where id = '<id>'` and tighten the parsing rule in the prompt.
 - **The `/client` endpoint is case-insensitive on dedup.** "Alex Rivera" and "alex rivera" are treated as the same person. Good for CRM; avoid using case to disambiguate unrelated people with the same name.
 - **Schema variance.** If your intake database has unusual property names (a "Full Name" property instead of using the title, a "Work Phone" instead of "Phone"), the agent will not find them. Adjust the extraction rules to match your schema.
+
+---
+
+## Advanced: tag intake submissions EXISTING vs NEW via wiki lookup
+
+Skip this section unless one of your Notion databases is a client intake form AND you have wiki compilation enabled (the `compile-pages` Edge Function plus the daily cron). For typical project or reading-list databases, the core walkthrough above is enough.
+
+If you run an intake workflow, knowing whether a new submission is from a returning contact or a stranger is high-signal for downstream readers (the digest, the dashboard, anything else that consumes captured thoughts). Brain Bank's wiki holds compiled `client/<slug>` pages built from prior captures, so a single REST lookup can tell you whether a submission belongs to someone the system already knows.
+
+To extend the routine, add the lookup before the `/capture` call in your STEP 2 prompt block:
+
+```
+- For each submission, BEFORE calling /capture, check the wiki for an existing client page:
+    - Apply the same client_name extraction rule from the CRM extension above (strip " - <project>" suffix, strip trailing "intake").
+    - Build the slug: lowercase(client_name), replace non-alphanumeric chars with spaces, collapse whitespace to single hyphens. Example: "Alex Rivera" -> "client/alex-rivera"; "Sarah O'Brien" -> "client/sarah-obrien".
+    - Look up via REST:
+      curl -s "$BRAIN_BASE/pages?slug=client/<slugified-name>&key=$BRAIN_KEY" -H "Content-Type: application/json"
+    - If response is HTTP 404 or has an "error" field, treat as no page found.
+    - If a page is returned (has a "content" field), set CLIENT_STATUS="EXISTING (compiled page available)". Otherwise CLIENT_STATUS="NEW (no compiled page)".
+- Embed the status in the captured thought, e.g.:
+  "[Notion Sync] Intake (<CLIENT_STATUS>): \"<title>\" -- Client: <client_name>. ..."
+```
+
+Verify by reading a recent intake-row capture and confirming the prefix landed:
+
+```sql
+select content
+from thoughts
+where metadata->>'source' = 'notion-sync'
+  and content like '[Notion Sync] Intake%'
+order by created_at desc
+limit 5;
+```
+
+**Gotchas to watch for:**
+
+- **Read-only call.** `/pages?slug=...` only reads; it never creates or modifies wiki pages. Safe to call on every sync.
+- **First sync of a fresh deploy.** Until `compile-pages` has run at least once, every lookup will return `NEW` because no client pages exist yet. The cron schedule in `docs/deploy-from-scratch.md` Step 12 produces the first compiled set.
+- **Slug mismatches.** Wiki slugs are derived from the captured client names that the compiler clusters; if your intake titles use different casing or punctuation than the rest of your captures, the lookup may miss. Same conservative-name-extraction rule applies — bad slugs miss but don't create bad data.
 
 ---
 

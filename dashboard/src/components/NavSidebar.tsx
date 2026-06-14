@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { href: "/", label: "DASHBOARD" },
   { href: "/graph", label: "GRAPH" },
   { href: "/wiki", label: "WIKI" },
+  { href: "/projects", label: "PROJECTS" },
   { href: "/thoughts", label: "THOUGHTS" },
   { href: "/search", label: "SEARCH" },
   { href: "/clients", label: "CLIENTS" },

@@ -1,6 +1,15 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { loadProfile } from "../_shared/profile.ts";
+import {
+  coerceMetadata,
+  loadKnownSlugs,
+  shouldExtractActionItems,
+} from "../_shared/metadata-validation.ts";
+import { filterCandidatesForDone } from "../_shared/done-filter.ts";
+import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
+import { extractJsonObject } from "../_shared/extract-json.ts";
+import { callOpenRouter } from "../_shared/openrouter.ts";
 
 declare const EdgeRuntime: {
   waitUntil(promise: Promise<unknown>): void;
@@ -8,14 +17,13 @@ declare const EdgeRuntime: {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_CAPTURE_CHANNEL = Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
 const SLACK_BRAIN_CHANNEL = Deno.env.get("SLACK_BRAIN_CHANNEL") || "";
 const SLACK_QUERY_CHANNEL = Deno.env.get("SLACK_QUERY_CHANNEL") || "";
 const SLACK_SIGNING_SECRET = Deno.env.get("SLACK_SIGNING_SECRET") || "";
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const FUNCTION_SLUG = "ingest-thought";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // --- HMAC-SHA256 Signature Verification ---
@@ -86,23 +94,23 @@ async function isDuplicate(hash: string): Promise<boolean> {
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "openai/text-embedding-3-small", input: text }),
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "getEmbedding",
+    model: "openai/text-embedding-3-small",
+    endpoint: "embeddings",
+    input: text,
   });
-  const d = await r.json();
-  return d.data[0].embedding;
+  return data.data![0].embedding!;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "extractMetadata",
+    model: "openai/gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `Extract metadata from the user's captured thought. Return JSON with:
@@ -114,7 +122,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
     * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one)
+- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one). Preserve hyphenated tokens as a single tag: "fitness-training" stays as one tag, never split into ["fitness", "training"].
 - "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
 - "project": the project or system this note is ABOUT, e.g. ${loadProfile().example_projects.map((p) => `"${p}"`).join(", ")}, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
 - "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
@@ -124,12 +132,10 @@ Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or 
 Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
         },
         { role: "user", content: text },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
   try {
-    return JSON.parse(d.choices[0].message.content);
+    return JSON.parse(data.choices![0].message!.content!);
   } catch {
     return { topics: ["uncategorized"], type: "observation" };
   }
@@ -165,12 +171,11 @@ async function synthesizeContextualQuery(
   threadHistory: string,
   latestMessage: string
 ): Promise<string> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "synthesizeContextualQuery",
+    model: "openai/gpt-4o-mini",
+    messages: [
         {
           role: "system",
           content:
@@ -180,11 +185,9 @@ async function synthesizeContextualQuery(
           role: "user",
           content: `Previous conversation:\n${threadHistory}\n\nLatest follow-up: ${latestMessage}\n\nGenerate a contextual search query.`,
         },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
-  return d.choices[0].message.content.trim();
+  return (data.choices![0].message!.content ?? "").trim();
 }
 
 // --- Answer Synthesis ---
@@ -201,12 +204,11 @@ async function synthesizeAnswer(
     })
     .join("\n\n");
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "synthesizeAnswer",
+    model: "openai/gpt-4o-mini",
+    messages: [
         {
           role: "system",
           content: `You are a personal memory assistant responding to queries about someone's captured thoughts and notes. Given the search results below, synthesize a natural conversational answer. Be direct and concise. Speak as if you're a knowledgeable friend recalling details. Only use information from the provided results. If the results only partially answer the question, share what you have and note what's missing. Do not use bullet points or numbered lists. Do not mention similarity scores or search mechanics.`,
@@ -215,11 +217,9 @@ async function synthesizeAnswer(
           role: "user",
           content: `Query: ${query}\n\nSearch results:\n${context}`,
         },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
-  return d.choices[0].message.content.trim();
+  return (data.choices![0].message!.content ?? "").trim();
 }
 
 // --- Query Handling ---
@@ -367,8 +367,20 @@ const LOG_TRUNC = 200;
 
 async function extractAndStoreActionItems(
   thoughtId: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  content: string
 ): Promise<void> {
+  // Observations, references, and email-sourced captures are descriptive,
+  // not commitment-shaped, so they must not create open action items.
+  if (!shouldExtractActionItems(metadata)) return;
+
+  // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
+  // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
+  // extraction LLM may still pick up advisory phrases ("should reduce volume",
+  // "needs more sleep") from prose summaries; suppress storing those as open
+  // action items so they don't pollute the digest's open-items section.
+  if (isMechanicalCapture(content)) return;
+
   const items = metadata.action_items;
   if (!Array.isArray(items) || items.length === 0) return;
 
@@ -427,70 +439,27 @@ async function checkAutoResolve(
 
   if (!newProject && newTopics.length === 0 && newPeople.length === 0) return [];
 
-  // Pull recent open items (cap at 100, newest first). Descriptions only at this stage.
-  const { data: openItems, error } = await supabase
-    .from("action_items")
-    .select("id, description, source_thought_id")
-    .eq("status", "open")
-    .order("created_at", { ascending: false })
-    .limit(100);
-
-  if (error || !openItems || openItems.length === 0) return [];
-
-  // Drop excluded (self / thread parent) and rows with no source thought.
-  const preFiltered = openItems.filter(
-    (item) =>
-      !!item.source_thought_id &&
-      !excludeSourceThoughtIds.includes(item.source_thought_id)
-  );
-  if (preFiltered.length === 0) return [];
-
-  // Batch-fetch source thought metadata for scoping.
-  const sourceIds = Array.from(new Set(preFiltered.map((i) => i.source_thought_id as string)));
-  const { data: sourceThoughts } = await supabase
-    .from("thoughts")
-    .select("id, metadata")
-    .in("id", sourceIds);
-
-  const sourceMetaById = new Map<string, Record<string, unknown>>();
-  for (const t of sourceThoughts || []) {
-    sourceMetaById.set(t.id as string, (t.metadata as Record<string, unknown>) || {});
-  }
-
+  // Scope by project, topic, or person in SQL before LIMIT so older matching
+  // items remain reachable without loading the full open queue.
   type EnrichedItem = {
     id: string;
     description: string;
     source_thought_id: string;
-    srcProject: string | null;
-    srcTopics: string[];
-    srcPeople: string[];
+    src_project: string | null;
+    src_topics: string[];
+    src_people: string[];
   };
 
-  const enriched: EnrichedItem[] = preFiltered.map((row) => {
-    const meta = sourceMetaById.get(row.source_thought_id as string) || {};
-    const srcTopicsRaw = meta.topics;
-    const srcPeopleRaw = meta.people;
-    return {
-      id: row.id as string,
-      description: row.description as string,
-      source_thought_id: row.source_thought_id as string,
-      srcProject: (meta.project as string | null) ?? null,
-      srcTopics: Array.isArray(srcTopicsRaw) ? (srcTopicsRaw as string[]) : [],
-      srcPeople: Array.isArray(srcPeopleRaw) ? (srcPeopleRaw as string[]) : [],
-    };
+  const { data: enrichedRaw, error } = await supabase.rpc("find_candidate_action_items", {
+    p_project: newProject,
+    p_topics: newTopics,
+    p_people: newPeople,
+    p_exclude_source_ids: excludeSourceThoughtIds,
   });
 
-  // LAYER 1: hard scoping.
-  // Keep an item only if it shares a project, a topic, or a person with the new thought.
-  // Items whose source thought has none of those three fields are unscoped and excluded.
-  let candidateItems = enriched.filter((item) => {
-    const projectMatch = !!newProject && !!item.srcProject && newProject === item.srcProject;
-    const topicMatch = item.srcTopics.some((t) => newTopics.includes(t));
-    const personMatch = item.srcPeople.some((p) => newPeople.includes(p));
-    return projectMatch || topicMatch || personMatch;
-  });
+  if (error || !enrichedRaw || (enrichedRaw as EnrichedItem[]).length === 0) return [];
 
-  if (candidateItems.length === 0) return [];
+  let candidateItems = enrichedRaw as EnrichedItem[];
 
   // LAYER 1.5: restatement guard. If the new thought's own extracted action_items
   // are semantically similar to a candidate's description, the new thought is
@@ -525,9 +494,9 @@ async function checkAutoResolve(
   const itemList = candidateItems
     .map((item, i) => {
       const ctx = [
-        item.srcProject ? `project=${item.srcProject}` : null,
-        item.srcTopics.length > 0 ? `topics=${item.srcTopics.join("/")}` : null,
-        item.srcPeople.length > 0 ? `people=${item.srcPeople.join("/")}` : null,
+        item.src_project ? `project=${item.src_project}` : null,
+        item.src_topics.length > 0 ? `topics=${item.src_topics.join("/")}` : null,
+        item.src_people.length > 0 ? `people=${item.src_people.join("/")}` : null,
       ].filter(Boolean).join(", ");
       return `${i + 1}. [${ctx || "no-context"}] ${item.description}`;
     })
@@ -539,16 +508,12 @@ async function checkAutoResolve(
     newPeople.length > 0 ? `people=${newPeople.join("/")}` : null,
   ].filter(Boolean).join(", ");
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "openai/gpt-4.1-mini",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "checkAutoResolve",
+    model: "anthropic/claude-sonnet-4.6",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `You check whether a new note explicitly resolves any open action items.
@@ -561,24 +526,23 @@ HARD RULES — a match requires ALL of these:
 2. The note describes the action as DONE, SCHEDULED, or EXPLICITLY CANCELLED. Progress reports, related work, or similar-sounding updates do not count.
 3. The new note and the action item must be about the same concrete thing. If the action item is a specific bug, file, feature, client, or errand, the note must name or unambiguously describe that same thing.
 4. If the candidate context says "project=X" and the note's context is a different project, do NOT mark it resolved even if wording overlaps. Cross-project auto-resolves are forbidden unless the note explicitly names the other project.
-5. READINESS or UNBLOCKING SIGNALS NEVER resolve anything. A note phrased with a verb that describes the PRE-WORK state — "unblocked", "cleared", "un-gated", "ready", "readied", "prepped", "prepared", "queued", "slated", "planned", "staged", "teed up", "lined up", "kicked off", "approved", or "authorized" — is announcing that work is about to BEGIN, not that it has been completed. Even if the subject matches a candidate exactly, do NOT resolve — "X unblocked" means X is now doable, not that X has been done. Return [] for this entry.
+5. READINESS, UNBLOCKING, or STILL-TO-DO SIGNALS NEVER resolve anything. A note phrased with a verb or marker that describes the PRE-WORK state — "unblocked", "cleared", "un-gated", "ready", "readied", "prepped", "prepared", "queued", "slated", "planned", "staged", "teed up", "lined up", "kicked off", "approved", or "authorized" — OR a marker that explicitly frames work as NOT YET DONE — "remaining", "outstanding", "to-do", "todo", "deferred", "pending", "yet to", "still to", "still need", "next", "follows", "to follow" — is announcing that work is about to BEGIN or is still owed, not that it has been completed. Even if the subject matches a candidate exactly, do NOT resolve — "X unblocked" or "Remaining: X" means X is still on the list, not that X has been done. Return [] for this entry.
 6. When unsure, do NOT resolve. Empty array is the correct default.
 
-For each match you return, the "reason" field must quote the specific phrase in the note that PROVES completion. The quote must contain an explicit past-tense completion verb ("shipped", "fixed", "finished", "deployed", "merged", "submitted", "completed", "cancelled", "closed", "sent") or an explicit forward-reference ("scheduled for Friday"). Readiness verbs — "unblocked", "cleared", "ready", "prepped", "queued", "staged", "kicked off", "approved" — do NOT count as completion; they describe the state before the work, not the work being done. If you cannot produce such a quote, do not include the match.`,
+For each match you return, the "reason" field must quote the specific phrase in the note that PROVES completion. The quote must contain an explicit past-tense completion verb ("shipped", "fixed", "finished", "deployed", "merged", "submitted", "completed", "cancelled", "closed", "sent") or an explicit forward-reference ("scheduled for Friday"). Readiness or still-to-do markers — "unblocked", "cleared", "ready", "prepped", "queued", "staged", "kicked off", "approved", "remaining", "outstanding", "pending", "to-do", "deferred", "yet to", "still to", "still need", "next", "follows" — do NOT count as completion; they describe the state before the work, or work that is still owed. If you cannot produce such a quote, do not include the match.`,
         },
         {
           role: "user",
           content: `New note context: ${newCtx || "no-context"}\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
         },
-      ],
-    }),
+    ],
   });
+  const d = data as { choices: Array<{ message: { content: string } }> };
 
-  const d = await r.json();
   type Claim = { num: number; reason: string };
   let claims: Claim[] = [];
   try {
-    const parsed = JSON.parse(d.choices[0].message.content);
+    const parsed = JSON.parse(extractJsonObject(d.choices[0].message.content));
     const arr = Array.isArray(parsed.resolved) ? parsed.resolved : [];
     claims = arr
       .map((entry: unknown): Claim | null => {
@@ -594,7 +558,13 @@ For each match you return, the "reason" field must quote the specific phrase in 
         return null;
       })
       .filter((c: Claim | null): c is Claim => c !== null);
-  } catch { return []; }
+  } catch (error) {
+    console.log(
+      `checkAutoResolve: LAYER 2 JSON parse failed: ${error instanceof Error ? error.message : String(error)} ` +
+        `(raw=${JSON.stringify((d.choices?.[0]?.message?.content ?? "").slice(0, LOG_TRUNC))})`
+    );
+    return [];
+  }
 
   // LAYER 3: quote-overlap guard. The LLM's `reason` quote must share
   // substantive vocabulary with the candidate's description (stemmed
@@ -624,6 +594,15 @@ For each match you return, the "reason" field must quote the specific phrase in 
       );
       continue;
     }
+    const stillOwed = stillOwedAdjacencyVeto(newThoughtContent, item.description, stem);
+    if (stillOwed.vetoed) {
+      console.log(
+        `checkAutoResolve: LAYER 3.5 still-owed veto dropped item ${item.id} ` +
+          `(marker=${stillOwed.marker}, subject=${stillOwed.subject}, dist=${stillOwed.distance}, ` +
+          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`
+      );
+      continue;
+    }
     await supabase
       .from("action_items")
       .update({ status: "resolved", resolved_by_thought_id: newThoughtId, resolved_at: now })
@@ -640,7 +619,7 @@ async function postCaptureHook(
   excludeSourceThoughtIds: string[] = []
 ): Promise<string[]> {
   // Store any new action items from this thought
-  await extractAndStoreActionItems(thoughtId, metadata);
+  await extractAndStoreActionItems(thoughtId, metadata, content);
 
   // Check if this thought resolves any existing open items
   // Exclusion list prevents same-thread items from being falsely resolved
@@ -664,27 +643,25 @@ async function handleDoneCommand(
   const { data: openItems, error } = await supabase
     .from("action_items")
     .select("id, description")
-    .eq("status", "open");
+    .eq("status", "open")
+    .order("created_at", { ascending: false });
 
   if (error || !openItems || openItems.length === 0) {
     await replyInSlack(channel, messageTs, "No open action items to close.");
     return;
   }
 
-  const itemList = openItems
+  const filteredItems = filterCandidatesForDone(doneText, openItems, 200);
+  const itemList = filteredItems
     .map((item, i) => `${i + 1}. ${item.description}`)
     .join("\n");
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data: d } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "handleDoneCommand",
+    model: "openai/gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `The user says they completed something. Match their description against the open action items list. Return JSON: {"matched": [1, 3]} with the numbers of items that match what the user says is done. If no clear match, return {"matched": []}.`,
@@ -693,14 +670,12 @@ async function handleDoneCommand(
           role: "user",
           content: `User says done: "${doneText}"\n\nOpen action items:\n${itemList}`,
         },
-      ],
-    }),
+    ],
   });
 
-  const d = await r.json();
   let matched: number[] = [];
   try {
-    const parsed = JSON.parse(d.choices[0].message.content);
+    const parsed = JSON.parse(d.choices![0].message!.content!);
     matched = Array.isArray(parsed.matched) ? parsed.matched : [];
   } catch {
     await replyInSlack(channel, messageTs, "Couldn't parse the response. Try being more specific.");
@@ -716,8 +691,8 @@ async function handleDoneCommand(
   const now = new Date().toISOString();
   for (const num of matched) {
     const idx = num - 1;
-    if (idx >= 0 && idx < openItems.length) {
-      const item = openItems[idx];
+    if (idx >= 0 && idx < filteredItems.length) {
+      const item = filteredItems[idx];
       await supabase
         .from("action_items")
         .update({ status: "resolved", resolved_at: now })
@@ -747,16 +722,19 @@ async function processCaptureMessage(
       return;
     }
 
-    const [embedding, metadata] = await Promise.all([
+    const [embedding, rawMetadata] = await Promise.all([
       getEmbedding(messageText),
       extractMetadata(messageText),
     ]);
+    const knownSlugs = await loadKnownSlugs(supabase);
+    const coerced = coerceMetadata(rawMetadata, knownSlugs, messageText);
+    const finalMetadata = { ...coerced, source: "slack", slack_ts: messageTs } as Record<string, unknown>;
 
     const insertData = {
       content: messageText,
       embedding,
       content_hash: hash,
-      metadata: { ...metadata, source: "slack", slack_ts: messageTs },
+      metadata: finalMetadata,
     };
     const { data: inserted, error } = await supabase.from("thoughts").insert(insertData).select("id").single();
 
@@ -767,9 +745,9 @@ async function processCaptureMessage(
     }
 
     // Post-capture: track action items and auto-resolve
-    const resolved = await postCaptureHook(inserted.id, messageText, metadata as Record<string, unknown>, [inserted.id]);
+    const resolved = await postCaptureHook(inserted.id, messageText, finalMetadata, [inserted.id]);
 
-    const meta = metadata as Record<string, unknown>;
+    const meta = finalMetadata;
     let confirmation = `Captured as *${meta.type || "thought"}*`;
     if (Array.isArray(meta.topics) && meta.topics.length > 0)
       confirmation += ` - ${meta.topics.join(", ")}`;
@@ -799,7 +777,8 @@ async function processCaptureThreadReply(
     const threadMessages = await fetchSlackThread(channel, threadTs);
     const parentText = threadMessages.length > 0 ? threadMessages[0].text : null;
 
-    // Combine parent context with reply for richer embedding and metadata
+    // Combine parent context with reply for richer embedding. Metadata is
+    // extracted from the reply alone so parent language cannot contaminate it.
     const contextualText = parentText
       ? `${parentText}\n\n${replyText}`
       : replyText;
@@ -810,21 +789,24 @@ async function processCaptureThreadReply(
       return;
     }
 
-    const [embedding, metadata] = await Promise.all([
+    const [embedding, rawMetadata] = await Promise.all([
       getEmbedding(contextualText),
-      extractMetadata(contextualText),
+      extractMetadata(replyText),
     ]);
+    const knownSlugs = await loadKnownSlugs(supabase);
+    const coerced = coerceMetadata(rawMetadata, knownSlugs, replyText);
+    const finalMetadata = {
+      ...coerced,
+      source: "slack",
+      slack_ts: messageTs,
+      parent_slack_ts: threadTs,
+    } as Record<string, unknown>;
 
     const insertData = {
       content: contextualText,
       embedding,
       content_hash: hash,
-      metadata: {
-        ...metadata,
-        source: "slack",
-        slack_ts: messageTs,
-        parent_slack_ts: threadTs,
-      },
+      metadata: finalMetadata,
     };
     const { data: inserted, error } = await supabase.from("thoughts").insert(insertData).select("id").single();
 
@@ -847,9 +829,9 @@ async function processCaptureThreadReply(
     // Post-capture: track action items and auto-resolve
     // Layer A: excludeIds prevents same-thread items from being candidates
     // Layer B: replyText (not contextualText) prevents parent language from poisoning the LLM
-    const resolved = await postCaptureHook(inserted.id, replyText, metadata as Record<string, unknown>, excludeIds);
+    const resolved = await postCaptureHook(inserted.id, replyText, finalMetadata, excludeIds);
 
-    const meta = metadata as Record<string, unknown>;
+    const meta = finalMetadata;
     let confirmation = `Captured as *${meta.type || "thought"}* (with thread context)`;
     if (Array.isArray(meta.topics) && meta.topics.length > 0)
       confirmation += ` - ${meta.topics.join(", ")}`;
@@ -905,16 +887,19 @@ async function processBrainMessage(messageText: string, messageTs: string): Prom
     const hash = await contentHash(messageText);
     if (await isDuplicate(hash)) return; // silent channel, silent skip
 
-    const [embedding, metadata] = await Promise.all([
+    const [embedding, rawMetadata] = await Promise.all([
       getEmbedding(messageText),
       extractMetadata(messageText),
     ]);
+    const knownSlugs = await loadKnownSlugs(supabase);
+    const coerced = coerceMetadata(rawMetadata, knownSlugs, messageText);
+    const finalMetadata = { ...coerced, source: "brain-channel", slack_ts: messageTs } as Record<string, unknown>;
 
     const { data: inserted, error } = await supabase.from("thoughts").insert({
       content: messageText,
       embedding,
       content_hash: hash,
-      metadata: { ...metadata, source: "brain-channel", slack_ts: messageTs },
+      metadata: finalMetadata,
     }).select("id").single();
 
     if (error || !inserted) {
@@ -923,7 +908,7 @@ async function processBrainMessage(messageText: string, messageTs: string): Prom
     }
 
     // Post-capture: track action items and auto-resolve (silent, no Slack reply)
-    await postCaptureHook(inserted.id, messageText, metadata as Record<string, unknown>, [inserted.id]);
+    await postCaptureHook(inserted.id, messageText, finalMetadata, [inserted.id]);
   } catch (err) {
     console.error("Brain channel processing error:", err);
   }

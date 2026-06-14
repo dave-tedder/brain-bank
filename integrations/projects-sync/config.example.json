@@ -1,0 +1,10 @@
+{
+  "scanRoots": [
+    "~/path/to/Projects/Apps",
+    "~/path/to/Projects/Websites"
+  ],
+  "explicitDirs": [
+    "~/path/to/a-standalone-project"
+  ],
+  "notionProjectsDbId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+}

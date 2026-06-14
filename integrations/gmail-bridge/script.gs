@@ -55,6 +55,11 @@ var BLOCKED_SENDERS = [
   'donotreply@',
   'do-not-reply@',
   'mailer-daemon@',
+
+  // Marketing from these vendors is blocked. Receipt-shaped mail from the
+  // configured supply vendors is allowed by the exception below.
+  'orders.example-supply.com',
+  'e.godaddy.com',
 ];
 
 var BLOCKED_SUBJECT_PATTERNS = [
@@ -120,13 +125,26 @@ var ALLOWED_SENDERS = [
   'github.com',
   'deno.com',
 
-  // Domain / DNS
-  'godaddy.com',
-
   // Business-critical SaaS
   'notion.so',
   'slack.com',
   'stripe.com',
+];
+
+// Supply-vendor receipts can be useful expense records even when the vendor's
+// marketing mail is blocked. Replace these fictional domains with your own.
+var SUPPLY_VENDOR_SENDERS = [
+  'orders.example-supply.com',
+  'shipping.example-wholesale.com',
+];
+
+var RECEIPT_SUBJECT_PATTERNS = [
+  /order\s*(confirmation|confirmed|placed|shipped|delivered|received|#|number)/i,
+  /your\s*(order|receipt|invoice)/i,
+  /\b(receipt|invoice)\b/i,
+  /shipping\s*(confirmation|update|notification)/i,
+  /tracking\s*(number|info|update)/i,
+  /payment\s*(received|confirmation)/i,
 ];
 
 function shouldSkip(from, subject) {
@@ -145,6 +163,19 @@ function shouldSkip(from, subject) {
   for (var i = 0; i < ALLOWED_SUBJECT_PATTERNS.length; i++) {
     if (ALLOWED_SUBJECT_PATTERNS[i].test(subjectLower)) {
       return null;
+    }
+  }
+
+  // Supply receipt exception wins third. Marketing from the same vendor falls
+  // through to the sender and subject block checks below.
+  for (var i = 0; i < SUPPLY_VENDOR_SENDERS.length; i++) {
+    if (fromLower.indexOf(SUPPLY_VENDOR_SENDERS[i].toLowerCase()) !== -1) {
+      for (var j = 0; j < RECEIPT_SUBJECT_PATTERNS.length; j++) {
+        if (RECEIPT_SUBJECT_PATTERNS[j].test(subjectLower)) {
+          return null;
+        }
+      }
+      break;
     }
   }
 

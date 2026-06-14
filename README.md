@@ -112,7 +112,7 @@ If you intend to expose Brain Bank to multiple users or untrusted callers, place
 
 ## Status
 
-**v0.1.0** (2026-04-30): first public release. The engine and dashboard run in a live personal instance, and [`docs/deploy-from-scratch.md`](docs/deploy-from-scratch.md) has been verified end-to-end against fresh Supabase projects. Solo-maintained, so expect to hit edge cases off the documented happy path. Pin to the `v0.1.0` tag rather than `main` if you want a stable target; `main` advances as new work lands.
+**v0.2.0 release candidate** (2026-06-14): adds project pages, typed reasoning edges, safer auto-resolve behavior, expanded integrations, OpenRouter telemetry, digest and wiki improvements, and dashboard updates. Once the release PR is approved and tagged, `v0.2.0` will be the current stable target. Until then, `v0.1.0` remains the latest published tag.
 
 ## Inspired by
 
