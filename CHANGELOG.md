@@ -2,11 +2,13 @@
 
 All notable changes to Brain Bank are documented here.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) once it leaves pre-release.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Entries are written for operators considering a fork. If you see "Breaking" on a change, upgrading will require action on your side (schema migration, env var addition, config edit). Anything else is a quiet improvement.
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-06-14
 
 ### Added
 
@@ -128,11 +130,12 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 
 - **Edge Function deploys now include `profile.json` in the upload bundle.** The first attempted brain-bank swap returned 500 WORKER_ERROR because the Supabase CLI bundler only uploads files reachable through the import graph, and the earlier runtime `Deno.readTextFileSync` approach left `profile.json` outside that graph. Replaced with a JSON module import (`import profileDefaults from "./profile.json" with { type: "json" }`), which the bundler recognizes as a module-graph edge. A throwaway test function verified the fix before the retry deploy. Why this matters: if you build anything that reads a local file from an Edge Function, make it a module import, not a filesystem read.
 
-### Notes for future readers
+### Historical notes
 
-- This is a pre-release. The engine is live for the author, but the deploy-from-scratch walkthrough (`docs/deploy-from-scratch.md`) is still being written. The first tagged release (`v0.1.0`) ships once a friend deploys successfully from a cold clone using only the shipped docs.
-- The dashboard (Next.js on Railway) is still a separate private repo. It will merge into `dashboard/` via `git subtree add` during Phase 5, after which dashboard env vars get added to `.env.example`.
+- This snapshot preceded the public `v0.1.0` release, which shipped on 2026-04-30 after the deploy-from-scratch walkthrough was verified against fresh Supabase projects.
+- The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/dave-tedder/brain-bank/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0
 [0.1.0-pre]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0-pre
