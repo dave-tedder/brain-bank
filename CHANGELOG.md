@@ -10,6 +10,8 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ### Added
 
+- **Capture classification, action-item scaling, and project-sync ports.** Added the generic `openrouter_calls` audit schema, a sanitized Gmail-source history correction, dependency-free filesystem/Notion project synchronization, shared metadata coercion with project-slug validation, SQL-scoped auto-resolve candidates, an `archived` action status, and a bounded keyword pre-filter for Slack `done:` commands. Capture wiring remains mirrored across `ingest-thought` and `open-brain-mcp`, with focused tests for Slack, REST, RPC, and done-command behavior. Sources: Open Brain commits `cce9cb7`, `e9a2190`, `07ebb38`, `abc2fc6` through `5b84fb7`, `2b195b2`, `97e8a51`, `9787f47`, `bdecb0e`, `2a30397`, and `337924c`.
+
 - **90-day retention for operational audit logs.** A locked-down `purge_old_audit_logs()` maintenance function and weekly pg_cron job bound `mcp_tool_invocations`, `compile_pages_runs`, and the optional `openrouter_calls` table without touching durable thoughts, actions, digests, or business records. The migration remains replayable before the optional OpenRouter telemetry table is installed. Source: Open Brain commit `5315c58`.
 
 - **Covering index for resolved action-item references.** `action_items.resolved_by_thought_id` now has an idempotent index for faster foreign-key checks and lookups. Source: Open Brain commit `e367832`.
