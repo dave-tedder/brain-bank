@@ -191,7 +191,7 @@
             "in": "query",
             "required": false,
             "schema": { "type": "string" },
-            "description": "Page slug, e.g. 'client/jane-doe' or 'topic/japanese-irezumi'. If provided, returns the full single page; other params are ignored."
+            "description": "Page slug, e.g. 'client/jane-doe' or 'topic/knowledge-management'. If provided, returns the full single page; other params are ignored."
           },
           {
             "name": "type",

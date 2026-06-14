@@ -823,11 +823,11 @@ const server = new McpServer(
     version: "1.0.0",
   },
   {
-    instructions: `# Open Brain — How to use these tools
+    instructions: `# Brain Bank — How to use these tools
 
-Open Brain exposes two retrieval surfaces. Choose based on the shape of the question.
+Brain Bank exposes two retrieval surfaces. Choose based on the shape of the question.
 
-**Wiki (compiled pages)** — \`get_compiled_page\`, \`search_compiled_pages\`, \`list_compiled_pages\`. Pre-synthesized markdown reference docs about specific entities: a client, a topic, a project. One page per entity, regenerated daily, plus a read-time tail of activity captured since the last compile. Use the wiki when the question is entity-shaped: "what do we know about Sarah?", "what's our position on Japanese irezumi sleeves?", "where are we with the Phoenix project?". The wiki gives you a synthesized summary in one call instead of forcing you to re-read 50 raw thoughts.
+**Wiki (compiled pages)** — \`get_compiled_page\`, \`search_compiled_pages\`, \`list_compiled_pages\`. Pre-synthesized markdown reference docs about specific entities: a client, a topic, a project. One page per entity, regenerated daily, plus a read-time tail of activity captured since the last compile. Use the wiki when the question is entity-shaped: "what do we know about Alex?", "what's our position on knowledge retention?", "where are we with the Phoenix project?". The wiki gives you a synthesized summary in one call instead of forcing you to re-read 50 raw thoughts.
 
 **Thoughts (raw captures)** — \`search_thoughts\`, \`list_thoughts\`. Individual captured moments: an email, a note, a Slack message, a calendar event. Use thoughts when the question is moment-shaped: "what did I think about that estimate yesterday?", "did anyone DM about the booth?", "find the message where we agreed on color palette". Wiki pages don't preserve the texture of an individual moment; thoughts do.
 

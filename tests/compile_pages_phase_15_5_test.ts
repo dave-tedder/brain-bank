@@ -22,3 +22,12 @@ Deno.test("curated contradiction-lint scope remains wired", () => {
   assert(source.includes("curatedProjectSlugs"));
   assert(source.includes("const contradictionPages = selectContradictionLintPages"));
 });
+
+Deno.test("wiki synthesis stays profile-driven and operator-neutral", () => {
+  assert(source.includes('import { loadProfile } from "../_shared/profile.ts";'));
+  assert(source.includes("const wikiPersona = loadProfile().persona.compile_pages;"));
+  assertEquals((source.match(/\$\{wikiPersona\}/g) ?? []).length, 3);
+  assertEquals(source.includes("tattoo artist's knowledge base"), false);
+  assertEquals(source.includes('"Tattoo History"'), false);
+  assert(source.includes('return ["Preferences", "History", "Sessions", "Notes"];'));
+});

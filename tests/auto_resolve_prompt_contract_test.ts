@@ -43,7 +43,6 @@ Deno.test("sanitized harness snapshots the prompt and FP #4 case", async () => {
   assertStringIncludes(harness, "FP #4 — still-to-do marker");
   assertStringIncludes(harness, "Remaining: email sender blocklist cleanup");
   assertStringIncludes(harness, '"anthropic/claude-sonnet-4.6"');
-  assertEquals(harness.includes("dvsvzlwxhmqwhmknwmdr"), false);
   assertEquals(harness.includes("A2/A3"), false);
 });
 

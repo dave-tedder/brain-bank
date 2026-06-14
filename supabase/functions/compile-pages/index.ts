@@ -3,6 +3,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { applyEdits, parseEditsXml } from "./_section_merge.ts";
 import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import { loadProfile } from "../_shared/profile.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -302,7 +303,7 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
 function recommendedSectionsFor(pageType: string): string[] {
   switch (pageType) {
     case "client":
-      return ["Style Preferences", "Tattoo History", "Sessions", "Notes"];
+      return ["Preferences", "History", "Sessions", "Notes"];
     case "topic":
       return ["Definition", "Examples", "Recent Activity", "Open Questions"];
     case "project":
@@ -476,10 +477,11 @@ async function compilePage(
       }.`
       : "";
 
+    const wikiPersona = loadProfile().persona.compile_pages;
     let systemPrompt: string;
     if (isNewPage) {
       systemPrompt =
-        `You are maintaining a wiki-style reference page for a tattoo artist's knowledge base. Create a new reference page for "${page.title}" (type: ${page.page_type}).
+        `You are maintaining ${wikiPersona}. Create a new wiki-style reference page for "${page.title}" (type: ${page.page_type}).
 
 Write a well-organized markdown document that synthesizes all the information into a coherent reference. Structure it with H2 (##) section headers so subsequent compiles can apply targeted edits. Include all factual details from the source material. Write in third person for client pages, neutral reference style for topics/projects.${recommendedHint}
 
@@ -490,7 +492,7 @@ On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separ
 Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
     } else if (useEditMode) {
       systemPrompt =
-        `You are maintaining a wiki-style reference page for a tattoo artist's knowledge base. Update the existing page for "${page.title}" (type: ${page.page_type}) by integrating new information.
+        `You are maintaining ${wikiPersona}. Update the existing wiki-style reference page for "${page.title}" (type: ${page.page_type}) by integrating new information.
 
 The page is already organized into H2-headed sections. Output ONLY the sections that need to change, using the structured-edit XML format below. Do NOT regenerate the whole page.
 
@@ -526,7 +528,7 @@ On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separ
 Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
     } else {
       systemPrompt =
-        `You are maintaining a wiki-style reference page for a tattoo artist's knowledge base. Update the existing page for "${page.title}" (type: ${page.page_type}) by integrating new information.
+        `You are maintaining ${wikiPersona}. Update the existing wiki-style reference page for "${page.title}" (type: ${page.page_type}) by integrating new information.
 
 Rules:
 - Preserve all existing information that is still accurate
