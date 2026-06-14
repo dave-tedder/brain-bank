@@ -6,6 +6,7 @@ import {
   loadKnownSlugs,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
+import { filterCandidatesForDone } from "../_shared/done-filter.ts";
 
 declare const EdgeRuntime: {
   waitUntil(promise: Promise<unknown>): void;
@@ -638,14 +639,16 @@ async function handleDoneCommand(
   const { data: openItems, error } = await supabase
     .from("action_items")
     .select("id, description")
-    .eq("status", "open");
+    .eq("status", "open")
+    .order("created_at", { ascending: false });
 
   if (error || !openItems || openItems.length === 0) {
     await replyInSlack(channel, messageTs, "No open action items to close.");
     return;
   }
 
-  const itemList = openItems
+  const filteredItems = filterCandidatesForDone(doneText, openItems, 200);
+  const itemList = filteredItems
     .map((item, i) => `${i + 1}. ${item.description}`)
     .join("\n");
 
@@ -690,8 +693,8 @@ async function handleDoneCommand(
   const now = new Date().toISOString();
   for (const num of matched) {
     const idx = num - 1;
-    if (idx >= 0 && idx < openItems.length) {
-      const item = openItems[idx];
+    if (idx >= 0 && idx < filteredItems.length) {
+      const item = filteredItems[idx];
       await supabase
         .from("action_items")
         .update({ status: "resolved", resolved_at: now })
