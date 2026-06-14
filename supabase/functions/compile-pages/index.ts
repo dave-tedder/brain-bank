@@ -2,13 +2,13 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { applyEdits, parseEditsXml } from "./_section_merge.ts";
 import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
+import { callOpenRouter } from "../_shared/openrouter.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const FUNCTION_SLUG = "compile-pages";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Deno Edge Runtime exposes EdgeRuntime as a global; declare it for the type
@@ -79,6 +79,7 @@ const ALLOWED_COMPILE_MODELS = new Set([
 ]);
 
 async function llmCall(
+  callSite: string,
   systemPrompt: string,
   userContent: string,
   options?: { maxTokens?: number; model?: string },
@@ -86,25 +87,18 @@ async function llmCall(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), LLM_CALL_TIMEOUT_MS);
   try {
-    const body: Record<string, unknown> = {
+    const { data } = await callOpenRouter({
+      function_slug: FUNCTION_SLUG,
+      call_site: callSite,
       model: options?.model || DEFAULT_COMPILE_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
       ],
-    };
-    if (options?.maxTokens) body.max_tokens = options.maxTokens;
-    const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+      max_tokens: options?.maxTokens,
       signal: controller.signal,
     });
-    const d = await r.json();
-    return d.choices[0].message.content.trim();
+    return (data.choices?.[0]?.message?.content ?? "").trim();
   } finally {
     clearTimeout(timeoutId);
   }
@@ -279,7 +273,9 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
 
     const userContent = `Pages currently in the wiki:\n\n${tocText}`;
 
-    const result = await llmCall(systemPrompt, userContent, { maxTokens: 1200 });
+    const result = await llmCall("compile_index", systemPrompt, userContent, {
+      maxTokens: 1200,
+    });
 
     // No backlinks for the index — it's the root, not a member of the graph.
     const now = new Date().toISOString();
@@ -551,7 +547,7 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
       : `Current page content:\n\n${page.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`;
 
-    const result = await llmCall(systemPrompt, userContent, {
+    const result = await llmCall("compile_entity_page", systemPrompt, userContent, {
       model: compileModel,
     });
 
@@ -892,6 +888,7 @@ async function runLint(
 
       try {
         const checkResult = await llmCall(
+          "lint_crossref_check",
           `You are checking two wiki pages for contradictions. If you find any factual contradictions between the pages (conflicting dates, conflicting descriptions of the same event, conflicting claims), list each one briefly. If no contradictions, respond with exactly: NONE`,
           `Page A (${pageA.title}):\n${
             pageA.content.substring(0, 2000)

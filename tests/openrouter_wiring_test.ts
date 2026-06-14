@@ -58,3 +58,22 @@ Deno.test("classify-edges keeps capped budget math while adding both telemetry s
   assertEquals(source.includes("https://openrouter.ai"), false);
   assertEquals(source.includes("OPENROUTER_API_KEY"), false);
 });
+
+Deno.test("compile-pages preserves abort timeout and exposes three telemetry labels", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../supabase/functions/compile-pages/index.ts", import.meta.url),
+  );
+  assertStringIncludes(
+    source,
+    'import { callOpenRouter } from "../_shared/openrouter.ts";',
+  );
+  assertStringIncludes(source, 'const FUNCTION_SLUG = "compile-pages";');
+  assertStringIncludes(source, "callSite: string");
+  assertStringIncludes(source, "signal: controller.signal");
+  assertStringIncludes(source, 'llmCall("compile_index"');
+  assertStringIncludes(source, 'llmCall("compile_entity_page"');
+  assertStringIncludes(source, '"lint_crossref_check"');
+  assertStringIncludes(source, "model: options?.model || DEFAULT_COMPILE_MODEL");
+  assertEquals(source.includes("https://openrouter.ai"), false);
+  assertEquals(source.includes("OPENROUTER_API_KEY"), false);
+});
