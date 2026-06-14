@@ -10,6 +10,8 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ### Added
 
+- **Per-call OpenRouter telemetry across all Edge Functions.** A shared wrapper now records model, token usage, estimated cost, latency, function, call site, and sanitized outcome for every embedding and chat-completion call. Telemetry is best-effort and non-blocking, provider errors still propagate to callers, compile timeouts remain intact, and the edge classifier keeps its existing cost cap. Stable labels distinguish all 15 logical paths across capture, digest, wiki compilation, and typed-edge classification. The `openrouter_calls` migration was already present. Source: Open Brain commit `cce9cb7`.
+
 - **Generic action-item triage CLI with offline verification.** New `integrations/action-item-triage/` tooling runs protected-phrase, external-project, newest-wins deduplication, and configurable work-shape rules before an optional `openai/gpt-4.1-mini` classifier. Dry run is the default, pending items block apply, changes are reversible status updates recorded in CSV, and fixture mode verifies the full path without credentials or network access. Sources: Open Brain commits `7b0a7d4` and `040ddee`.
 
 - **Gmail supply-receipt exception with tested precedence.** The public Gmail bridge now lets configured supply-vendor receipts pass while continuing to block the same vendors' marketing mail. GoDaddy promotional mail no longer bypasses filtering through the broad allowlist. Fictional vendor defaults and executable precedence tests keep the integration operator-neutral. Source: Open Brain commit `39a63f7`.
