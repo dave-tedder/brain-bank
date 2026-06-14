@@ -64,3 +64,20 @@ Deno.test("mirrored capture functions share the LAYER 3.5 call block", async () 
   assertStringIncludes(blocks[0], "newThoughtContent, item.description, stem");
   assertStringIncludes(blocks[0], "LAYER 3.5 still-owed veto dropped item");
 });
+
+Deno.test("mirrored LAYER 2 uses Sonnet and fail-closed fenced JSON parsing", async () => {
+  const sources = await Promise.all(functionPaths.map((path) =>
+    Deno.readTextFile(new URL(path, import.meta.url))
+  ));
+  const models = sources.map((source) => {
+    assertStringIncludes(source, 'import { extractJsonObject } from "../_shared/extract-json.ts";');
+    assertStringIncludes(source, "JSON.parse(extractJsonObject(d.choices[0].message.content))");
+    assertStringIncludes(source, "checkAutoResolve: LAYER 2 JSON parse failed:");
+    const checkStart = source.indexOf("async function checkAutoResolve(");
+    const modelMatch = source.slice(checkStart).match(/model: "([^"]+)"/);
+    if (!modelMatch) throw new Error("LAYER 2 model not found");
+    return modelMatch[1];
+  });
+
+  assertEquals(models, ["anthropic/claude-sonnet-4.6", "anthropic/claude-sonnet-4.6"]);
+});

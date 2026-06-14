@@ -8,6 +8,7 @@ import {
 } from "../_shared/metadata-validation.ts";
 import { filterCandidatesForDone } from "../_shared/done-filter.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
+import { extractJsonObject } from "../_shared/extract-json.ts";
 
 declare const EdgeRuntime: {
   waitUntil(promise: Promise<unknown>): void;
@@ -522,7 +523,7 @@ async function checkAutoResolve(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "openai/gpt-4.1-mini",
+      model: "anthropic/claude-sonnet-4.6",
       response_format: { type: "json_object" },
       messages: [
         {
@@ -554,7 +555,7 @@ For each match you return, the "reason" field must quote the specific phrase in 
   type Claim = { num: number; reason: string };
   let claims: Claim[] = [];
   try {
-    const parsed = JSON.parse(d.choices[0].message.content);
+    const parsed = JSON.parse(extractJsonObject(d.choices[0].message.content));
     const arr = Array.isArray(parsed.resolved) ? parsed.resolved : [];
     claims = arr
       .map((entry: unknown): Claim | null => {
@@ -570,7 +571,13 @@ For each match you return, the "reason" field must quote the specific phrase in 
         return null;
       })
       .filter((c: Claim | null): c is Claim => c !== null);
-  } catch { return []; }
+  } catch (error) {
+    console.log(
+      `checkAutoResolve: LAYER 2 JSON parse failed: ${error instanceof Error ? error.message : String(error)} ` +
+        `(raw=${JSON.stringify((d.choices?.[0]?.message?.content ?? "").slice(0, LOG_TRUNC))})`
+    );
+    return [];
+  }
 
   // LAYER 3: quote-overlap guard. The LLM's `reason` quote must share
   // substantive vocabulary with the candidate's description (stemmed
