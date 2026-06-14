@@ -9,6 +9,7 @@ import {
 import { filterCandidatesForDone } from "../_shared/done-filter.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
+import { callOpenRouter } from "../_shared/openrouter.ts";
 
 declare const EdgeRuntime: {
   waitUntil(promise: Promise<unknown>): void;
@@ -16,14 +17,13 @@ declare const EdgeRuntime: {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_CAPTURE_CHANNEL = Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
 const SLACK_BRAIN_CHANNEL = Deno.env.get("SLACK_BRAIN_CHANNEL") || "";
 const SLACK_QUERY_CHANNEL = Deno.env.get("SLACK_QUERY_CHANNEL") || "";
 const SLACK_SIGNING_SECRET = Deno.env.get("SLACK_SIGNING_SECRET") || "";
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const FUNCTION_SLUG = "ingest-thought";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // --- HMAC-SHA256 Signature Verification ---
@@ -94,23 +94,23 @@ async function isDuplicate(hash: string): Promise<boolean> {
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "openai/text-embedding-3-small", input: text }),
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "getEmbedding",
+    model: "openai/text-embedding-3-small",
+    endpoint: "embeddings",
+    input: text,
   });
-  const d = await r.json();
-  return d.data[0].embedding;
+  return data.data![0].embedding!;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "extractMetadata",
+    model: "openai/gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `Extract metadata from the user's captured thought. Return JSON with:
@@ -132,12 +132,10 @@ Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or 
 Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
         },
         { role: "user", content: text },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
   try {
-    return JSON.parse(d.choices[0].message.content);
+    return JSON.parse(data.choices![0].message!.content!);
   } catch {
     return { topics: ["uncategorized"], type: "observation" };
   }
@@ -173,12 +171,11 @@ async function synthesizeContextualQuery(
   threadHistory: string,
   latestMessage: string
 ): Promise<string> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "synthesizeContextualQuery",
+    model: "openai/gpt-4o-mini",
+    messages: [
         {
           role: "system",
           content:
@@ -188,11 +185,9 @@ async function synthesizeContextualQuery(
           role: "user",
           content: `Previous conversation:\n${threadHistory}\n\nLatest follow-up: ${latestMessage}\n\nGenerate a contextual search query.`,
         },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
-  return d.choices[0].message.content.trim();
+  return (data.choices![0].message!.content ?? "").trim();
 }
 
 // --- Answer Synthesis ---
@@ -209,12 +204,11 @@ async function synthesizeAnswer(
     })
     .join("\n\n");
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "synthesizeAnswer",
+    model: "openai/gpt-4o-mini",
+    messages: [
         {
           role: "system",
           content: `You are a personal memory assistant responding to queries about someone's captured thoughts and notes. Given the search results below, synthesize a natural conversational answer. Be direct and concise. Speak as if you're a knowledgeable friend recalling details. Only use information from the provided results. If the results only partially answer the question, share what you have and note what's missing. Do not use bullet points or numbered lists. Do not mention similarity scores or search mechanics.`,
@@ -223,11 +217,9 @@ async function synthesizeAnswer(
           role: "user",
           content: `Query: ${query}\n\nSearch results:\n${context}`,
         },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
-  return d.choices[0].message.content.trim();
+  return (data.choices![0].message!.content ?? "").trim();
 }
 
 // --- Query Handling ---
@@ -516,16 +508,12 @@ async function checkAutoResolve(
     newPeople.length > 0 ? `people=${newPeople.join("/")}` : null,
   ].filter(Boolean).join(", ");
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-sonnet-4.6",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "checkAutoResolve",
+    model: "anthropic/claude-sonnet-4.6",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `You check whether a new note explicitly resolves any open action items.
@@ -547,11 +535,10 @@ For each match you return, the "reason" field must quote the specific phrase in 
           role: "user",
           content: `New note context: ${newCtx || "no-context"}\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
         },
-      ],
-    }),
+    ],
   });
+  const d = data as { choices: Array<{ message: { content: string } }> };
 
-  const d = await r.json();
   type Claim = { num: number; reason: string };
   let claims: Claim[] = [];
   try {
@@ -669,16 +656,12 @@ async function handleDoneCommand(
     .map((item, i) => `${i + 1}. ${item.description}`)
     .join("\n");
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data: d } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "handleDoneCommand",
+    model: "openai/gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `The user says they completed something. Match their description against the open action items list. Return JSON: {"matched": [1, 3]} with the numbers of items that match what the user says is done. If no clear match, return {"matched": []}.`,
@@ -687,14 +670,12 @@ async function handleDoneCommand(
           role: "user",
           content: `User says done: "${doneText}"\n\nOpen action items:\n${itemList}`,
         },
-      ],
-    }),
+    ],
   });
 
-  const d = await r.json();
   let matched: number[] = [];
   try {
-    const parsed = JSON.parse(d.choices[0].message.content);
+    const parsed = JSON.parse(d.choices![0].message!.content!);
     matched = Array.isArray(parsed.matched) ? parsed.matched : [];
   } catch {
     await replyInSlack(channel, messageTs, "Couldn't parse the response. Try being more specific.");

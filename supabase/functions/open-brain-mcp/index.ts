@@ -13,13 +13,13 @@ import {
 } from "../_shared/metadata-validation.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
+import { callOpenRouter } from "../_shared/openrouter.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
-const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const FUNCTION_SLUG = "open-brain-mcp";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // Deno Edge Runtime exposes EdgeRuntime as a global; declare it for the type
@@ -94,36 +94,23 @@ async function isNotionDuplicate(pageId: string, lastEdited: string): Promise<bo
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const r = await fetch(`${OPENROUTER_BASE}/embeddings`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "openai/text-embedding-3-small",
-      input: text,
-    }),
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "getEmbedding",
+    model: "openai/text-embedding-3-small",
+    endpoint: "embeddings",
+    input: text,
   });
-  if (!r.ok) {
-    const msg = await r.text().catch(() => "");
-    throw new Error(`OpenRouter embeddings failed: ${r.status} ${msg}`);
-  }
-  const d = await r.json();
-  return d.data[0].embedding;
+  return data.data![0].embedding!;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "extractMetadata",
+    model: "openai/gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `Extract metadata from the user's captured thought. Return JSON with:
@@ -145,12 +132,11 @@ Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or 
 Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
         },
         { role: "user", content: text },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
+  const d = data as { choices: Array<{ message: { content: string } }> };
   try {
-    return JSON.parse(d.choices[0].message.content);
+    return JSON.parse(d.choices![0].message!.content!);
   } catch {
     return { topics: ["uncategorized"], type: "observation" };
   }
@@ -411,13 +397,12 @@ async function checkAutoResolve(
     newPeople.length > 0 ? `people=${newPeople.join("/")}` : null,
   ].filter(Boolean).join(", ");
 
-  const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "anthropic/claude-sonnet-4.6",
-      response_format: { type: "json_object" },
-      messages: [
+  const { data } = await callOpenRouter({
+    function_slug: FUNCTION_SLUG,
+    call_site: "checkAutoResolve",
+    model: "anthropic/claude-sonnet-4.6",
+    response_format: { type: "json_object" },
+    messages: [
         {
           role: "system",
           content: `You check whether a new note explicitly resolves any open action items.
@@ -439,10 +424,9 @@ For each match you return, the "reason" field must quote the specific phrase in 
           role: "user",
           content: `New note context: ${newCtx || "no-context"}\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
         },
-      ],
-    }),
+    ],
   });
-  const d = await r.json();
+  const d = data as { choices: Array<{ message: { content: string } }> };
   type Claim = { num: number; reason: string };
   let claims: Claim[] = [];
   try {
