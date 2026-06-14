@@ -58,5 +58,8 @@ profile.*.json
 # Operator-local fixtures (live PII values; never commit)
 tests/_shared/fixtures/private/
 
+# Projects sync operator config (local paths and Notion database ID)
+integrations/projects-sync/config.json
+
 # Handoff scratch files
 HANDOFF-*.md
