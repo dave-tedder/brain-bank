@@ -1,0 +1,47 @@
+import {
+  assertEquals,
+  assertStringIncludes,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
+
+const functionPaths = [
+  "../supabase/functions/ingest-thought/index.ts",
+  "../supabase/functions/open-brain-mcp/index.ts",
+];
+
+function extractPromptContract(source: string): string {
+  const start = source.indexOf("HARD RULES — a match requires ALL of these:");
+  const endMarker = "If you cannot produce such a quote, do not include the match.";
+  const end = source.indexOf(endMarker, start);
+
+  if (start < 0 || end < 0) {
+    throw new Error("Auto-resolve prompt contract block not found");
+  }
+
+  return source.slice(start, end + endMarker.length);
+}
+
+Deno.test("mirrored auto-resolve prompts share the Session 146 contract", async () => {
+  const prompts = await Promise.all(functionPaths.map(async (path) => {
+    const source = await Deno.readTextFile(new URL(path, import.meta.url));
+    return extractPromptContract(source);
+  }));
+
+  assertEquals(prompts[0], prompts[1]);
+  assertStringIncludes(prompts[0], "STILL-TO-DO SIGNALS NEVER resolve anything");
+  assertStringIncludes(prompts[0], '"remaining", "outstanding", "to-do", "todo"');
+  assertStringIncludes(prompts[0], '"yet to", "still to", "still need", "next"');
+  assertStringIncludes(prompts[0], '"follows", "to follow"');
+  assertStringIncludes(prompts[0], "work that is still owed");
+});
+
+Deno.test("sanitized harness snapshots the prompt and FP #4 case", async () => {
+  const harness = await Deno.readTextFile(
+    new URL("../scripts/auto-resolve-ab-test/run.mjs", import.meta.url),
+  );
+
+  assertStringIncludes(harness, "STILL-TO-DO SIGNALS NEVER resolve anything");
+  assertStringIncludes(harness, "FP #4 — still-to-do marker");
+  assertStringIncludes(harness, "Remaining: email sender blocklist cleanup");
+  assertEquals(harness.includes("dvsvzlwxhmqwhmknwmdr"), false);
+  assertEquals(harness.includes("A2/A3"), false);
+});
