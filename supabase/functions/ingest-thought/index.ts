@@ -1,6 +1,11 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { loadProfile } from "../_shared/profile.ts";
+import {
+  coerceMetadata,
+  loadKnownSlugs,
+  shouldExtractActionItems,
+} from "../_shared/metadata-validation.ts";
 
 declare const EdgeRuntime: {
   waitUntil(promise: Promise<unknown>): void;
@@ -370,6 +375,10 @@ async function extractAndStoreActionItems(
   metadata: Record<string, unknown>,
   content: string
 ): Promise<void> {
+  // Observations, references, and email-sourced captures are descriptive,
+  // not commitment-shaped, so they must not create open action items.
+  if (!shouldExtractActionItems(metadata)) return;
+
   // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
   // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
   // extraction LLM may still pick up advisory phrases ("should reduce volume",
@@ -755,16 +764,19 @@ async function processCaptureMessage(
       return;
     }
 
-    const [embedding, metadata] = await Promise.all([
+    const [embedding, rawMetadata] = await Promise.all([
       getEmbedding(messageText),
       extractMetadata(messageText),
     ]);
+    const knownSlugs = await loadKnownSlugs(supabase);
+    const coerced = coerceMetadata(rawMetadata, knownSlugs, messageText);
+    const finalMetadata = { ...coerced, source: "slack", slack_ts: messageTs } as Record<string, unknown>;
 
     const insertData = {
       content: messageText,
       embedding,
       content_hash: hash,
-      metadata: { ...metadata, source: "slack", slack_ts: messageTs },
+      metadata: finalMetadata,
     };
     const { data: inserted, error } = await supabase.from("thoughts").insert(insertData).select("id").single();
 
@@ -775,9 +787,9 @@ async function processCaptureMessage(
     }
 
     // Post-capture: track action items and auto-resolve
-    const resolved = await postCaptureHook(inserted.id, messageText, metadata as Record<string, unknown>, [inserted.id]);
+    const resolved = await postCaptureHook(inserted.id, messageText, finalMetadata, [inserted.id]);
 
-    const meta = metadata as Record<string, unknown>;
+    const meta = finalMetadata;
     let confirmation = `Captured as *${meta.type || "thought"}*`;
     if (Array.isArray(meta.topics) && meta.topics.length > 0)
       confirmation += ` - ${meta.topics.join(", ")}`;
@@ -807,7 +819,8 @@ async function processCaptureThreadReply(
     const threadMessages = await fetchSlackThread(channel, threadTs);
     const parentText = threadMessages.length > 0 ? threadMessages[0].text : null;
 
-    // Combine parent context with reply for richer embedding and metadata
+    // Combine parent context with reply for richer embedding. Metadata is
+    // extracted from the reply alone so parent language cannot contaminate it.
     const contextualText = parentText
       ? `${parentText}\n\n${replyText}`
       : replyText;
@@ -818,21 +831,24 @@ async function processCaptureThreadReply(
       return;
     }
 
-    const [embedding, metadata] = await Promise.all([
+    const [embedding, rawMetadata] = await Promise.all([
       getEmbedding(contextualText),
-      extractMetadata(contextualText),
+      extractMetadata(replyText),
     ]);
+    const knownSlugs = await loadKnownSlugs(supabase);
+    const coerced = coerceMetadata(rawMetadata, knownSlugs, replyText);
+    const finalMetadata = {
+      ...coerced,
+      source: "slack",
+      slack_ts: messageTs,
+      parent_slack_ts: threadTs,
+    } as Record<string, unknown>;
 
     const insertData = {
       content: contextualText,
       embedding,
       content_hash: hash,
-      metadata: {
-        ...metadata,
-        source: "slack",
-        slack_ts: messageTs,
-        parent_slack_ts: threadTs,
-      },
+      metadata: finalMetadata,
     };
     const { data: inserted, error } = await supabase.from("thoughts").insert(insertData).select("id").single();
 
@@ -855,9 +871,9 @@ async function processCaptureThreadReply(
     // Post-capture: track action items and auto-resolve
     // Layer A: excludeIds prevents same-thread items from being candidates
     // Layer B: replyText (not contextualText) prevents parent language from poisoning the LLM
-    const resolved = await postCaptureHook(inserted.id, replyText, metadata as Record<string, unknown>, excludeIds);
+    const resolved = await postCaptureHook(inserted.id, replyText, finalMetadata, excludeIds);
 
-    const meta = metadata as Record<string, unknown>;
+    const meta = finalMetadata;
     let confirmation = `Captured as *${meta.type || "thought"}* (with thread context)`;
     if (Array.isArray(meta.topics) && meta.topics.length > 0)
       confirmation += ` - ${meta.topics.join(", ")}`;
@@ -913,16 +929,19 @@ async function processBrainMessage(messageText: string, messageTs: string): Prom
     const hash = await contentHash(messageText);
     if (await isDuplicate(hash)) return; // silent channel, silent skip
 
-    const [embedding, metadata] = await Promise.all([
+    const [embedding, rawMetadata] = await Promise.all([
       getEmbedding(messageText),
       extractMetadata(messageText),
     ]);
+    const knownSlugs = await loadKnownSlugs(supabase);
+    const coerced = coerceMetadata(rawMetadata, knownSlugs, messageText);
+    const finalMetadata = { ...coerced, source: "brain-channel", slack_ts: messageTs } as Record<string, unknown>;
 
     const { data: inserted, error } = await supabase.from("thoughts").insert({
       content: messageText,
       embedding,
       content_hash: hash,
-      metadata: { ...metadata, source: "brain-channel", slack_ts: messageTs },
+      metadata: finalMetadata,
     }).select("id").single();
 
     if (error || !inserted) {
@@ -931,7 +950,7 @@ async function processBrainMessage(messageText: string, messageTs: string): Prom
     }
 
     // Post-capture: track action items and auto-resolve (silent, no Slack reply)
-    await postCaptureHook(inserted.id, messageText, metadata as Record<string, unknown>, [inserted.id]);
+    await postCaptureHook(inserted.id, messageText, finalMetadata, [inserted.id]);
   } catch (err) {
     console.error("Brain channel processing error:", err);
   }

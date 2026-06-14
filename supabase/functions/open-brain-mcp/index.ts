@@ -6,6 +6,11 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import { loadProfile } from "../_shared/profile.ts";
+import {
+  coerceMetadata,
+  loadKnownSlugs,
+  shouldExtractActionItems,
+} from "../_shared/metadata-validation.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -267,6 +272,10 @@ async function extractAndStoreActionItems(
   metadata: Record<string, unknown>,
   content: string
 ): Promise<void> {
+  // Observations, references, and email-sourced captures are descriptive,
+  // not commitment-shaped, so they must not create open action items.
+  if (!shouldExtractActionItems(metadata)) return;
+
   // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
   // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
   // extraction LLM may still pick up advisory phrases ("should reduce volume",
@@ -706,12 +715,12 @@ async function handleRestCapture(req: Request): Promise<Response> {
     } else if (await isDuplicate(hash)) {
       return jsonResponse({ status: "duplicate", message: "Already in the brain." });
     }
-    const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-
-    const meta = metadata as Record<string, unknown>;
-    const extractedTopics = Array.isArray(meta.topics) ? (meta.topics as string[]) : [];
+    const [embedding, rawMetadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
+    const knownSlugs = await loadKnownSlugs(supabase);
+    const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
+    const extractedTopics = coerced.topics;
     const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
-    const finalMetadata: Record<string, unknown> = { ...meta, topics: mergedTopics, source };
+    const finalMetadata: Record<string, unknown> = { ...coerced, topics: mergedTopics, source };
     if (notionPageId) finalMetadata.notion_page_id = notionPageId;
     if (notionLastEdited) finalMetadata.notion_last_edited = notionLastEdited;
 
@@ -1200,21 +1209,22 @@ server.registerTool(
           .map((t) => t.toLowerCase().trim())
           .filter(Boolean)
         : [];
-      const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-      const meta = metadata as Record<string, unknown>;
-      const extractedTopics = Array.isArray(meta.topics) ? (meta.topics as string[]) : [];
+      const [embedding, rawMetadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
+      const knownSlugs = await loadKnownSlugs(supabase);
+      const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
+      const extractedTopics = coerced.topics;
       const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
-      const finalMetadata: Record<string, unknown> = { ...meta, topics: mergedTopics, source: "mcp" };
+      const finalMetadata: Record<string, unknown> = { ...coerced, topics: mergedTopics, source: "mcp" };
       const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: finalMetadata }).select("id").single();
       if (error || !inserted) return { content: [{ type: "text" as const, text: `Failed to capture: ${error?.message || "unknown error"}` }], isError: true };
 
       // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
       const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
 
-      let confirmation = `Captured as ${meta.type || "thought"}`;
+      let confirmation = `Captured as ${finalMetadata.type || "thought"}`;
       if (mergedTopics.length) confirmation += ` - ${mergedTopics.join(", ")}`;
-      if (Array.isArray(meta.people) && meta.people.length) confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
-      if (Array.isArray(meta.action_items) && meta.action_items.length) confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
+      if (Array.isArray(finalMetadata.people) && finalMetadata.people.length) confirmation += ` | People: ${(finalMetadata.people as string[]).join(", ")}`;
+      if (Array.isArray(finalMetadata.action_items) && finalMetadata.action_items.length) confirmation += ` | Actions: ${(finalMetadata.action_items as string[]).join("; ")}`;
       if (resolved.length > 0) confirmation += ` | Auto-resolved: ${resolved.join("; ")}`;
       return { content: [{ type: "text" as const, text: confirmation }] };
     } catch (err: unknown) {
