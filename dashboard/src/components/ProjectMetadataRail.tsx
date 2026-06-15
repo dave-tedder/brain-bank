@@ -70,7 +70,7 @@ export default function ProjectMetadataRail({ project, openActions }: Props) {
 
   return (
     <aside
-      className="space-y-0 sticky top-6"
+      className="space-y-0 lg:sticky lg:top-6 lg:max-h-[calc(100vh-3rem)] lg:overflow-y-auto lg:pr-2"
       style={{ fontFamily: "'IBM Plex Mono', monospace" }}
     >
       {hasBlocker && (
@@ -161,7 +161,10 @@ export default function ProjectMetadataRail({ project, openActions }: Props) {
         <SectionHeader label="CROSS-LINKS" />
         <ul className="space-y-1 text-sm">
           {[
-            { href: `/wiki/${slug}`, label: "wiki page" },
+            {
+              href: `/wiki/${encodeURIComponent(`project/${slug}`)}`,
+              label: "wiki page",
+            },
             { href: `/thoughts?topic=${slug}`, label: "all thoughts" },
             { href: `/actions?project=${slug}`, label: "all actions" },
           ].map((link) => (
