@@ -112,11 +112,16 @@ If you intend to expose Brain Bank to multiple users or untrusted callers, place
 
 ## Status
 
-**v0.2.0 release candidate** (2026-06-14): adds project pages, typed reasoning edges, safer auto-resolve behavior, expanded integrations, OpenRouter telemetry, digest and wiki improvements, and dashboard updates. Once the release PR is approved and tagged, `v0.2.0` will be the current stable target. Until then, `v0.1.0` remains the latest published tag.
+**v0.2.1 current stable** (2026-06-15): `v0.2.0` added project pages, typed reasoning edges, safer auto-resolve behavior, expanded integrations, OpenRouter telemetry, digest and wiki improvements, and dashboard updates. `v0.2.1` is a dashboard patch release that protects API routes behind dashboard auth, aligns project detail timelines with canonical project-page resolution, and fixes project rail links/overflow.
 
 ## Inspired by
 
 Nate Jones' semantic memory build series was the starting point and remains the clearest introduction to the underlying design. Brain Bank is an independent implementation of those ideas, extended with proactive digest delivery, cross-reference briefings, a wiki compilation layer, and auto-resolution of action items.
+
+## Contributors
+
+- Dave Tedder, maintainer and original operator.
+- Claude Code and Codex, AI coding collaborators used for implementation, audits, docs, release preparation, and verification under human review.
 
 ## License
 

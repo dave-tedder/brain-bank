@@ -8,6 +8,15 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-15
+
+### Fixed
+
+- **Dashboard API routes now sit behind the password middleware.** The dashboard middleware matcher no longer excludes `/api/*`, so unauthenticated requests to service-role-backed routes such as `/api/chat` and `/api/wiki/[slug]` redirect to `/login` before any Supabase lookup or OpenRouter call can run. This closes a live dashboard exposure where an unauthenticated caller could ask the chat endpoint questions and spend model budget. Dave verified the fix in an incognito browser after deployment.
+- **Project detail timelines use canonical project thought resolution.** The `/projects/[slug]` detail timeline now reads through `get_project_page_thoughts`, matching the canonical slug/display-name/underscore-tag behavior used by compiled project pages. The detail page no longer invents an exact hidden count because the existing RPC is row-only; collapsed mode fetches one extra row to decide whether to show `SHOW EARLIER`.
+- **Project status filters cover paused and closed states.** `/projects` now exposes PAUSED, DONE, and ARCHIVE filter pills in addition to ACTIVE, STALE, BLOCKER, and DORMANT. DONE and ARCHIVE filters automatically reveal closed rows so the filter does not appear empty due to the default hidden-closed behavior.
+- **Project detail rail links remain reachable on long pages.** Project detail wiki links now target encoded `project/<slug>` wiki pages, and the metadata rail reserves bottom-nav clearance with a capped open-actions scroll area so SOURCES, WORKING DIRS, and CROSS-LINKS stay reachable when a project has many open items.
+
 ## [0.2.0] - 2026-06-14
 
 ### Added
@@ -135,7 +144,8 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 - This snapshot preceded the public `v0.1.0` release, which shipped on 2026-04-30 after the deploy-from-scratch walkthrough was verified against fresh Supabase projects.
 - The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/dave-tedder/brain-bank/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/dave-tedder/brain-bank/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0
 [0.1.0-pre]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0-pre

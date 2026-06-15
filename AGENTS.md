@@ -4,7 +4,7 @@ Personal semantic memory system. Captures thoughts from multiple sources (Slack,
 
 ## Current Status
 
-**v0.1.0 shipped 2026-04-30.** Repo is public. The four Edge Functions and the Next.js dashboard are merged into this monorepo and verified end-to-end against fresh-deploy throwaway Supabase projects. Pre-public adversarial audit findings (BLOCKERs, HIGHs, MEDIUMs, LOWs) all landed before the visibility flip. Going forward, `CHANGELOG.md` is the source of truth. `[Unreleased]` covers in-flight work, dated sections cover shipped releases. New work branches from `dev`; `main` carries tagged releases only.
+**v0.2.1 shipped 2026-06-15.** Repo is public. The four Edge Functions and the Next.js dashboard are merged into this monorepo and verified end-to-end against fresh-deploy throwaway Supabase projects. Pre-public adversarial audit findings (BLOCKERs, HIGHs, MEDIUMs, LOWs) all landed before the visibility flip. Going forward, `CHANGELOG.md` is the source of truth. `[Unreleased]` covers in-flight work, dated sections cover shipped releases. New work branches from `dev`; `main` carries tagged releases only.
 
 ## Tech Stack
 
@@ -57,6 +57,7 @@ brain-bank/
 - **Profile customization:** operator-specific vocabulary, personas, and calendar filters live in `profile.json` (gitignored). The repo ships `profile.example.json` with neutral defaults.
 - **Mirror invariant:** the auto-resolve pipeline lives in both `supabase/functions/ingest-thought/index.ts` and `supabase/functions/open-brain-mcp/index.ts`. Any change to the LAYER 2 prompt block, `MECHANICAL_CAPTURE_PREFIXES`, the stemmer, `jaccardTokens`, `quoteOverlap`, or the LOG_TRUNC / RESTATEMENT_THRESHOLD / QUOTE_OVERLAP_THRESHOLD constants must be behavior-identical in both files.
 - **Branching:** `main` = tagged stable releases only. `dev` = active work. Feature branches cut from `dev`. Tags drive releases (`v0.1.0`, etc.); friends pin to tags, not to `main`.
+- **Session logs:** Codex-authored sessions should update the relevant session log/tracker surfaces before closeout, just as Claude-authored sessions did. If a repo has no local tracker files, record the session in the controlling Open Brain tracker/session log.
 
 ## Where to find what
 
