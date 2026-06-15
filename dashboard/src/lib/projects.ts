@@ -136,27 +136,17 @@ export async function getProjectBySlug(
 
 export async function listProjectTimeline(
   slug: string,
-  limit = 20,
-  offset = 0
+  limit = 20
 ): Promise<ProjectCapture[]> {
-  const { data, error } = await supabase()
-    .from("thoughts")
-    .select("id, content, metadata, created_at")
-    .contains("metadata", { topics: [slug] })
-    .order("created_at", { ascending: false })
-    .range(offset, offset + limit - 1);
+  const { data, error } = await supabase().rpc("get_project_page_thoughts", {
+    p_slug: slug,
+    p_since: "epoch",
+    p_limit: limit,
+    p_ascending: false,
+  });
 
   if (error) throw error;
   return (data as ProjectCapture[] | null) ?? [];
-}
-
-export async function countProjectTimeline(slug: string): Promise<number> {
-  const { count } = await supabase()
-    .from("thoughts")
-    .select("id", { count: "exact", head: true })
-    .contains("metadata", { topics: [slug] });
-
-  return count ?? 0;
 }
 
 export async function listProjectOpenActions(

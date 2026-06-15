@@ -6,6 +6,7 @@ interface Props {
   total: number;
   slug: string;
   expanded: boolean;
+  hasMore?: boolean;
 }
 
 type CaptureKind = "BLOCKER" | "DONE" | "NEXT STEP" | "PROGRESS";
@@ -52,6 +53,7 @@ export default function ProjectTimeline({
   total,
   slug,
   expanded,
+  hasMore = false,
 }: Props) {
   const hiddenCount = total - captures.length;
 
@@ -110,13 +112,13 @@ export default function ProjectTimeline({
         );
       })}
 
-      {!expanded && hiddenCount > 0 && (
+      {!expanded && (hiddenCount > 0 || hasMore) && (
         <Link
           href={`/projects/${slug}?history=all`}
           className="font-terminal text-xs inline-block py-2 uppercase tracking-wider"
           style={{ color: "var(--text-muted)" }}
         >
-          &gt; SHOW EARLIER ({hiddenCount})_
+          &gt; SHOW EARLIER{hiddenCount > 0 ? ` (${hiddenCount})` : ""}_
         </Link>
       )}
 

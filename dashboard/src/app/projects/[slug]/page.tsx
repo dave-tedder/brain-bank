@@ -2,7 +2,6 @@ import Link from "next/link";
 import {
   getProjectBySlug,
   getProjectVision,
-  countProjectTimeline,
   listProjectTimeline,
   listProjectOpenActions,
 } from "@/lib/projects";
@@ -18,6 +17,7 @@ interface Props {
 }
 
 const DEFAULT_TIMELINE_LIMIT = 20;
+const EXPANDED_TIMELINE_LIMIT = 1000;
 
 export default async function ProjectDetailPage({
   params,
@@ -50,16 +50,22 @@ export default async function ProjectDetailPage({
     );
   }
 
-  const total = await countProjectTimeline(slug);
   const limit = expanded
-    ? Math.max(total, 1)
-    : DEFAULT_TIMELINE_LIMIT;
+    ? EXPANDED_TIMELINE_LIMIT
+    : DEFAULT_TIMELINE_LIMIT + 1;
 
-  const [captures, openActions, vision] = await Promise.all([
+  const [timelineRows, openActions, vision] = await Promise.all([
     listProjectTimeline(slug, limit),
     listProjectOpenActions(slug),
     getProjectVision(slug),
   ]);
+  const hasMoreCaptures = !expanded && timelineRows.length > DEFAULT_TIMELINE_LIMIT;
+  const captures = expanded
+    ? timelineRows
+    : timelineRows.slice(0, DEFAULT_TIMELINE_LIMIT);
+  // The canonical RPC is row-only, so the detail page avoids displaying an
+  // invented exact count. Collapsed mode fetches one extra row to detect more.
+  const total = captures.length;
 
   const color = statusColor(project.status);
 
@@ -147,6 +153,7 @@ export default async function ProjectDetailPage({
             total={total}
             slug={slug}
             expanded={expanded}
+            hasMore={hasMoreCaptures}
           />
         </div>
         <div>
