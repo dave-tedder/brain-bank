@@ -24,6 +24,7 @@ const PAGE_SIZE = 50;
 
 const TYPE_TOKENS = PROJECT_TYPE_FILTERS.map((f) => f.token);
 const STATUS_TOKENS = PROJECT_STATUS_FILTERS.map((f) => f.token);
+const CLOSED_STATUS_TOKENS = new Set(["done", "archive"]);
 
 function parseTokens(raw: string | undefined, valid: string[]): string[] {
   if (!raw) return [];
@@ -36,6 +37,10 @@ function parseTokens(raw: string | undefined, valid: string[]): string[] {
 function parseOffset(raw: string | undefined): number {
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function hasClosedStatus(statuses: string[]): boolean {
+  return statuses.some((status) => CLOSED_STATUS_TOKENS.has(status));
 }
 
 interface UrlOpts {
@@ -63,7 +68,8 @@ export default async function ProjectsIndexPage({ searchParams }: Props) {
   const selectedStatuses = parseTokens(params.status, STATUS_TOKENS);
   const view = params.view === "grid" ? "grid" : "log";
   const offset = parseOffset(params.offset);
-  const includeArchived = params.include === "archived";
+  const includeArchived =
+    params.include === "archived" || hasClosedStatus(selectedStatuses);
 
   const typeValues = PROJECT_TYPE_FILTERS.filter((f) =>
     selectedTypes.includes(f.token)

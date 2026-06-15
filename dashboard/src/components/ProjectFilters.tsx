@@ -11,6 +11,12 @@ interface Props {
   includeArchived: boolean;
 }
 
+const CLOSED_STATUS_TOKENS = new Set(["done", "archive"]);
+
+function hasClosedStatus(statuses: string[]): boolean {
+  return statuses.some((status) => CLOSED_STATUS_TOKENS.has(status));
+}
+
 /**
  * Pill row for /projects. Multi-select: each pill is a <Link> whose href is
  * the current URL with that pill's token toggled in a comma-separated param
@@ -30,11 +36,12 @@ export default function ProjectFilters({
     statuses: string[],
     archived: boolean
   ): string {
+    const shouldIncludeArchived = archived || hasClosedStatus(statuses);
     const parts: string[] = [];
     if (types.length > 0) parts.push(`type=${types.join(",")}`);
     if (statuses.length > 0) parts.push(`status=${statuses.join(",")}`);
     if (view === "grid") parts.push("view=grid");
-    if (archived) parts.push("include=archived");
+    if (shouldIncludeArchived) parts.push("include=archived");
     return `/projects${parts.length > 0 ? `?${parts.join("&")}` : ""}`;
   }
 

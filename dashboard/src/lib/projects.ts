@@ -72,13 +72,16 @@ export const PROJECT_TYPE_FILTERS: {
 
 export const PROJECT_STATUS_FILTERS: {
   token: string;
-  value: ProjectStatusDerived;
+  value: ProjectStatus;
   label: string;
 }[] = [
   { token: "active", value: "ACTIVE", label: "ACTIVE" },
   { token: "stale", value: "STALE", label: "STALE" },
   { token: "blocker", value: "BLOCKER", label: "BLOCKER" },
   { token: "dormant", value: "DORMANT", label: "DORMANT" },
+  { token: "paused", value: "PAUSED", label: "PAUSED" },
+  { token: "done", value: "DONE", label: "DONE" },
+  { token: "archive", value: "ARCHIVE", label: "ARCHIVE" },
 ];
 
 // Single string literal (not concatenated) so supabase-js can parse the
@@ -88,7 +91,7 @@ const ROLLUP_COLS =
 
 interface ListProjectsOpts {
   type?: string[];
-  status?: string[];
+  status?: ProjectStatus[];
   includeArchived?: boolean;
   limit?: number;
   offset?: number;
