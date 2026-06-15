@@ -70,7 +70,7 @@ export default function ProjectMetadataRail({ project, openActions }: Props) {
 
   return (
     <aside
-      className="space-y-0 lg:sticky lg:top-6 lg:max-h-[calc(100vh-3rem)] lg:overflow-y-auto lg:pr-2"
+      className="space-y-0 pb-24 lg:sticky lg:top-6 lg:max-h-[calc(100vh-8rem)] lg:overflow-y-auto lg:pr-2"
       style={{ fontFamily: "'IBM Plex Mono', monospace" }}
     >
       {hasBlocker && (
@@ -94,7 +94,7 @@ export default function ProjectMetadataRail({ project, openActions }: Props) {
       <div>
         <SectionHeader label="OPEN ACTIONS" count={openActions.length} />
         {hasActions ? (
-          <ul className="space-y-1 text-sm">
+          <ul className="space-y-1 text-sm max-h-64 overflow-y-auto pr-1">
             {openActions.map((a) => (
               <li key={a.id} className="flex items-start gap-2">
                 <span
