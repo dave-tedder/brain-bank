@@ -940,8 +940,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       try {
         // compile-pages-weekly-lint cron (Mondays 09:30 UTC) handles the heavy work.
         // batch=0 makes this a cheap read-only lint results fetch.
-        const lintUrl = `${SUPABASE_URL}/functions/v1/compile-pages?key=${MCP_ACCESS_KEY}&mode=lint&batch=0`;
-        const lintRes = await fetch(lintUrl);
+        const lintUrl = `${SUPABASE_URL}/functions/v1/compile-pages?mode=lint&batch=0`;
+        const lintRes = await fetch(lintUrl, {
+          headers: { "x-brain-key": MCP_ACCESS_KEY },
+        });
         if (lintRes.ok) {
           const lintData = await lintRes.json();
           const lint = lintData.lint;
