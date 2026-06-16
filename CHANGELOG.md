@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Fixed
+
+- **Digest wiki-lint fetches now use header auth instead of URL-param auth.** Weekly `brain-digest` still calls `compile-pages` in cheap read-only lint mode, but it now sends `MCP_ACCESS_KEY` in the `x-brain-key` header instead of appending `?key=...` to the Edge Function URL. This keeps the access key out of Supabase Edge request logs during digest health checks.
+
 ## [0.2.1] - 2026-06-15
 
 ### Fixed
