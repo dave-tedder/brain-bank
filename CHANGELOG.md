@@ -8,6 +8,12 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-17
+
+### Changed
+
+- **Breaking security change: protected endpoints no longer accept URL query-string auth.** `open-brain-mcp`, `brain-digest`, `compile-pages`, and `classify-edges` now require `x-brain-key` for protected non-REST calls. The `open-brain-mcp` REST surface still accepts `Authorization: Bearer` for clients such as ChatGPT Actions. Public Gmail and Calendar Apps Script templates plus deployment and troubleshooting docs now use header or bearer auth. Operators still using `?key=...` URLs must move those consumers to headers before upgrading.
+
 ### Fixed
 
 - **Digest wiki-lint fetches now use header auth instead of URL-param auth.** Weekly `brain-digest` still calls `compile-pages` in cheap read-only lint mode, but it now sends `MCP_ACCESS_KEY` in the `x-brain-key` header instead of appending `?key=...` to the Edge Function URL. This keeps the access key out of Supabase Edge request logs during digest health checks.
