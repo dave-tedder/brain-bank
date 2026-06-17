@@ -1012,7 +1012,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // headroom for the index compile and response serialization.
     const RUN_BUDGET_MS = 70_000;
     const PROBE_CONCURRENCY = 20;
-    const COMPILE_CONCURRENCY = 5;
+    const COMPILE_CONCURRENCY = 3;
     const startTime = Date.now();
 
     let compiled = 0;
@@ -1061,10 +1061,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const candidatesToCompile = candidatePages.slice(0, maxCompilePerRun);
       skipped = candidatePages.length - candidatesToCompile.length;
 
-      // Bounded-parallel compile. With LLM calls ~30s each at concurrency 5,
-      // a 15-page batch finishes in ~3 waves (~90s) instead of 15 × 30 = 450s
-      // serial. Each worker checks the wall budget before its LLM call so a
-      // straggler can't push us into the 150s wall.
+      // Bounded-parallel compile. Keep synthesis concurrency below the common
+      // timed-out catch-up cluster size so one heavy slug group cannot consume
+      // every slow LLM lane at once. Each worker checks the wall budget before
+      // its LLM call so a straggler can't push us into the 150s wall.
       await runWithConcurrency(
         candidatesToCompile,
         COMPILE_CONCURRENCY,
