@@ -923,8 +923,7 @@ async function runLint(
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
-    const provided = req.headers.get("x-brain-key") ||
-      url.searchParams.get("key");
+    const provided = req.headers.get("x-brain-key");
     if (!provided || provided !== MCP_ACCESS_KEY) {
       return new Response("Unauthorized", { status: 401 });
     }

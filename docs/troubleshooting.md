@@ -137,7 +137,7 @@ Symptom: Shortcut runs but no thought appears.
 
 Symptom: `curl -X POST /capture` returns 401 or does not create a row.
 
-- `{"error":"Invalid or missing access key"}` with 401: the `key=` URL param, `x-brain-key` header, or `Authorization: Bearer <key>` header (all three are accepted) does not match `MCP_ACCESS_KEY`. Confirm with `supabase secrets list --project-ref <ref>` and re-check the caller.
+- `{"error":"Invalid or missing access key"}` with 401: the `x-brain-key` header or `Authorization: Bearer <key>` header does not match `MCP_ACCESS_KEY`. Confirm with `supabase secrets list --project-ref <ref>` and re-check the caller. URL query auth is not supported.
 - `{"status":"duplicate","message":"Already in the brain."}` with 200: SHA-256 of the `content` string exactly matches an existing row. This is success, not failure: dedup is working. Slightly change the content to prove the path works.
 - `{"status":"captured","id":"..."}` with 200: it worked. Check `thoughts` by that ID.
 
@@ -146,7 +146,7 @@ Symptom: `curl -X POST /capture` returns 401 or does not create a row.
 Symptom: Claude Desktop or Claude Code `capture_thought` tool silently fails or returns an error.
 
 1. **Claude Desktop: restart required.** If you just added the MCP URL to Settings → Connectors, fully quit and relaunch Claude Desktop. New config isn't read until restart.
-2. **Wrong URL shape.** Desktop URL is `https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp?key=<your-mcp-access-key>`. The `?key=` URL parameter is required for MCP Desktop because the client doesn't send custom headers by default. Heads-up: query-parameter auth gets logged plaintext into Edge Function request logs, so prefer header auth (`x-brain-key: <key>`) for your own curl smoke tests, scheduled jobs, and integration scripts. The `?key=` form is fine for the MCP Desktop URL specifically (it's the only auth path that client supports), but treat the resulting log entries as containing a secret and rotate `MCP_ACCESS_KEY` if you ever share Edge Function log exports.
+2. **Wrong URL shape.** Desktop URL is `https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp`. Use a header-capable MCP bridge such as `mcp-remote` and send `x-brain-key: <key>`. URL query auth is not supported because query parameters are retained in Edge Function request logs.
 3. **406 Not Acceptable.** Some MCP clients don't send `Accept: text/event-stream`. The Edge Function injects the header automatically: if you still see 406, your client is very old. Update to a recent `mcp-remote` or Claude build.
 
 ---

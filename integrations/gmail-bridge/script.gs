@@ -235,9 +235,12 @@ function buildContent(thread) {
 // Send a thought to Brain Bank. Returns true on success.
 // ============================================================
 function captureToBrainBank(content) {
-  var response = UrlFetchApp.fetch(BRAIN_BANK_URL + '?key=' + BRAIN_KEY, {
+  var response = UrlFetchApp.fetch(BRAIN_BANK_URL, {
     method: 'post',
     contentType: 'application/json',
+    headers: {
+      'x-brain-key': BRAIN_KEY
+    },
     payload: JSON.stringify({ content: content, source: 'gmail' }),
     muteHttpExceptions: true,
   });

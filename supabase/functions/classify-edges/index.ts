@@ -15,8 +15,7 @@
 //   ?mode=backfill     - one-time historical pass over all thoughts
 //   ?mode=incremental  - weekly cron over last `since_days` of new captures
 //
-// Auth: x-brain-key header or ?key= matching MCP_ACCESS_KEY (mirrors
-// compile-pages and brain-digest auth patterns).
+// Auth: x-brain-key header.
 //
 // Cost cap: hard worst-case-per-pair budgeting. Function stops scheduling
 // new pairs when costSpent + WORST_PER_PAIR would exceed max_cost_usd.
@@ -299,7 +298,7 @@ async function insertEdge(
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
-    const provided = req.headers.get("x-brain-key") || url.searchParams.get("key");
+    const provided = req.headers.get("x-brain-key");
     if (!provided || provided !== MCP_ACCESS_KEY) {
       return new Response("Unauthorized", { status: 401 });
     }

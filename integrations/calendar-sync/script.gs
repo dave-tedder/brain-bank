@@ -161,9 +161,12 @@ function captureAndSync() {
     };
 
     try {
-      var resp = UrlFetchApp.fetch(BRAIN_BANK_BASE + '/event?key=' + BRAIN_KEY, {
+      var resp = UrlFetchApp.fetch(BRAIN_BANK_BASE + '/event', {
         method: 'post',
         contentType: 'application/json',
+        headers: {
+          'x-brain-key': BRAIN_KEY
+        },
         payload: JSON.stringify(payload),
         muteHttpExceptions: true
       });
@@ -201,9 +204,12 @@ function captureAndSync() {
   var content = '[Calendar Sync] Schedule for the next ' + SYNC_WINDOW_DAYS + ' days:\n' + lines.join('\n');
 
   try {
-    var captureResp = UrlFetchApp.fetch(BRAIN_BANK_BASE + '/capture?key=' + BRAIN_KEY, {
+    var captureResp = UrlFetchApp.fetch(BRAIN_BANK_BASE + '/capture', {
       method: 'post',
       contentType: 'application/json',
+      headers: {
+        'x-brain-key': BRAIN_KEY
+      },
       payload: JSON.stringify({ content: content, source: 'gcal' }),
       muteHttpExceptions: true
     });

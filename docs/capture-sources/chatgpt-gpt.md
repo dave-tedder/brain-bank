@@ -133,7 +133,7 @@ Click **Save**.
 - "API Key is required" on save: the key field was empty. Re-paste and click Save again.
 - Actions still fail on Test with 401: the key you pasted does not match your `MCP_ACCESS_KEY` in Supabase. Re-copy from `.env`, re-paste, save. If the issue persists, verify the key pushed to Supabase matches the one in `.env` with `supabase secrets list --project-ref <ref>` (note: the CLI shows a digest, not the plaintext value; compare digests if both ends are the same key).
 
-**Why this matters:** Brain Bank's REST API accepts the same access key in three places (`x-brain-key` header, `Authorization: Bearer`, or `?key=` URL param) and any one of them works. ChatGPT Custom GPTs only support the two auth types ChatGPT exposes (`API Key` with a Bearer or custom-header mode), so Bearer is the path to use here.
+**Why this matters:** Brain Bank's REST API accepts the same access key via `x-brain-key` or `Authorization: Bearer`. ChatGPT Custom GPTs only support the two auth types ChatGPT exposes (`API Key` with a Bearer or custom-header mode), so Bearer is the path to use here.
 
 ---
 

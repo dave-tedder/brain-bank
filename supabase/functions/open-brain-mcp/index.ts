@@ -2302,7 +2302,7 @@ async function handleRestPages(url: URL): Promise<Response> {
 const app = new Hono();
 
 app.all("*", async (c) => {
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
+  const provided = c.req.header("x-brain-key");
   if (!provided || provided !== MCP_ACCESS_KEY) {
     return c.json({ error: "Invalid or missing access key" }, 401);
   }
@@ -2324,10 +2324,10 @@ Deno.serve(async (req: Request) => {
     if (req.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
-    // Accept auth via: x-brain-key header, Authorization Bearer, or key URL param
+    // Accept auth via x-brain-key header or Authorization Bearer.
     const authHeader = req.headers.get("authorization") || "";
     const bearerKey = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-    const provided = req.headers.get("x-brain-key") || bearerKey || url.searchParams.get("key");
+    const provided = req.headers.get("x-brain-key") || bearerKey;
     if (!provided || provided !== MCP_ACCESS_KEY) {
       return jsonResponse({ error: "Invalid or missing access key" }, 401);
     }
