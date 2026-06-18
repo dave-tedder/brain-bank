@@ -8,6 +8,7 @@ import { createClient } from "@supabase/supabase-js";
 import { loadProfile } from "../_shared/profile.ts";
 import {
   coerceMetadata,
+  isOperationCommandCapture,
   loadKnownSlugs,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
@@ -263,6 +264,10 @@ async function extractAndStoreActionItems(
   // Observations, references, and email-sourced captures are descriptive,
   // not commitment-shaped, so they must not create open action items.
   if (!shouldExtractActionItems(metadata)) return;
+
+  if (isOperationCommandCapture(content, String(metadata?.source ?? ""))) {
+    return;
+  }
 
   // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
   // threads, weekly reviews) are observation-shaped, not commitment-shaped. The

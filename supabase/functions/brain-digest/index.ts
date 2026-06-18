@@ -3,6 +3,10 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { loadProfile } from "../_shared/profile.ts";
 import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import {
+  DigestActionRow,
+  renderOpenActionChecklist,
+} from "./action-checklist.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -122,24 +126,16 @@ async function synthesizeDigest(
   const ACTION_ITEM_DIGEST_CAP = 40;
   const { data: openActions, count: openActionsTotal } = await supabase
     .from("action_items")
-    .select("description, created_at", { count: "exact" })
+    .select("id, description, created_at", { count: "exact" })
     .eq("status", "open")
     .order("created_at", { ascending: false })
     .limit(ACTION_ITEM_DIGEST_CAP);
 
-  let actionItemsText: string;
-  if (openActions && openActions.length > 0) {
-    actionItemsText = openActions.map((a) => a.description).join("; ");
-    const total = openActionsTotal ?? openActions.length;
-    if (total > openActions.length) {
-      actionItemsText += ` (+${total - openActions.length} more open)`;
-    }
-  } else {
-    actionItemsText = "none";
-  }
+  const openActionRows = (openActions ?? []) as DigestActionRow[];
+  const openActionTotal = openActionsTotal ?? openActionRows.length;
 
   const structuredLines = [
-    `Open action items (verified, not yet resolved): ${actionItemsText}`,
+    `Open action item count: ${openActionTotal}`,
     `Top topics: ${Object.entries(topicCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([t, c]) => `${t} (${c})`).join(", ") || "none"}`,
     `People mentioned: ${Object.entries(peopleCounts).sort((a, b) => b[1] - a[1]).map(([p, c]) => `${p} (${c})`).join(", ") || "none"}`,
   ];
@@ -219,7 +215,7 @@ async function synthesizeDigest(
 5. If there are approaching deadlines (from the structured data), call them out clearly with dates
 6. If there are stale action items (open 7+ days), flag them with how old they are. These need attention or should be closed.
 7. If there are upcoming events or sessions, mention what's coming up and anything he should prepare for
-8. All open action items that still need attention (as a checklist). These are pre-verified as genuinely open, so list them all.
+8. Do not write an open-action checklist. A deterministic checklist will be appended after your synthesis from exact database rows.
 
 Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Write like a knowledgeable friend giving a weekly recap.`
       : `You are a personal knowledge assistant generating a daily morning briefing for ${loadProfile().persona.digest}. Today is ${todayDate}. This digest is delivered first thing in the morning. The thoughts below are from YESTERDAY (the previous 24 hours), not today. Frame everything in past tense referring to yesterday, not "today."
@@ -232,7 +228,7 @@ Review all thoughts captured yesterday, plus any business context provided (upco
 4. IMPORTANT: Do NOT present events from future dates as today's appointments. Events labeled "LATER THIS WEEK" are NOT today. Only events explicitly labeled "TODAY" are today's appointments.
 5. List ALL upcoming ${loadProfile().domain.plural_noun} and consultations later this week individually, with client name, date, and what the session is. Do NOT collapse individual appointments into broader events (e.g., a multi-day event does not replace listing individual ${loadProfile().domain.plural_noun} happening during that span)
 6. If there are related Notion intake submissions for today's clients, mention any relevant details
-7. Open action items that still need attention (as a short checklist, only if any exist). These are pre-verified as genuinely open, so list them all.
+7. Do not write an open-action checklist. A deterministic checklist will be appended after your synthesis from exact database rows.
 
 Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Keep it under 300 words.`;
 
@@ -249,7 +245,9 @@ Be direct and conversational. No corporate language. No words like "delve", "tap
     ],
   });
 
-  return (data.choices?.[0]?.message?.content ?? "").trim();
+  const synthesized = (data.choices?.[0]?.message?.content ?? "").trim();
+  const checklist = renderOpenActionChecklist(openActionRows, openActionTotal);
+  return [synthesized, checklist].filter(Boolean).join("\n\n");
 }
 
 // --- Previous Week Context (week-over-week comparison) ---

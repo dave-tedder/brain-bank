@@ -78,6 +78,28 @@ export function shouldExtractActionItems(metadata: RawMetadata): boolean {
   return true;
 }
 
+// Operation commands sent through automation channels tell downstream systems
+// to create/update business records. They are captures, not operator todos.
+// Keep this narrower than MECHANICAL_CAPTURE_PREFIXES so auto-resolve LAYER 0
+// stays intact.
+export function isOperationCommandCapture(
+  content: string,
+  source?: string,
+): boolean {
+  if (String(source ?? "").toLowerCase() !== "brain-channel") return false;
+
+  const text = content.trim().replace(/\s+/g, " ");
+  if (!text) return false;
+
+  return [
+    /^new\s+client\b/i,
+    /^new\s+project\b/i,
+    /^add\s+appointment\b/i,
+    /^add\s+project\b/i,
+    /^reschedule\b.*\bsame\s+times?\b/i,
+  ].some((pattern) => pattern.test(text));
+}
+
 // B3: cache the known projects.slug Set at module scope with a TTL.
 // Lazy-loaded on first call past TTL. Falls back to last-good Set on
 // transient DB error; cold-start error returns empty Set (fail safe -
