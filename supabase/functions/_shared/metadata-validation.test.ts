@@ -5,6 +5,7 @@ import {
   _resetSlugCacheForTests,
   coerceMetadata,
   coerceType,
+  isOperationCommandCapture,
   loadKnownSlugs,
   normalizeTopic,
   recombineHyphenated,
@@ -103,6 +104,58 @@ Deno.test("shouldExtractActionItems: case-insensitive on both", () => {
 Deno.test("shouldExtractActionItems: missing metadata fields -> fail open (true)", () => {
   assertEquals(shouldExtractActionItems({}), true);
   assertEquals(shouldExtractActionItems({ type: "task" }), true);
+});
+
+Deno.test("isOperationCommandCapture: suppresses brain-channel record commands", () => {
+  assertEquals(
+    isOperationCommandCapture(
+      "New client Jane Doe, add project and appointment",
+      "brain-channel",
+    ),
+    true,
+  );
+  assertEquals(
+    isOperationCommandCapture(
+      "New project Sam Smith - migration rollout",
+      "brain-channel",
+    ),
+    true,
+  );
+  assertEquals(
+    isOperationCommandCapture(
+      "Add appointment Alex Johnson July 5 at 10am for consultation",
+      "brain-channel",
+    ),
+    true,
+  );
+  assertEquals(
+    isOperationCommandCapture(
+      "Reschedule Taylor Morgan same times next week",
+      "brain-channel",
+    ),
+    true,
+  );
+});
+
+Deno.test("isOperationCommandCapture: normal todos still permit extraction", () => {
+  assertEquals(
+    isOperationCommandCapture(
+      "Need to send the deployment report before Friday",
+      "brain-channel",
+    ),
+    false,
+  );
+});
+
+Deno.test("isOperationCommandCapture: only applies to brain-channel source", () => {
+  assertEquals(
+    isOperationCommandCapture(
+      "New client Jane Doe, add project and appointment",
+      "slack",
+    ),
+    false,
+  );
+  assertEquals(isOperationCommandCapture("New client Jane Doe"), false);
 });
 
 Deno.test("recombineHyphenated: split pair recombines when slug known + literal hit", () => {

@@ -5,12 +5,14 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  addDryRunExternalCompletionSignals,
   bucketize,
   csv,
   DEFAULT_DONE_STATUSES,
   DEFAULT_PROTECTED_PHRASES,
   DEFAULT_WORK_ITEM_SHAPE_TERMS,
   mergeMiddle,
+  normalizeEvidenceText,
   projectNameFromDisplay,
   renderReport,
   runCascade,
@@ -104,17 +106,48 @@ async function notionStatuses() {
 function projectFromRow(row, statuses) {
   const displayName = row.display_name || '';
   const aliases = PROJECT_ALIASES[displayName] || [];
+  const matchTerms = [...new Set([projectNameFromDisplay(displayName), displayName, ...aliases].filter(Boolean))];
   return {
     displayName,
-    matchTerms: [...new Set([projectNameFromDisplay(displayName), displayName, ...aliases].filter(Boolean))],
+    matchTerms,
+    matchTermsNorm: matchTerms.map(normalizeEvidenceText).filter(Boolean),
     status: statuses.get(row.notion_page_id?.replace(/-/g, '')) || row.status || '',
   };
+}
+
+async function loadBusinessEvents() {
+  try {
+    const rows = await supabase('business_events?select=title,date_start,attendees&order=date_start.desc&limit=500');
+    return rows.map((row) => ({
+      title: row.title || '',
+      titleNorm: normalizeEvidenceText(row.title),
+      date_start: row.date_start || null,
+      attendeesNorm: Array.isArray(row.attendees) ? row.attendees.map(normalizeEvidenceText).filter(Boolean) : [],
+    }));
+  } catch (error) {
+    console.warn('business_events unavailable; external event evidence skipped: ' + error.message.slice(0, 120));
+    return [];
+  }
 }
 
 async function loadInput() {
   if (FIXTURE_FILE) {
     const fixture = JSON.parse(readFileSync(resolve(FIXTURE_FILE), 'utf8'));
     const now = Date.now();
+    const projects = fixture.projects || [];
+    const externalEvidence = fixture.externalEvidence || {
+      projects: projects.map((project) => ({
+        ...project,
+        matchTermsNorm: (project.matchTerms || [projectNameFromDisplay(project.displayName), project.displayName])
+          .filter(Boolean)
+          .map(normalizeEvidenceText),
+      })),
+      events: (fixture.events || []).map((event) => ({
+        ...event,
+        titleNorm: normalizeEvidenceText(event.title),
+        attendeesNorm: (event.attendees || []).map(normalizeEvidenceText).filter(Boolean),
+      })),
+    };
     return {
       items: (fixture.items || []).map((item) => ({
         age_days: item.age_days ?? Math.max(0, Math.floor((now - new Date(item.created_at).getTime()) / 86400000)),
@@ -122,7 +155,8 @@ async function loadInput() {
         type: item.type || 'unknown',
         ...item,
       })),
-      projects: fixture.projects || [],
+      projects,
+      externalEvidence,
       offline: true,
     };
   }
@@ -134,6 +168,8 @@ async function loadInput() {
   );
   const projectRows = await supabase('projects?select=display_name,notion_page_id,status');
   const statuses = await notionStatuses();
+  const projects = projectRows.map((row) => projectFromRow(row, statuses));
+  const events = await loadBusinessEvents();
   const now = Date.now();
   return {
     items: rows.map((row) => ({
@@ -145,7 +181,8 @@ async function loadInput() {
       type: row.thoughts?.metadata?.type || '(unknown)',
       preview: (row.thoughts?.content || '').slice(0, 160).replace(/\s+/g, ' '),
     })),
-    projects: projectRows.map((row) => projectFromRow(row, statuses)),
+    projects,
+    externalEvidence: { projects, events },
     offline: false,
   };
 }
@@ -222,7 +259,7 @@ async function applyStatus(status, items) {
 }
 
 async function main() {
-  const { items, projects, offline } = await loadInput();
+  const { items, projects, externalEvidence, offline } = await loadInput();
   const { decided: deterministic, middle } = runCascade({
     items,
     projects,
@@ -242,7 +279,10 @@ async function main() {
     console.error('No optional OpenRouter credentials; wrote classification input to ' + inputPath);
   }
 
-  const decided = mergeMiddle(deterministic, middle, middleDecisions);
+  let decided = mergeMiddle(deterministic, middle, middleDecisions);
+  if (!APPLY) {
+    decided = addDryRunExternalCompletionSignals(decided, items, externalEvidence).decided;
+  }
   const buckets = bucketize(items, decided);
   const counts = Object.fromEntries(Object.entries(buckets).map(([key, value]) => [key, value.length]));
   writeFileSync(join(OUT_DIR, 'triage-report-' + STAMP + '.md'), renderReport(STAMP, counts, buckets));

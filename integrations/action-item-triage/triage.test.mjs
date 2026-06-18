@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  addDryRunExternalCompletionSignals,
   bucketize,
   csv,
+  externalCompletionEvidenceForItem,
+  isOperationCommandText,
   mergeMiddle,
+  normalizeEvidenceText,
   normalizeForDedup,
   projectNameFromDisplay,
   renderReport,
@@ -20,6 +24,98 @@ test('normalizeForDedup collapses task prefixes and articles', () => {
     normalizeForDedup('TODO: Rewrite the deployment guide'),
     normalizeForDedup('need to rewrite deployment guide'),
   );
+});
+
+test('normalizeEvidenceText prepares conservative source-of-truth matching', () => {
+  assert.equal(normalizeEvidenceText('Acme Launch, Inc.'), 'acme launch inc');
+});
+
+test('isOperationCommandText detects only supported operation commands', () => {
+  assert.equal(isOperationCommandText('Add appointment Acme Launch kickoff'), true);
+  assert.equal(isOperationCommandText('New project Sam Smith migration'), true);
+  assert.equal(isOperationCommandText('Consider adding a better report'), false);
+});
+
+test('external completion evidence requires a brain-channel operation command', () => {
+  const evidence = {
+    projects: [{ displayName: 'Acme Launch', matchTermsNorm: ['acme launch'] }],
+    events: [],
+  };
+  assert.equal(
+    externalCompletionEvidenceForItem(
+      {
+        id: 'x',
+        source: 'brain-channel',
+        description: 'Add appointment Acme Launch kickoff',
+        preview: 'Add appointment Acme Launch kickoff for next week',
+      },
+      evidence,
+    ),
+    'external-command-completed dry-run only: matching project "Acme Launch"',
+  );
+  assert.equal(
+    externalCompletionEvidenceForItem(
+      {
+        id: 'x',
+        source: 'manual',
+        description: 'Add appointment Acme Launch kickoff',
+        preview: 'Add appointment Acme Launch kickoff for next week',
+      },
+      evidence,
+    ),
+    null,
+  );
+});
+
+test('external completion evidence can match mirrored event titles and attendees', () => {
+  const evidence = {
+    projects: [],
+    events: [{
+      title: 'Acme Launch kickoff',
+      titleNorm: 'acme launch kickoff',
+      attendeesNorm: ['jane doe'],
+    }],
+  };
+  assert.match(
+    externalCompletionEvidenceForItem(
+      {
+        id: 'x',
+        source: 'brain-channel',
+        description: 'Add appointment Acme Launch kickoff',
+        preview: 'Add appointment Acme Launch kickoff',
+      },
+      evidence,
+    ),
+    /matching event/,
+  );
+  assert.match(
+    externalCompletionEvidenceForItem(
+      {
+        id: 'y',
+        source: 'brain-channel',
+        description: 'Add appointment Jane Doe check-in',
+        preview: 'Add appointment Jane Doe check-in',
+      },
+      evidence,
+    ),
+    /matching event attendee/,
+  );
+});
+
+test('dry-run external completion signals are review-only overlays', () => {
+  const decided = { a: { bucket: 'PENDING', reason: 'awaiting classification' } };
+  const { decided: withSignals, matches } = addDryRunExternalCompletionSignals(
+    decided,
+    [{
+      id: 'a',
+      source: 'brain-channel',
+      description: 'New project Acme Launch rollout',
+      preview: 'New project Acme Launch rollout',
+    }],
+    { projects: [{ displayName: 'Acme Launch', matchTermsNorm: ['acme launch'] }], events: [] },
+  );
+  assert.equal(withSignals.a.bucket, 'REVIEW');
+  assert.equal(matches.length, 1);
 });
 
 test('protected items win before project matching and deduplication', () => {
