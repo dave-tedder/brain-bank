@@ -36,6 +36,8 @@ node triage.mjs --apply --decisions=out/decisions.json
 
 Without `OPENROUTER_API_KEY`, ambiguous items remain pending and are written to `out/triage-classify-input-<date>.json`. Review the generated report before any apply run.
 
+Dry-run reports can mark command-derived rows with `external-command-completed dry-run only` when a `brain-channel` operation command has conservative evidence in `projects` or mirrored `business_events`. Those rows stay in `REVIEW`, and `--apply` ignores the signal. Resolve them only after exact action item IDs are approved in a separate live-write pass.
+
 For an offline verification with synthetic data:
 
 ```bash

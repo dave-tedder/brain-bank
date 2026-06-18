@@ -31,6 +31,63 @@ export function normalizeForDedup(description) {
     .replace(/\s+/g, ' ');
 }
 
+export function normalizeEvidenceText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+export function isOperationCommandText(value) {
+  const text = String(value || '').trim().replace(/\s+/g, ' ');
+  return [
+    /^new\s+(client|customer|project)\b/i,
+    /^add\s+(appointment|event|project|task)\b/i,
+    /^reschedule\b.*\bsame\s+times?\b/i,
+  ].some((pattern) => pattern.test(text));
+}
+
+export function externalCompletionEvidenceForItem(item, evidence = {}) {
+  if (item.source !== 'brain-channel') return null;
+  if (!isOperationCommandText(`${item.preview || ''} ${item.description || ''}`)) return null;
+
+  const haystack = normalizeEvidenceText(`${item.description || ''} ${item.preview || ''}`);
+  if (!haystack) return null;
+
+  for (const project of evidence.projects || []) {
+    const terms = project.matchTermsNorm?.length
+      ? project.matchTermsNorm
+      : [normalizeEvidenceText(project.displayName)];
+    if (terms.some((term) => term && term.length >= 4 && haystack.includes(term))) {
+      return `external-command-completed dry-run only: matching project "${project.displayName}"`;
+    }
+  }
+
+  for (const event of evidence.events || []) {
+    if (event.titleNorm && event.titleNorm.length >= 4 && haystack.includes(event.titleNorm)) {
+      return `external-command-completed dry-run only: matching event "${event.title}"`;
+    }
+    if ((event.attendeesNorm || []).some((attendee) => attendee && attendee.length >= 4 && haystack.includes(attendee))) {
+      return `external-command-completed dry-run only: matching event attendee for "${event.title}"`;
+    }
+  }
+
+  return null;
+}
+
+export function addDryRunExternalCompletionSignals(decided, items, evidence = {}) {
+  const output = { ...decided };
+  const matches = [];
+  for (const item of items) {
+    const reason = externalCompletionEvidenceForItem(item, evidence);
+    if (!reason) continue;
+    output[item.id] = { bucket: 'REVIEW', reason };
+    matches.push({ id: item.id, reason });
+  }
+  return { decided: output, matches };
+}
+
 function containsTerm(value, terms) {
   const lower = (value || '').toLowerCase();
   return terms.some((term) => term && lower.includes(String(term).toLowerCase()));
