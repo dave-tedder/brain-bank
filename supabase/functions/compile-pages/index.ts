@@ -1,5 +1,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  buildCompilePromptDiagnostics,
+  type CompilePromptDiagnostics,
+  selectCompileThoughts,
+} from "./_intake.ts";
 import { applyEdits, parseEditsXml } from "./_section_merge.ts";
 import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
@@ -22,12 +27,14 @@ declare const EdgeRuntime: {
 const AUTO_CREATE_THRESHOLD = 5;
 
 // Pages with NULL or stale last_compiled watermarks can have deep backlog.
-// Even in edit mode, integrating that volume can blow past
-// LLM_CALL_TIMEOUT_MS. Cap intake to a small bounded window during catch-up;
-// the watermark advances to the newest processed thought's created_at so the
-// next cron run picks up the next slice. Convergence: pageN_backlog /
-// CATCHUP_THOUGHT_LIMIT cron runs to fully catch up, each well under 60s.
-const CATCHUP_THOUGHT_LIMIT = 8;
+// Fetch an over-sample in chronological order, then cap the source material by
+// characters so one huge backlog slice cannot repeatedly time out synthesis.
+// The watermark advances only after a successful write to the newest selected
+// thought's created_at, so failed slices stay queued for the next cron run.
+const CATCHUP_FETCH_LIMIT = 50;
+const CATCHUP_THOUGHT_LIMIT = 25;
+const CATCHUP_SOURCE_CHAR_LIMIT = 18_000;
+const COMPILE_PROMPT_CHAR_LIMIT = 120_000;
 const STEADY_THOUGHT_LIMIT = 50;
 const CATCHUP_RECENCY_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
 
@@ -329,18 +336,23 @@ async function compilePage(
   allPageSlugs: string[],
   compileModel: string = DEFAULT_COMPILE_MODEL,
   targetedIntakeLimit?: number,
-): Promise<{ updated: boolean; error?: string }> {
+): Promise<{
+  updated: boolean;
+  error?: string;
+  diagnostics?: CompilePromptDiagnostics;
+}> {
+  let promptDiagnostics: CompilePromptDiagnostics | undefined;
   try {
     // Find new thoughts since last compilation. Missing or stale watermarks
-    // are catch-up runs; bound intake to CATCHUP_THOUGHT_LIMIT so backlog
-    // slices finish under LLM_CALL_TIMEOUT_MS. The successful-path update
-    // below advances last_compiled to the newest fetched thought's created_at
-    // (not now()), so each run chips off another slice until the watermark
-    // catches up to the present.
+    // are catch-up runs; fetch an over-sample and then select a bounded
+    // source slice locally. The successful-path update below advances
+    // last_compiled to the newest selected thought's created_at (not now()).
     const isCatchup = shouldUseCatchupLimit(page.last_compiled);
-    const intakeLimit = targetedIntakeLimit ?? (isCatchup
-      ? CATCHUP_THOUGHT_LIMIT
-      : STEADY_THOUGHT_LIMIT);
+    const selectionIsCatchup = isCatchup && targetedIntakeLimit === undefined;
+    const selectedThoughtLimit = targetedIntakeLimit ??
+      (isCatchup ? CATCHUP_THOUGHT_LIMIT : STEADY_THOUGHT_LIMIT);
+    const fetchLimit = targetedIntakeLimit ??
+      (isCatchup ? CATCHUP_FETCH_LIMIT : STEADY_THOUGHT_LIMIT);
     const since = page.last_compiled || "2020-01-01T00:00:00Z";
     let newThoughts: Array<{
       id: string;
@@ -355,7 +367,7 @@ async function compilePage(
       const result = await supabase.rpc("get_project_page_thoughts", {
         p_slug: pageSlugToProjectSlug(page.slug),
         p_since: since,
-        p_limit: intakeLimit,
+        p_limit: fetchLimit,
         p_ascending: true,
       });
       newThoughts = result.data;
@@ -384,13 +396,19 @@ async function compilePage(
         });
       }
 
-      const result = await thoughtQuery.limit(intakeLimit);
+      const result = await thoughtQuery.limit(fetchLimit);
       newThoughts = result.data;
       qErr = result.error;
     }
 
     if (qErr) return { updated: false, error: qErr.message };
     if (!newThoughts || newThoughts.length === 0) return { updated: false };
+    newThoughts = selectCompileThoughts(newThoughts, {
+      catchup: selectionIsCatchup,
+      maxCount: selectedThoughtLimit,
+      maxChars: CATCHUP_SOURCE_CHAR_LIMIT,
+    });
+    if (newThoughts.length === 0) return { updated: false };
 
     // For client pages, also pull session history and events
     let supplementalContext = "";
@@ -549,6 +567,25 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
       : `Current page content:\n\n${page.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`;
 
+    promptDiagnostics = buildCompilePromptDiagnostics({
+      isCatchup: selectionIsCatchup,
+      thoughts: newThoughts,
+      pageContent: page.content ?? "",
+      userContent,
+      systemPrompt,
+      backlinkList,
+    });
+
+    if (userContent.length + systemPrompt.length > COMPILE_PROMPT_CHAR_LIMIT) {
+      return {
+        updated: false,
+        error: `compile prompt over budget: ${
+          userContent.length + systemPrompt.length
+        } chars > ${COMPILE_PROMPT_CHAR_LIMIT}`,
+        diagnostics: promptDiagnostics,
+      };
+    }
+
     const result = await llmCall("compile_entity_page", systemPrompt, userContent, {
       model: compileModel,
     });
@@ -580,6 +617,7 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
           updated: false,
           error:
             "edit-mode response contained no valid <section> edits; will retry next run",
+          diagnostics: promptDiagnostics,
         };
       }
       cleanContent = applyEdits(page.content, edits);
@@ -635,10 +673,20 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       })
       .eq("id", page.id);
 
-    if (updateErr) return { updated: false, error: updateErr.message };
+    if (updateErr) {
+      return {
+        updated: false,
+        error: updateErr.message,
+        diagnostics: promptDiagnostics,
+      };
+    }
     return { updated: true };
   } catch (err) {
-    return { updated: false, error: (err as Error).message };
+    return {
+      updated: false,
+      error: (err as Error).message,
+      diagnostics: promptDiagnostics,
+    };
   }
 }
 
@@ -1018,7 +1066,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
     let compiled = 0;
     let skipped = 0;
     let errors = 0;
-    const errored: { slug: string; error: string }[] = [];
+    const errored: Array<{
+      slug: string;
+      error: string;
+      diagnostics?: CompilePromptDiagnostics;
+    }> = [];
     let budgetExhausted = false;
     const compiledSlugs: string[] = [];
 
@@ -1085,7 +1137,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
           } else if (result.error) {
             console.error(`Compile error for ${page.slug}: ${result.error}`);
             errors++;
-            errored.push({ slug: page.slug, error: result.error });
+            errored.push({
+              slug: page.slug,
+              error: result.error,
+              ...(result.diagnostics
+                ? { diagnostics: result.diagnostics }
+                : {}),
+            });
           }
           // If not updated and no error, page had no new thoughts (rare
           // after the pre-filter, but possible if a thought is deleted
