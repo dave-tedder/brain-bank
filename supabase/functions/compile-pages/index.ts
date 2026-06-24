@@ -1,7 +1,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
+  applyCatchupPromptFallback,
   buildCompilePromptDiagnostics,
+  type CompileSelectionMode,
   type CompilePromptDiagnostics,
   selectCompileThoughts,
 } from "./_intake.ts";
@@ -34,6 +36,10 @@ const AUTO_CREATE_THRESHOLD = 5;
 const CATCHUP_FETCH_LIMIT = 50;
 const CATCHUP_THOUGHT_LIMIT = 25;
 const CATCHUP_SOURCE_CHAR_LIMIT = 18_000;
+const SOFT_COMPILE_PROMPT_CHAR_LIMIT = 24_000;
+const FALLBACK_CATCHUP_THOUGHT_LIMIT = 1;
+const FALLBACK_CATCHUP_SOURCE_CHAR_LIMIT = 4_000;
+const NO_H2_CATCHUP_THOUGHT_LIMIT = 1;
 const COMPILE_PROMPT_CHAR_LIMIT = 120_000;
 const STEADY_THOUGHT_LIMIT = 50;
 const CATCHUP_RECENCY_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
@@ -403,6 +409,16 @@ async function compilePage(
 
     if (qErr) return { updated: false, error: qErr.message };
     if (!newThoughts || newThoughts.length === 0) return { updated: false };
+    const fetchedThoughts = newThoughts;
+    let selectionMode: CompileSelectionMode = targetedIntakeLimit !== undefined
+      ? "targeted"
+      : selectionIsCatchup
+      ? "catchup"
+      : "steady";
+    let activeThoughtLimit = selectedThoughtLimit;
+    let activeSourceCharLimit = selectionIsCatchup
+      ? CATCHUP_SOURCE_CHAR_LIMIT
+      : Number.MAX_SAFE_INTEGER;
     newThoughts = selectCompileThoughts(newThoughts, {
       catchup: selectionIsCatchup,
       maxCount: selectedThoughtLimit,
@@ -464,12 +480,21 @@ async function compilePage(
     // Build the new thoughts text. Embed the thought UUID so the LLM can echo
     // it back in SOURCE_THOUGHTS: at the end. The (id: <uuid>) prefix is
     // adjacent to the index marker so the LLM doesn't drop or truncate it.
-    const newThoughtsText = newThoughts.map((t, i) => {
-      const date = new Date(t.created_at).toLocaleDateString();
-      const m = t.metadata || {};
-      const type = (m.type as string) || "";
-      return `[${i + 1}] (id: ${t.id}, ${date}, ${type}) ${t.content}`;
-    }).join("\n\n");
+    const buildNewThoughtsText = (
+      thoughts: Array<{
+        id: string;
+        content: string;
+        metadata: Record<string, unknown> | null;
+        created_at: string;
+      }>,
+    ) =>
+      thoughts.map((t, i) => {
+        const date = new Date(t.created_at).toLocaleDateString();
+        const m = t.metadata || {};
+        const type = (m.type as string) || "";
+        return `[${i + 1}] (id: ${t.id}, ${date}, ${type}) ${t.content}`;
+      }).join("\n\n");
+    let newThoughtsText = buildNewThoughtsText(newThoughts);
 
     // Available pages for backlink detection
     const otherSlugs = allPageSlugs.filter((s) => s !== page.slug);
@@ -563,7 +588,7 @@ On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separ
 Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
     }
 
-    const userContent = isNewPage
+    let userContent = isNewPage
       ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
       : `Current page content:\n\n${page.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`;
 
@@ -574,7 +599,54 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       userContent,
       systemPrompt,
       backlinkList,
+      selectionMode,
+      thoughtLimit: activeThoughtLimit,
+      sourceCharLimit: activeSourceCharLimit,
+      isNewPage,
+      hasH2,
+      useEditMode,
     });
+
+    const fallback = applyCatchupPromptFallback(newThoughts, {
+      originalThoughts: fetchedThoughts,
+      selectionMode,
+      promptChars: promptDiagnostics.prompt_chars,
+      softPromptCharLimit: SOFT_COMPILE_PROMPT_CHAR_LIMIT,
+      fallbackThoughtLimit: FALLBACK_CATCHUP_THOUGHT_LIMIT,
+      fallbackSourceCharLimit: FALLBACK_CATCHUP_SOURCE_CHAR_LIMIT,
+      noH2ThoughtLimit: NO_H2_CATCHUP_THOUGHT_LIMIT,
+      hasH2,
+      isNewPage,
+    });
+    if (fallback.fallbackApplied) {
+      newThoughts = fallback.thoughts;
+      selectionMode = fallback.selectionMode;
+      activeThoughtLimit = fallback.thoughtLimit ?? activeThoughtLimit;
+      activeSourceCharLimit = fallback.sourceCharLimit ?? activeSourceCharLimit;
+      newThoughtsText = buildNewThoughtsText(newThoughts);
+      userContent = isNewPage
+        ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
+        : `Current page content:\n\n${page.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`;
+      promptDiagnostics = buildCompilePromptDiagnostics({
+        isCatchup: selectionIsCatchup,
+        thoughts: newThoughts,
+        pageContent: page.content ?? "",
+        userContent,
+        systemPrompt,
+        backlinkList,
+        selectionMode,
+        thoughtLimit: activeThoughtLimit,
+        sourceCharLimit: activeSourceCharLimit,
+        fallbackApplied: true,
+        fallbackReason: fallback.fallbackReason,
+        initialThoughtCount: fallback.initialThoughtCount,
+        initialThoughtChars: fallback.initialThoughtChars,
+        initialPromptChars: fallback.initialPromptChars,
+        isNewPage,
+        hasH2,
+        useEditMode,
+      });
+    }
 
     if (userContent.length + systemPrompt.length > COMPILE_PROMPT_CHAR_LIMIT) {
       return {
@@ -680,7 +752,12 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
         diagnostics: promptDiagnostics,
       };
     }
-    return { updated: true };
+    return {
+      updated: true,
+      ...(promptDiagnostics?.fallback_applied
+        ? { diagnostics: promptDiagnostics }
+        : {}),
+    };
   } catch (err) {
     return {
       updated: false,
@@ -1071,6 +1148,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       error: string;
       diagnostics?: CompilePromptDiagnostics;
     }> = [];
+    const compiledDiagnostics: Array<{
+      slug: string;
+      diagnostics: CompilePromptDiagnostics;
+    }> = [];
     let budgetExhausted = false;
     const compiledSlugs: string[] = [];
 
@@ -1134,6 +1215,12 @@ Deno.serve(async (req: Request): Promise<Response> => {
           if (result.updated) {
             compiled++;
             compiledSlugs.push(page.slug);
+            if (result.diagnostics?.fallback_applied) {
+              compiledDiagnostics.push({
+                slug: page.slug,
+                diagnostics: result.diagnostics,
+              });
+            }
           } else if (result.error) {
             console.error(`Compile error for ${page.slug}: ${result.error}`);
             errors++;
@@ -1237,6 +1324,9 @@ Deno.serve(async (req: Request): Promise<Response> => {
       index_compiled: indexCompiled,
       index_mode: indexMode,
     };
+    if (compiledDiagnostics.length > 0) {
+      response.compiled_diagnostics = compiledDiagnostics;
+    }
     if (indexSkippedReason) response.index_skipped_reason = indexSkippedReason;
     if (lint) response.lint = lint;
 
@@ -1261,6 +1351,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
         index_compiled: indexCompiled,
         index_skipped_reason: indexSkippedReason ?? null,
         compiled_slugs: compiledSlugs,
+        compiled_diagnostics: compiledDiagnostics,
         errored,
         status: "complete",
         error_message: null,
