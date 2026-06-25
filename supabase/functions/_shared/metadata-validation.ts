@@ -78,6 +78,19 @@ export function shouldExtractActionItems(metadata: RawMetadata): boolean {
   return true;
 }
 
+const RESCHEDULE_DATE_HINT_RE =
+  /\b(?:today|tomorrow|tonight|this\s+(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)|next\s+(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/i;
+
+const RESCHEDULE_TIME_HINT_RE =
+  /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/i;
+
+function isRescheduleCommand(text: string): boolean {
+  if (!/^reschedule\b/i.test(text)) return false;
+  if (/\bsame\s+times?\b/i.test(text)) return true;
+  return RESCHEDULE_DATE_HINT_RE.test(text) &&
+    RESCHEDULE_TIME_HINT_RE.test(text);
+}
+
 // Operation commands sent through automation channels tell downstream systems
 // to create/update business records. They are captures, not operator todos.
 // Keep this narrower than MECHANICAL_CAPTURE_PREFIXES so auto-resolve LAYER 0
@@ -91,12 +104,11 @@ export function isOperationCommandCapture(
   const text = content.trim().replace(/\s+/g, " ");
   if (!text) return false;
 
-  return [
+  return isRescheduleCommand(text) || [
     /^new\s+client\b/i,
     /^new\s+project\b/i,
     /^add\s+appointment\b/i,
     /^add\s+project\b/i,
-    /^reschedule\b.*\bsame\s+times?\b/i,
   ].some((pattern) => pattern.test(text));
 }
 

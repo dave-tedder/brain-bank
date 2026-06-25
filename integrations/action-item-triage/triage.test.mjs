@@ -33,6 +33,12 @@ test('normalizeEvidenceText prepares conservative source-of-truth matching', () 
 test('isOperationCommandText detects only supported operation commands', () => {
   assert.equal(isOperationCommandText('Add appointment Acme Launch kickoff'), true);
   assert.equal(isOperationCommandText('New project Sam Smith migration'), true);
+  assert.equal(isOperationCommandText('Reschedule Taylor Morgan to Saturday May 23, 12pm-5pm'), true);
+  assert.equal(
+    isOperationCommandText('reschedule sam smith appointment from march 20 to this saturday 1:30pm-8pm'),
+    true,
+  );
+  assert.equal(isOperationCommandText('Need to reschedule the planning review after tests pass'), false);
   assert.equal(isOperationCommandText('Consider adding a better report'), false);
 });
 
