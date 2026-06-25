@@ -23,6 +23,8 @@ export type ProjectType =
   | "idea"
   | "uncategorized";
 
+export type ProjectSort = "updated" | "name";
+
 export interface ProjectRollup {
   slug: string;
   display_name: string;
@@ -92,6 +94,7 @@ const ROLLUP_COLS =
 interface ListProjectsOpts {
   type?: string[];
   status?: ProjectStatus[];
+  sort?: ProjectSort;
   includeArchived?: boolean;
   limit?: number;
   offset?: number;
@@ -106,9 +109,18 @@ export async function listProjects(
   let query = supabase()
     .from("projects_rollup")
     .select(ROLLUP_COLS)
-    .order("status_rank", { ascending: true })
-    .order("last_activity_at", { ascending: false })
     .range(offset, offset + limit - 1);
+
+  if (opts.sort === "name") {
+    query = query
+      .order("display_name", { ascending: true })
+      .order("last_activity_at", { ascending: false });
+  } else {
+    query = query
+      .order("last_activity_at", { ascending: false })
+      .order("status_rank", { ascending: true })
+      .order("display_name", { ascending: true });
+  }
 
   if (opts.type && opts.type.length > 0) {
     query = query.in("type", opts.type);

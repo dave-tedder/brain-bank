@@ -7,6 +7,10 @@ import {
 import ProjectFilters from "@/components/ProjectFilters";
 import ProjectRow from "@/components/ProjectRow";
 import ProjectCard from "@/components/ProjectCard";
+import {
+  buildProjectsUrl,
+  normalizeProjectsIndexParams,
+} from "@/lib/projects-index-controls";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +19,7 @@ interface Props {
     type?: string;
     status?: string;
     view?: string;
+    sort?: string;
     offset?: string;
     include?: string;
   }>;
@@ -24,52 +29,18 @@ const PAGE_SIZE = 50;
 
 const TYPE_TOKENS = PROJECT_TYPE_FILTERS.map((f) => f.token);
 const STATUS_TOKENS = PROJECT_STATUS_FILTERS.map((f) => f.token);
-const CLOSED_STATUS_TOKENS = new Set(["done", "archive"]);
-
-function parseTokens(raw: string | undefined, valid: string[]): string[] {
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map((t) => t.trim())
-    .filter((t) => valid.includes(t));
-}
-
-function parseOffset(raw: string | undefined): number {
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
-}
-
-function hasClosedStatus(statuses: string[]): boolean {
-  return statuses.some((status) => CLOSED_STATUS_TOKENS.has(status));
-}
-
-interface UrlOpts {
-  types: string[];
-  statuses: string[];
-  view: string;
-  offset?: number;
-  includeArchived?: boolean;
-}
-
-function buildUrl(opts: UrlOpts): string {
-  const parts: string[] = [];
-  if (opts.types.length > 0) parts.push(`type=${opts.types.join(",")}`);
-  if (opts.statuses.length > 0)
-    parts.push(`status=${opts.statuses.join(",")}`);
-  if (opts.view === "grid") parts.push("view=grid");
-  if (opts.includeArchived) parts.push("include=archived");
-  if (opts.offset && opts.offset > 0) parts.push(`offset=${opts.offset}`);
-  return `/projects${parts.length > 0 ? `?${parts.join("&")}` : ""}`;
-}
 
 export default async function ProjectsIndexPage({ searchParams }: Props) {
   const params = await searchParams;
-  const selectedTypes = parseTokens(params.type, TYPE_TOKENS);
-  const selectedStatuses = parseTokens(params.status, STATUS_TOKENS);
-  const view = params.view === "grid" ? "grid" : "log";
-  const offset = parseOffset(params.offset);
-  const includeArchived =
-    params.include === "archived" || hasClosedStatus(selectedStatuses);
+  const {
+    selectedTypes,
+    selectedStatuses,
+    view,
+    sort,
+    offset,
+    includeArchived,
+  } = normalizeProjectsIndexParams(params, TYPE_TOKENS, STATUS_TOKENS);
+  const projectSort = sort === "name" ? "name" : "updated";
 
   const typeValues = PROJECT_TYPE_FILTERS.filter((f) =>
     selectedTypes.includes(f.token)
@@ -84,6 +55,7 @@ export default async function ProjectsIndexPage({ searchParams }: Props) {
     projects = await listProjects({
       type: typeValues,
       status: statusValues,
+      sort: projectSort,
       includeArchived,
       limit: PAGE_SIZE,
       offset,
@@ -108,7 +80,7 @@ export default async function ProjectsIndexPage({ searchParams }: Props) {
             style={{ color: "var(--text-primary)" }}
           >
             <span style={{ color: "var(--text-muted)" }}>&gt; </span>
-            LOG :: PROJECTS
+            {view.toUpperCase()} :: PROJECTS
           </h1>
           <p
             className="text-sm mt-1"
@@ -123,34 +95,69 @@ export default async function ProjectsIndexPage({ searchParams }: Props) {
           </p>
         </div>
 
-        {/* LOG / GRID toggle */}
-        <div
-          className="flex items-center gap-1 text-xs font-terminal uppercase tracking-wider"
-          style={{ color: "var(--text-muted)" }}
-        >
-          {(["log", "grid"] as const).map((v, i) => {
-            const active = view === v;
-            return (
-              <span key={v} className="flex items-center gap-1">
-                {i > 0 && <span aria-hidden="true">/</span>}
-                <Link
-                  href={buildUrl({
-                    types: selectedTypes,
-                    statuses: selectedStatuses,
-                    view: v,
-                    includeArchived,
-                  })}
-                  style={{
-                    color: active
-                      ? "var(--text-primary)"
-                      : "var(--text-muted)",
-                  }}
-                >
-                  [{v}]
-                </Link>
-              </span>
-            );
-          })}
+        <div className="flex flex-col items-end gap-2">
+          {/* LOG / GRID toggle */}
+          <div
+            className="flex items-center gap-1 text-xs font-terminal uppercase tracking-wider"
+            style={{ color: "var(--text-muted)" }}
+          >
+            {(["grid", "log"] as const).map((v, i) => {
+              const active = view === v;
+              return (
+                <span key={v} className="flex items-center gap-1">
+                  {i > 0 && <span aria-hidden="true">/</span>}
+                  <Link
+                    href={buildProjectsUrl({
+                      types: selectedTypes,
+                      statuses: selectedStatuses,
+                      view: v,
+                      sort: projectSort,
+                      includeArchived,
+                    })}
+                    style={{
+                      color: active
+                        ? "var(--text-primary)"
+                        : "var(--text-muted)",
+                    }}
+                  >
+                    [{v}]
+                  </Link>
+                </span>
+              );
+            })}
+          </div>
+
+          {/* Sort toggle */}
+          <div
+            className="flex items-center gap-1 text-xs font-terminal uppercase tracking-wider"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <span>sort</span>
+            {(["updated", "name"] as const).map((nextSort, i) => {
+              const active = sort === nextSort;
+              return (
+                <span key={nextSort} className="flex items-center gap-1">
+                  {i > 0 && <span aria-hidden="true">/</span>}
+                  <Link
+                    href={buildProjectsUrl({
+                      types: selectedTypes,
+                      statuses: selectedStatuses,
+                      view,
+                      sort: nextSort,
+                      includeArchived,
+                    })}
+                    style={{
+                      color: active
+                        ? "var(--text-primary)"
+                        : "var(--text-muted)",
+                    }}
+                  >
+                    [{nextSort === "name" ? "name a-z" : "updated"}]
+                  </Link>
+                </span>
+              );
+            })}
+          </div>
         </div>
       </div>
 
@@ -158,6 +165,7 @@ export default async function ProjectsIndexPage({ searchParams }: Props) {
         selectedTypes={selectedTypes}
         selectedStatuses={selectedStatuses}
         view={view}
+        sort={projectSort}
         includeArchived={includeArchived}
       />
 
@@ -211,10 +219,11 @@ export default async function ProjectsIndexPage({ searchParams }: Props) {
       {hasMore && (
         <div className="animate-in">
           <Link
-            href={buildUrl({
+            href={buildProjectsUrl({
               types: selectedTypes,
               statuses: selectedStatuses,
               view,
+              sort: projectSort,
               includeArchived,
               offset: nextOffset,
             })}
@@ -229,10 +238,11 @@ export default async function ProjectsIndexPage({ searchParams }: Props) {
       {offset > 0 && (
         <div>
           <Link
-            href={buildUrl({
+            href={buildProjectsUrl({
               types: selectedTypes,
               statuses: selectedStatuses,
               view,
+              sort: projectSort,
               includeArchived,
             })}
             className="text-xs"

@@ -3,11 +3,13 @@ import {
   PROJECT_TYPE_FILTERS,
   PROJECT_STATUS_FILTERS,
 } from "@/lib/projects";
+import { buildProjectsUrl } from "@/lib/projects-index-controls";
 
 interface Props {
   selectedTypes: string[];
   selectedStatuses: string[];
-  view: string;
+  view: "grid" | "log";
+  sort?: "updated" | "name";
   includeArchived: boolean;
 }
 
@@ -29,6 +31,7 @@ export default function ProjectFilters({
   selectedTypes,
   selectedStatuses,
   view,
+  sort = "updated",
   includeArchived,
 }: Props) {
   function buildHref(
@@ -37,12 +40,13 @@ export default function ProjectFilters({
     archived: boolean
   ): string {
     const shouldIncludeArchived = archived || hasClosedStatus(statuses);
-    const parts: string[] = [];
-    if (types.length > 0) parts.push(`type=${types.join(",")}`);
-    if (statuses.length > 0) parts.push(`status=${statuses.join(",")}`);
-    if (view === "grid") parts.push("view=grid");
-    if (shouldIncludeArchived) parts.push("include=archived");
-    return `/projects${parts.length > 0 ? `?${parts.join("&")}` : ""}`;
+    return buildProjectsUrl({
+      types,
+      statuses,
+      view,
+      sort,
+      includeArchived: shouldIncludeArchived,
+    });
   }
 
   function toggle(list: string[], token: string): string[] {
