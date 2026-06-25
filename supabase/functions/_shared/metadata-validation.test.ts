@@ -145,6 +145,30 @@ Deno.test("isOperationCommandCapture: normal todos still permit extraction", () 
     ),
     false,
   );
+  assertEquals(
+    isOperationCommandCapture(
+      "Need to reschedule the planning review after tests pass",
+      "brain-channel",
+    ),
+    false,
+  );
+});
+
+Deno.test("isOperationCommandCapture: suppresses explicit-time reschedule commands", () => {
+  assertEquals(
+    isOperationCommandCapture(
+      "Reschedule Taylor Morgan to Saturday May 23, 12pm-5pm",
+      "brain-channel",
+    ),
+    true,
+  );
+  assertEquals(
+    isOperationCommandCapture(
+      "reschedule sam smith appointment from march 20 to this saturday 1:30pm-8pm",
+      "brain-channel",
+    ),
+    true,
+  );
 });
 
 Deno.test("isOperationCommandCapture: only applies to brain-channel source", () => {

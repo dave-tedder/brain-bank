@@ -39,12 +39,23 @@ export function normalizeEvidenceText(value) {
     .replace(/\s+/g, ' ');
 }
 
+const RESCHEDULE_DATE_HINT_RE =
+  /\b(?:today|tomorrow|tonight|this\s+(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)|next\s+(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?)\b/i;
+
+const RESCHEDULE_TIME_HINT_RE =
+  /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/i;
+
+function isRescheduleCommand(text) {
+  if (!/^reschedule\b/i.test(text)) return false;
+  if (/\bsame\s+times?\b/i.test(text)) return true;
+  return RESCHEDULE_DATE_HINT_RE.test(text) && RESCHEDULE_TIME_HINT_RE.test(text);
+}
+
 export function isOperationCommandText(value) {
   const text = String(value || '').trim().replace(/\s+/g, ' ');
-  return [
+  return isRescheduleCommand(text) || [
     /^new\s+(client|customer|project)\b/i,
     /^add\s+(appointment|event|project|task)\b/i,
-    /^reschedule\b.*\bsame\s+times?\b/i,
   ].some((pattern) => pattern.test(text));
 }
 
