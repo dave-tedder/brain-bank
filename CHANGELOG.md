@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Changed
+
+- **Dashboard Projects opens in grid view by default and gains URL-backed sorting.** `/projects` now defaults to the grid layout, keeps log/grid mode across filters and pagination, and lets operators sort both views by most recent project update or project name A-Z.
+
 ## [0.2.2] - 2026-06-17
 
 ### Changed
