@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Added
+
+- **Open Engine OE-1 manual task board foundation.** Added the `agent_tasks`, `agent_task_events`, and `agent_task_ledger` schema with service-role-only RLS, narrowed manual-board grants, seeded local agent runtimes, SQL helpers for claim/status movement, and a high-risk explicit-approval guard. The dashboard now has a protected `/tasks` board for manually creating task packets, editing core fields, filtering by status/agent/risk, and moving tasks through Nate B. Jones' Open Engine statuses without adding an autonomous runner.
+
 ### Changed
 
 - **Dashboard Projects opens in grid view by default and gains URL-backed sorting.** `/projects` now defaults to the grid layout, keeps log/grid mode across filters and pagination, and lets operators sort both views by most recent project update or project name A-Z.

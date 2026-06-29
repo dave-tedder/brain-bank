@@ -163,6 +163,51 @@ a:hover {
   text-shadow: 0 0 10px rgba(0, 255, 65, 0.5);
 }
 
+.label {
+  display: block;
+  color: var(--text-muted);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.task-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-body);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.875rem;
+  padding: 0.55rem 0.65rem;
+}
+
+.task-input:focus {
+  outline: 2px solid var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.task-button {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: transparent;
+  font-family: 'VT323', monospace;
+  font-size: 0.95rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.35rem 0.65rem;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.task-button:hover:not(:disabled),
+.task-button:focus-visible:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
 .border-glow {
   box-shadow:
     0 0 8px rgba(0, 255, 65, 0.2),
