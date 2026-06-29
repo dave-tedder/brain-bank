@@ -36,6 +36,7 @@ export type AgentTaskStatus = (typeof AGENT_TASK_STATUSES)[number];
 export type AgentTaskReceipt = (typeof AGENT_TASK_RECEIPTS)[number];
 export type AgentLedgerAutomationState =
   (typeof AGENT_LEDGER_AUTOMATION_STATES)[number];
+export type AgentTaskRisk = "low" | "medium" | "high";
 export type AgentTaskToolAction =
   | "update"
   | "complete"
@@ -49,7 +50,7 @@ export type AgentTaskResumeAction = "resume" | "unblock" | "answer";
 export interface AgentTaskAccessRow {
   agent_code: string | null;
   claimed_by: string | null;
-  risk: "low" | "medium" | "high";
+  risk: AgentTaskRisk;
   explicit_approval: boolean;
   status: AgentTaskStatus;
 }
@@ -62,6 +63,10 @@ export function isLedgerAutomationState(
   value: string,
 ): value is AgentLedgerAutomationState {
   return (AGENT_LEDGER_AUTOMATION_STATES as readonly string[]).includes(value);
+}
+
+export function isAgentTaskRisk(value: string): value is AgentTaskRisk {
+  return value === "low" || value === "medium" || value === "high";
 }
 
 export function canAgentWriteTask(
