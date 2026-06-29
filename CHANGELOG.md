@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Added
+
+- **Open Engine OE-6 dashboard intake controls.** The `/tasks` creation form now creates `Standing` intake drafts only, keeps `explicit_approval=false`, and preserves the human requester. Standing drafts get a dedicated human promotion action backed by `promote_agent_task_intake`, moving them to `Agent Todo` without creating receipt events or automatic executable work.
+
 ## [0.3.0] - 2026-06-30
 
 Open Engine OE-1 through OE-4 land together. Brain Bank now ships a manual agent task board end-to-end: schema, dashboard surface, MCP task tools with guarded transitions, and a one-task-at-a-time Queue Runner skill. Nothing runs autonomously. OE-5 (scheduled queue runner) and OE-6 (intake foundation, dashboard intake, action-item intake, thought intake, promotion) are intentionally not in this cut and remain in private operator state until they are publicly genericized.
