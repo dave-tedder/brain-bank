@@ -75,6 +75,15 @@ function redirectPath(formData: FormData): string {
   return textValue(formData, "redirect_path") ?? "/tasks";
 }
 
+function isRecoverableStatusMoveError(error: { code?: string; message?: string }): boolean {
+  if (error.code !== "22023") return false;
+  const message = error.message ?? "";
+  return (
+    message === "Done tasks cannot receive non-apply receipts through this helper" ||
+    message.startsWith("Invalid status/event transition:")
+  );
+}
+
 export async function createAgentTask(formData: FormData) {
   const title = requireText(formData, "title");
   const desired_outcome = requireText(formData, "desired_outcome");
@@ -156,6 +165,14 @@ export async function moveAgentTaskStatus(formData: FormData) {
     p_reason: reason,
   });
 
-  if (error) throw error;
-  revalidatePath(redirectPath(formData));
+  const path = redirectPath(formData);
+  if (error) {
+    if (isRecoverableStatusMoveError(error)) {
+      console.warn("task status move ignored after stale dashboard submit:", error.message);
+      revalidatePath(path);
+      return;
+    }
+    throw error;
+  }
+  revalidatePath(path);
 }
