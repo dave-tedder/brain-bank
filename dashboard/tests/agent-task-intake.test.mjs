@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildHandoffDraftInsert,
   buildIntakeDraftInsert,
   buildPromotionRpcArgs,
 } from "../src/lib/agent-task-intake.js";
@@ -44,6 +45,76 @@ test("buildIntakeDraftInsert normalizes legacy dashboard source labels", () => {
   form.set("desired_outcome", "Normalize old dashboard source labels.");
 
   assert.equal(buildIntakeDraftInsert(form).intake_source, "dashboard-button");
+});
+
+test("buildHandoffDraftInsert creates a conservative Standing draft from pasted handoff text", () => {
+  const form = new FormData();
+  form.set("title", "[agent instructions][dave-codex][task] Build handoff intake helper");
+  form.set("agent_code", "dave-codex");
+  form.set("project_slug", "open_brain");
+  form.set("requested_by", "dave");
+  form.set("priority", "high");
+  form.set("risk", "medium");
+  form.set(
+    "handoff_text",
+    [
+      "Goal:",
+      "Build a small safe helper for pasted session handoffs.",
+      "",
+      "Recommended scope:",
+      "- Parse the pasted text into a draft packet.",
+      "- Keep the result manual-only.",
+      "",
+      "Verification:",
+      "- Create one harmless Standing draft.",
+      "- Confirm events stay empty.",
+      "",
+      "Closeout:",
+      "- Update tracker and session log.",
+      "",
+      "Stop before:",
+      "- Do not auto-promote.",
+      "- Do not set explicit approval.",
+    ].join("\n")
+  );
+
+  assert.deepEqual(buildHandoffDraftInsert(form), {
+    title: "[agent instructions][dave-codex][task] Build handoff intake helper",
+    label: "agent-instructions",
+    agent_code: "dave-codex",
+    project_slug: "open_brain",
+    status: "Standing",
+    priority: "high",
+    risk: "medium",
+    requested_by: "dave",
+    intake_source: "handoff-doc",
+    desired_outcome: "Build a small safe helper for pasted session handoffs.",
+    context: [
+      "Goal:",
+      "Build a small safe helper for pasted session handoffs.",
+      "",
+      "Recommended scope:",
+      "- Parse the pasted text into a draft packet.",
+      "- Keep the result manual-only.",
+      "",
+      "Verification:",
+      "- Create one harmless Standing draft.",
+      "- Confirm events stay empty.",
+      "",
+      "Closeout:",
+      "- Update tracker and session log.",
+      "",
+      "Stop before:",
+      "- Do not auto-promote.",
+      "- Do not set explicit approval.",
+    ].join("\n"),
+    sources: [{ type: "handoff-doc", label: "pasted handoff", chars: 352 }],
+    do_steps: "- Parse the pasted text into a draft packet.\n- Keep the result manual-only.",
+    acceptance_criteria: "- Create one harmless Standing draft.\n- Confirm events stay empty.",
+    output_handoff: "- Update tracker and session log.",
+    boundaries: "- Do not auto-promote.\n- Do not set explicit approval.",
+    explicit_approval: false,
+  });
 });
 
 test("buildPromotionRpcArgs preserves the human actor and optional note", () => {

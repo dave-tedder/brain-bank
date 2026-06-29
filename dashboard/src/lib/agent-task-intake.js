@@ -36,6 +36,52 @@ function parseIntakeSource(value) {
   return value;
 }
 
+const HANDOFF_SECTION_KEYS = {
+  goal: "desired_outcome",
+  "recommended scope": "do_steps",
+  scope: "do_steps",
+  verification: "acceptance_criteria",
+  acceptance: "acceptance_criteria",
+  closeout: "output_handoff",
+  handoff: "output_handoff",
+  "stop before": "boundaries",
+  boundaries: "boundaries",
+};
+
+function sectionKey(line) {
+  const match = line.trim().match(/^([A-Za-z][A-Za-z /-]{1,40}):$/);
+  if (!match) return null;
+  return match[1].toLowerCase().replace(/\s+/g, " ");
+}
+
+function parseHandoffSections(text) {
+  const sections = {};
+  let current = null;
+  for (const line of text.split(/\r?\n/)) {
+    const key = sectionKey(line);
+    if (key && HANDOFF_SECTION_KEYS[key]) {
+      current = HANDOFF_SECTION_KEYS[key];
+      sections[current] ??= [];
+      continue;
+    }
+    if (current) sections[current].push(line);
+  }
+
+  return Object.fromEntries(
+    Object.entries(sections).map(([key, lines]) => [
+      key,
+      lines.join("\n").trim() || null,
+    ])
+  );
+}
+
+function firstContentLine(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.endsWith(":")) ?? null;
+}
+
 export function buildIntakeDraftInsert(formData) {
   return {
     title: requireText(formData, "title"),
@@ -54,6 +100,36 @@ export function buildIntakeDraftInsert(formData) {
     acceptance_criteria: textValue(formData, "acceptance_criteria"),
     output_handoff: textValue(formData, "output_handoff"),
     boundaries: textValue(formData, "boundaries"),
+    explicit_approval: false,
+  };
+}
+
+export function buildHandoffDraftInsert(formData) {
+  const handoffText = requireText(formData, "handoff_text");
+  const sections = parseHandoffSections(handoffText);
+  const desiredOutcome =
+    textValue(formData, "desired_outcome") ??
+    sections.desired_outcome ??
+    firstContentLine(handoffText) ??
+    requireText(formData, "title");
+
+  return {
+    title: requireText(formData, "title"),
+    label: "agent-instructions",
+    agent_code: textValue(formData, "agent_code"),
+    project_slug: textValue(formData, "project_slug"),
+    status: "Standing",
+    priority: parsePriority(textValue(formData, "priority")),
+    risk: parseRisk(textValue(formData, "risk")),
+    requested_by: textValue(formData, "requested_by"),
+    intake_source: "handoff-doc",
+    desired_outcome: desiredOutcome,
+    context: handoffText,
+    sources: [{ type: "handoff-doc", label: "pasted handoff", chars: handoffText.length }],
+    do_steps: sections.do_steps ?? null,
+    acceptance_criteria: sections.acceptance_criteria ?? null,
+    output_handoff: sections.output_handoff ?? null,
+    boundaries: sections.boundaries ?? null,
     explicit_approval: false,
   };
 }
