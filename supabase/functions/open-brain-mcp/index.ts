@@ -17,11 +17,14 @@ import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
   ACTIVE_ACTION_ITEM_DRAFT_STATUSES,
+  ACTIVE_THOUGHT_DRAFT_STATUSES,
   AGENT_TASK_INTAKE_SOURCES,
   type AgentTaskIntakeSource,
   assertNoActiveActionItemDraft,
+  assertNoActiveThoughtDraft,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
+  buildThoughtIntakeRecord,
 } from "./_agent_intake.ts";
 import {
   AGENT_TASK_STATUSES,
@@ -1907,6 +1910,78 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error creating agent task from action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "create_agent_task_from_thought",
+  {
+    title: "Create Agent Task From Thought",
+    description:
+      "Manual OE-6 intake path for a selected Brain Bank thoughts row, including session-log closeout captures. Creates a conservative Standing draft linked by source_thought_id. It does not promote, claim, write events, or grant explicit approval.",
+    inputSchema: {
+      thought_id: z.string().uuid(),
+      agent_code: z.string().min(1).optional(),
+      project_slug: z.string().min(1).optional(),
+      requested_by: z.string().min(1).optional(),
+    },
+  },
+  async (
+    { thought_id, agent_code, project_slug, requested_by }: {
+      thought_id: string;
+      agent_code?: string;
+      project_slug?: string;
+      requested_by?: string;
+    },
+  ) => {
+    logToolInvocation("create_agent_task_from_thought", {
+      thought_id,
+      agent_code,
+      project_slug,
+    }, "mcp");
+    try {
+      const { data: thought, error: thoughtError } = await supabase
+        .from("thoughts")
+        .select("id, content, metadata, created_at")
+        .eq("id", thought_id)
+        .single();
+      if (thoughtError) throw thoughtError;
+
+      const { data: existingTasks, error: existingTasksError } = await supabase
+        .from("agent_tasks")
+        .select("id, status")
+        .eq("source_thought_id", thought_id)
+        .in("status", [...ACTIVE_THOUGHT_DRAFT_STATUSES]);
+      if (existingTasksError) throw existingTasksError;
+      assertNoActiveThoughtDraft(existingTasks ?? [], thought_id);
+
+      const record = buildThoughtIntakeRecord({
+        thought,
+        agent_code,
+        project_slug,
+        requested_by,
+      });
+      const { data, error } = await supabase
+        .from("agent_tasks")
+        .insert(record)
+        .select(AGENT_TASK_SELECT)
+        .single();
+      if (error) throw error;
+
+      return textToolResponse({
+        receipt: "THOUGHT_INTAKE_DRAFT_CREATED",
+        source_thought_id: thought_id,
+        claimable_by_runner: false,
+        promotion_required: true,
+        explicit_approval_granted: false,
+        audit_event_written: false,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error creating agent task from thought: ${(err as Error).message}`,
       );
     }
   },
