@@ -52,6 +52,31 @@ export interface AgentTaskIntakeRecord {
   linked_action_item_id: string | null;
 }
 
+export interface ActionItemPromotionRow {
+  id: string;
+  description: string;
+  status: string;
+  source_thought_id?: string | null;
+}
+
+export interface ActionItemPromotionInput {
+  action_item: ActionItemPromotionRow;
+  agent_code?: string | null;
+  project_slug?: string | null;
+  requested_by?: string | null;
+}
+
+export interface LinkedActionItemDraftRow {
+  id: string;
+  status: string;
+}
+
+export const ACTIVE_ACTION_ITEM_DRAFT_STATUSES = [
+  "Standing",
+  "Agent Todo",
+  "Agent Working",
+] as const;
+
 const VALID_PRIORITIES = new Set(["low", "medium", "high"]);
 
 function cleanText(value: string, field: string): string {
@@ -119,4 +144,65 @@ export function buildAgentTaskIntakeRecord(
     source_thought_id: input.source_thought_id?.trim() || null,
     linked_action_item_id: input.linked_action_item_id?.trim() || null,
   };
+}
+
+export function assertNoActiveActionItemDraft(
+  existingTasks: LinkedActionItemDraftRow[],
+  actionItemId: string,
+): void {
+  const activeTask = existingTasks.find((task) =>
+    (ACTIVE_ACTION_ITEM_DRAFT_STATUSES as readonly string[]).includes(
+      task.status,
+    )
+  );
+  if (activeTask) {
+    throw new Error(
+      `Action item ${actionItemId} already has an active agent task draft: ${activeTask.id} (${activeTask.status}).`,
+    );
+  }
+}
+
+export function buildActionItemPromotionIntakeRecord(
+  input: ActionItemPromotionInput,
+): AgentTaskIntakeRecord {
+  const actionItem = input.action_item;
+  if (actionItem.status !== "open") {
+    throw new Error("Only open action_items can be promoted to intake drafts.");
+  }
+
+  const description = cleanText(actionItem.description, "description");
+  const actionItemId = cleanText(actionItem.id, "action_item.id");
+  const sourceThoughtId = actionItem.source_thought_id?.trim() || null;
+
+  return buildAgentTaskIntakeRecord({
+    desired_outcome: description,
+    context:
+      `Manual action-item promotion draft for action_items.id ${actionItemId}.\n\nAction item: ${description}`,
+    sources: [
+      {
+        kind: "action_item",
+        id: actionItemId,
+        source_thought_id: sourceThoughtId,
+      },
+    ],
+    do_steps:
+      "Review the linked action item, expand this draft into a complete task packet if it is still worth doing, then use the normal human promotion path when ready.",
+    acceptance_criteria:
+      "The Standing draft is reviewed by a human and remains unclaimable until explicitly promoted later.",
+    output_handoff:
+      "Leave notes on what changed, what evidence was checked, and whether the draft should be promoted, rewritten, or left Standing.",
+    boundaries:
+      "Manual draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, or mark the linked action item resolved from this intake step.",
+    intake_source: "action-item-promotion",
+    agent_code: input.agent_code,
+    project_slug: input.project_slug,
+    priority: "medium",
+    risk: "low",
+    requested_by: input.requested_by,
+    title: `[agent instructions][${
+      titleAgentCode(input.agent_code ?? null)
+    }][action-item] ${description}`,
+    source_thought_id: sourceThoughtId,
+    linked_action_item_id: actionItemId,
+  });
 }

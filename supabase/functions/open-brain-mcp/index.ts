@@ -16,8 +16,11 @@ import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
+  ACTIVE_ACTION_ITEM_DRAFT_STATUSES,
   AGENT_TASK_INTAKE_SOURCES,
   type AgentTaskIntakeSource,
+  assertNoActiveActionItemDraft,
+  buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
 } from "./_agent_intake.ts";
 import {
@@ -1831,6 +1834,79 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error creating agent task intake: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "create_agent_task_from_action_item",
+  {
+    title: "Create Agent Task From Action Item",
+    description:
+      "Manual OE-6 intake path for a selected Brain Bank action_items row. Creates a conservative Standing draft linked by linked_action_item_id. It does not promote, claim, resolve, or grant explicit approval.",
+    inputSchema: {
+      action_item_id: z.string().uuid(),
+      agent_code: z.string().min(1).optional(),
+      project_slug: z.string().min(1).optional(),
+      requested_by: z.string().min(1).optional(),
+    },
+  },
+  async (
+    { action_item_id, agent_code, project_slug, requested_by }: {
+      action_item_id: string;
+      agent_code?: string;
+      project_slug?: string;
+      requested_by?: string;
+    },
+  ) => {
+    logToolInvocation("create_agent_task_from_action_item", {
+      action_item_id,
+      agent_code,
+      project_slug,
+    }, "mcp");
+    try {
+      const { data: actionItem, error: actionItemError } = await supabase
+        .from("action_items")
+        .select("id, description, status, source_thought_id")
+        .eq("id", action_item_id)
+        .single();
+      if (actionItemError) throw actionItemError;
+
+      const { data: existingTasks, error: existingTasksError } = await supabase
+        .from("agent_tasks")
+        .select("id, status")
+        .eq("linked_action_item_id", action_item_id)
+        .in("status", [...ACTIVE_ACTION_ITEM_DRAFT_STATUSES]);
+      if (existingTasksError) throw existingTasksError;
+      assertNoActiveActionItemDraft(existingTasks ?? [], action_item_id);
+
+      const record = buildActionItemPromotionIntakeRecord({
+        action_item: actionItem,
+        agent_code,
+        project_slug,
+        requested_by,
+      });
+      const { data, error } = await supabase
+        .from("agent_tasks")
+        .insert(record)
+        .select(AGENT_TASK_SELECT)
+        .single();
+      if (error) throw error;
+
+      return textToolResponse({
+        receipt: "ACTION_ITEM_INTAKE_DRAFT_CREATED",
+        linked_action_item_id: action_item_id,
+        claimable_by_runner: false,
+        promotion_required: true,
+        explicit_approval_granted: false,
+        audit_event_written: false,
+        action_item_status_changed: false,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error creating agent task from action item: ${(err as Error).message}`,
       );
     }
   },
