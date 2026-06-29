@@ -31,6 +31,11 @@ function parseSources(value) {
   return parsed;
 }
 
+function parseIntakeSource(value) {
+  if (!value || value === "dashboard") return "dashboard-button";
+  return value;
+}
+
 export function buildIntakeDraftInsert(formData) {
   return {
     title: requireText(formData, "title"),
@@ -41,7 +46,7 @@ export function buildIntakeDraftInsert(formData) {
     priority: parsePriority(textValue(formData, "priority")),
     risk: parseRisk(textValue(formData, "risk")),
     requested_by: textValue(formData, "requested_by"),
-    intake_source: textValue(formData, "intake_source") ?? "dashboard",
+    intake_source: parseIntakeSource(textValue(formData, "intake_source")),
     desired_outcome: requireText(formData, "desired_outcome"),
     context: textValue(formData, "context"),
     sources: parseSources(textValue(formData, "sources")),

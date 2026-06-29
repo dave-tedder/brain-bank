@@ -28,7 +28,7 @@ export default function AgentTaskForm({ runtimes }: Props) {
 
         <Field name="project_slug" label="project slug" />
         <Field name="requested_by" label="requested by" />
-        <Field name="intake_source" label="intake source" />
+        <Field name="intake_source" label="intake source" defaultValue="dashboard-button" />
 
         <label className="space-y-1">
           <span className="label">priority</span>
