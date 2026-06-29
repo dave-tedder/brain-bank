@@ -10,6 +10,8 @@ Run one manual Open Engine heartbeat for one runtime, then stop. Start with the 
 
 This skill does not create cron jobs, scheduled runners, background loops, Slack sends, credential changes, billing changes, deletes, deploys, client-facing messages, WordPress changes, or autonomous execution.
 
+This skill is behavioral guidance for the agent running the heartbeat. It is not an enforcement boundary by itself. Real enforcement must stay in the SQL helpers, MCP task tools, and runtime tests so a scheduled or misbehaving runtime cannot bypass risk and transition guards by ignoring prose.
+
 ## Runtime Identity
 
 Default runtime:

@@ -36,6 +36,15 @@ export type AgentTaskStatus = (typeof AGENT_TASK_STATUSES)[number];
 export type AgentTaskReceipt = (typeof AGENT_TASK_RECEIPTS)[number];
 export type AgentLedgerAutomationState =
   (typeof AGENT_LEDGER_AUTOMATION_STATES)[number];
+export type AgentTaskToolAction =
+  | "update"
+  | "complete"
+  | "block"
+  | "request-review"
+  | "resume"
+  | "unblock"
+  | "answer";
+export type AgentTaskResumeAction = "resume" | "unblock" | "answer";
 
 export interface AgentTaskAccessRow {
   agent_code: string | null;
@@ -87,8 +96,29 @@ export function assertStatusHeartbeatAllowed(task: AgentTaskAccessRow): void {
   }
 }
 
+export function assertResumeTransitionAllowed(
+  task: AgentTaskAccessRow,
+  action: AgentTaskResumeAction,
+): void {
+  if (action === "resume") {
+    if (task.status !== "Agent Needs Input" && task.status !== "Agent Review") {
+      throw new Error(
+        "AGENT RESUMED requires Agent Needs Input or Agent Review.",
+      );
+    }
+    return;
+  }
+
+  if (task.status !== "Agent Needs Input") {
+    const receipt = action === "unblock"
+      ? "AGENT UNBLOCKED"
+      : "AGENT HUMAN ANSWERED";
+    throw new Error(`${receipt} requires Agent Needs Input.`);
+  }
+}
+
 export function receiptForTaskTool(
-  action: "update" | "complete" | "block" | "request-review",
+  action: AgentTaskToolAction,
 ): { status: AgentTaskStatus; receipt: AgentTaskReceipt } {
   switch (action) {
     case "update":
@@ -98,6 +128,12 @@ export function receiptForTaskTool(
       return { status: "Agent Review", receipt: "AGENT DONE" };
     case "block":
       return { status: "Agent Needs Input", receipt: "AGENT BLOCKED" };
+    case "resume":
+      return { status: "Agent Working", receipt: "AGENT RESUMED" };
+    case "unblock":
+      return { status: "Agent Working", receipt: "AGENT UNBLOCKED" };
+    case "answer":
+      return { status: "Agent Working", receipt: "AGENT HUMAN ANSWERED" };
   }
 }
 

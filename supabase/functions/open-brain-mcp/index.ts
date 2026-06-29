@@ -19,8 +19,10 @@ import {
   AGENT_TASK_STATUSES,
   type AgentTaskAccessRow,
   type AgentTaskStatus,
+  type AgentTaskToolAction,
   assertAgentCanWriteTask,
   assertClaimAllowed,
+  assertResumeTransitionAllowed,
   assertStatusHeartbeatAllowed,
   compactObject,
   isLedgerAutomationState,
@@ -642,7 +644,7 @@ async function loadAgentTaskForTool(taskId: string): Promise<
 async function moveAgentTaskViaTool(args: {
   taskId: string;
   agentCode: string;
-  action: "update" | "complete" | "block" | "request-review";
+  action: AgentTaskToolAction;
   reason?: string;
 }) {
   const task = await loadAgentTaskForTool(args.taskId);
@@ -650,6 +652,13 @@ async function moveAgentTaskViaTool(args: {
   assertAgentCanWriteTask(task, args.agentCode);
   if (args.action === "update") {
     assertStatusHeartbeatAllowed(task);
+    assertClaimAllowed(task);
+  }
+  if (
+    args.action === "resume" || args.action === "unblock" ||
+    args.action === "answer"
+  ) {
+    assertResumeTransitionAllowed(task, args.action);
     assertClaimAllowed(task);
   }
 
@@ -1928,6 +1937,123 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error requesting agent review: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "resume_agent_task",
+  {
+    title: "Resume Agent Task",
+    description:
+      "Resume a claimed or assigned Agent Needs Input or Agent Review task back to Agent Working with an AGENT RESUMED receipt.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      resume_note: z.string().min(1).describe(
+        "Short receipt note explaining why this task is ready to resume.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, resume_note }: {
+      task_id: string;
+      agent_code: string;
+      resume_note: string;
+    },
+  ) => {
+    logToolInvocation("resume_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "resume",
+          reason: resume_note,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error resuming agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "unblock_agent_task",
+  {
+    title: "Unblock Agent Task",
+    description:
+      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT UNBLOCKED receipt.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      unblock_note: z.string().min(1).describe(
+        "Short receipt note explaining what cleared the blocker.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, unblock_note }: {
+      task_id: string;
+      agent_code: string;
+      unblock_note: string;
+    },
+  ) => {
+    logToolInvocation("unblock_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "unblock",
+          reason: unblock_note,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error unblocking agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "answer_agent_task",
+  {
+    title: "Answer Agent Task",
+    description:
+      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT HUMAN ANSWERED receipt.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      answer_note: z.string().min(1).describe(
+        "Short receipt note with the human answer or local input that cleared the hold.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, answer_note }: {
+      task_id: string;
+      agent_code: string;
+      answer_note: string;
+    },
+  ) => {
+    logToolInvocation("answer_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "answer",
+          reason: answer_note,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error answering agent task: ${(err as Error).message}`,
       );
     }
   },

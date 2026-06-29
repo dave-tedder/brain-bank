@@ -3,6 +3,7 @@ import {
   type AgentTaskAccessRow,
   assertAgentCanWriteTask,
   assertClaimAllowed,
+  assertResumeTransitionAllowed,
   assertStatusHeartbeatAllowed,
   canAgentWriteTask,
   isLedgerAutomationState,
@@ -76,10 +77,65 @@ Deno.test("task tool actions map to canonical receipts", () => {
     status: "Agent Review",
     receipt: "AGENT DONE",
   });
+  assertEquals(receiptForTaskTool("resume"), {
+    status: "Agent Working",
+    receipt: "AGENT RESUMED",
+  });
+  assertEquals(receiptForTaskTool("unblock"), {
+    status: "Agent Working",
+    receipt: "AGENT UNBLOCKED",
+  });
+  assertEquals(receiptForTaskTool("answer"), {
+    status: "Agent Working",
+    receipt: "AGENT HUMAN ANSWERED",
+  });
 });
 
 Deno.test("ledger writes accept only canonical automation states", () => {
   assertEquals(isLedgerAutomationState("manual-required"), true);
   assertEquals(isLedgerAutomationState("paused"), true);
   assertEquals(isLedgerAutomationState("autonomous-now"), false);
+});
+
+Deno.test("resume tools only allow blocked or review work back to working", () => {
+  assertResumeTransitionAllowed(
+    { ...baseTask, status: "Agent Needs Input" },
+    "resume",
+  );
+  assertResumeTransitionAllowed(
+    { ...baseTask, status: "Agent Review" },
+    "resume",
+  );
+  assertResumeTransitionAllowed(
+    { ...baseTask, status: "Agent Needs Input" },
+    "unblock",
+  );
+  assertResumeTransitionAllowed(
+    { ...baseTask, status: "Agent Needs Input" },
+    "answer",
+  );
+
+  assertThrows(
+    () => assertResumeTransitionAllowed(baseTask, "resume"),
+    Error,
+    "requires Agent Needs Input or Agent Review",
+  );
+  assertThrows(
+    () =>
+      assertResumeTransitionAllowed(
+        { ...baseTask, status: "Agent Review" },
+        "unblock",
+      ),
+    Error,
+    "requires Agent Needs Input",
+  );
+  assertThrows(
+    () =>
+      assertResumeTransitionAllowed(
+        { ...baseTask, status: "Agent Review" },
+        "answer",
+      ),
+    Error,
+    "requires Agent Needs Input",
+  );
 });
