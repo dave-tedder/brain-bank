@@ -101,6 +101,14 @@ export function assertStatusHeartbeatAllowed(task: AgentTaskAccessRow): void {
   }
 }
 
+export function assertIntakePromotionAllowed(task: AgentTaskAccessRow): void {
+  if (task.status !== "Standing") {
+    throw new Error(
+      "Only Standing intake drafts can be promoted to Agent Todo.",
+    );
+  }
+}
+
 export function assertResumeTransitionAllowed(
   task: AgentTaskAccessRow,
   action: AgentTaskResumeAction,
