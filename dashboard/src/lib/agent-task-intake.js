@@ -48,20 +48,37 @@ const HANDOFF_SECTION_KEYS = {
   boundaries: "boundaries",
 };
 
-function sectionKey(line) {
-  const match = line.trim().match(/^([A-Za-z][A-Za-z /-]{1,40}):$/);
+function normalizeSectionKey(value) {
+  return value.toLowerCase().replace(/\s+/g, " ");
+}
+
+function sectionHeader(line) {
+  const normalizedLine = line.trim().replace(/^#{1,6}\s+/, "");
+  const boldMatch = normalizedLine.match(/^\*\*([A-Za-z][A-Za-z /-]{1,40}):\*\*\s*(.*)$/);
+  if (boldMatch) {
+    return {
+      key: normalizeSectionKey(boldMatch[1]),
+      content: boldMatch[2].trim() || null,
+    };
+  }
+
+  const match = normalizedLine.match(/^([A-Za-z][A-Za-z /-]{1,40}):(?:\s+(.*))?$/);
   if (!match) return null;
-  return match[1].toLowerCase().replace(/\s+/g, " ");
+  return {
+    key: normalizeSectionKey(match[1]),
+    content: match[2]?.trim() || null,
+  };
 }
 
 function parseHandoffSections(text) {
   const sections = {};
   let current = null;
   for (const line of text.split(/\r?\n/)) {
-    const key = sectionKey(line);
-    if (key && HANDOFF_SECTION_KEYS[key]) {
-      current = HANDOFF_SECTION_KEYS[key];
+    const header = sectionHeader(line);
+    if (header && HANDOFF_SECTION_KEYS[header.key]) {
+      current = HANDOFF_SECTION_KEYS[header.key];
       sections[current] ??= [];
+      if (header.content) sections[current].push(header.content);
       continue;
     }
     if (current) sections[current].push(line);

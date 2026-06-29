@@ -117,6 +117,37 @@ test("buildHandoffDraftInsert creates a conservative Standing draft from pasted 
   });
 });
 
+test("buildHandoffDraftInsert parses common markdown handoff headings", () => {
+  const form = new FormData();
+  form.set("title", "[agent instructions][dave-codex][task] Markdown headings");
+  form.set(
+    "handoff_text",
+    [
+      "## Goal: Build from markdown headings.",
+      "",
+      "**Recommended scope:**",
+      "- Preserve deterministic parsing.",
+      "",
+      "### Verification:",
+      "- Confirm parsed fields are populated.",
+      "",
+      "**Closeout:** Record the smoke row.",
+      "",
+      "## Stop before:",
+      "- Do not auto-promote.",
+    ].join("\n")
+  );
+
+  const draft = buildHandoffDraftInsert(form);
+
+  assert.equal(draft.desired_outcome, "Build from markdown headings.");
+  assert.equal(draft.do_steps, "- Preserve deterministic parsing.");
+  assert.equal(draft.acceptance_criteria, "- Confirm parsed fields are populated.");
+  assert.equal(draft.output_handoff, "Record the smoke row.");
+  assert.equal(draft.boundaries, "- Do not auto-promote.");
+  assert.equal(draft.context, form.get("handoff_text"));
+});
+
 test("buildPromotionRpcArgs preserves the human actor and optional note", () => {
   const form = new FormData();
   form.set("task_id", "92400e1e-5d20-4aa1-8975-2619c56ce265");
