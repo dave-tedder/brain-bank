@@ -1,0 +1,72 @@
+import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import {
+  type AgentTaskAccessRow,
+  assertAgentCanWriteTask,
+  assertClaimAllowed,
+  canAgentWriteTask,
+  isLedgerAutomationState,
+  receiptForTaskTool,
+} from "./_agent_tasks.ts";
+
+const baseTask: AgentTaskAccessRow = {
+  agent_code: "dave-codex",
+  claimed_by: "dave-codex",
+  risk: "medium",
+  explicit_approval: false,
+  status: "Agent Working",
+};
+
+Deno.test("task write guard allows claimed or assigned agent only", () => {
+  assertEquals(canAgentWriteTask(baseTask, "dave-codex"), true);
+  assertEquals(
+    canAgentWriteTask({ ...baseTask, claimed_by: null }, "dave-codex"),
+    true,
+  );
+  assertEquals(canAgentWriteTask(baseTask, "dave-claude-code"), false);
+
+  assertThrows(
+    () => assertAgentCanWriteTask(baseTask, "dave-claude-code"),
+    Error,
+    "claimed or tasks assigned",
+  );
+});
+
+Deno.test("claim guard fails high-risk tasks without explicit approval", () => {
+  assertThrows(
+    () =>
+      assertClaimAllowed({
+        ...baseTask,
+        risk: "high",
+        explicit_approval: false,
+      }),
+    Error,
+    "explicit approval",
+  );
+
+  assertClaimAllowed({ ...baseTask, risk: "high", explicit_approval: true });
+});
+
+Deno.test("task tool actions map to canonical receipts", () => {
+  assertEquals(receiptForTaskTool("update"), {
+    status: "Agent Working",
+    receipt: "AGENT STATUS",
+  });
+  assertEquals(receiptForTaskTool("complete"), {
+    status: "Agent Review",
+    receipt: "AGENT DONE",
+  });
+  assertEquals(receiptForTaskTool("block"), {
+    status: "Agent Needs Input",
+    receipt: "AGENT BLOCKED",
+  });
+  assertEquals(receiptForTaskTool("request-review"), {
+    status: "Agent Review",
+    receipt: "AGENT DONE",
+  });
+});
+
+Deno.test("ledger writes accept only canonical automation states", () => {
+  assertEquals(isLedgerAutomationState("manual-required"), true);
+  assertEquals(isLedgerAutomationState("paused"), true);
+  assertEquals(isLedgerAutomationState("autonomous-now"), false);
+});

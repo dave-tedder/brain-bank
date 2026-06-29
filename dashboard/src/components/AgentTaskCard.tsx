@@ -2,6 +2,7 @@ import {
   AGENT_TASK_STATUSES,
   formatTaskAge,
   taskStatusColor,
+  type AgentTaskEvent,
   type AgentRuntime,
   type AgentTask,
   type AgentTaskStatus,
@@ -13,6 +14,7 @@ import {
 
 interface Props {
   task: AgentTask;
+  events: AgentTaskEvent[];
   runtimes: AgentRuntime[];
   currentPath: string;
   stagger?: number;
@@ -20,6 +22,7 @@ interface Props {
 
 export default function AgentTaskCard({
   task,
+  events,
   runtimes,
   currentPath,
   stagger = 0,
@@ -77,6 +80,19 @@ export default function AgentTaskCard({
           />
         ))}
       </div>
+
+      {events.length > 0 && (
+        <div className="mt-4 border-t border-[var(--border)] pt-3">
+          <h3 className="font-terminal text-sm uppercase tracking-wider text-[var(--text-muted)]">
+            receipt history
+          </h3>
+          <div className="mt-2 space-y-2">
+            {events.map((event) => (
+              <EventRow key={event.id} event={event} />
+            ))}
+          </div>
+        </div>
+      )}
 
       <details className="mt-4 border-t border-[var(--border)] pt-3">
         <summary className="cursor-pointer font-terminal text-sm uppercase tracking-wider text-[var(--text-muted)]">
@@ -155,6 +171,12 @@ function StatusButton({
       <input type="hidden" name="current_status" value={task.status} />
       <input type="hidden" name="agent_code" value={task.agent_code ?? ""} />
       <input type="hidden" name="redirect_path" value={currentPath} />
+      <input
+        name="reason"
+        aria-label={`${shortStatus(target)} receipt note`}
+        placeholder="receipt note"
+        className="task-input mb-1 h-8 text-[10px]"
+      />
       <button
         type="submit"
         disabled={disabled}
@@ -163,6 +185,39 @@ function StatusButton({
         [{shortStatus(target)}]
       </button>
     </form>
+  );
+}
+
+function EventRow({ event }: { event: AgentTaskEvent }) {
+  const payload = event.payload ?? {};
+  const reason = typeof payload.reason === "string" ? payload.reason : null;
+  const status = typeof payload.status === "string" ? payload.status : null;
+
+  return (
+    <div className="border border-[var(--border)] bg-[rgba(15,23,42,0.28)] px-3 py-2">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <span className="font-terminal text-sm text-[var(--text-primary)]">
+          {event.event_type}
+        </span>
+        <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+          {event.agent_code ?? "human"} · {new Date(event.created_at).toLocaleString()}
+        </span>
+      </div>
+      {(reason || status || event.evidence_url) && (
+        <div className="mt-1 text-xs font-mono text-[var(--text-body)] whitespace-pre-wrap">
+          {status && <span>[{status}] </span>}
+          {reason}
+          {event.evidence_url && (
+            <span>
+              {" "}
+              <a href={event.evidence_url} className="underline">
+                evidence
+              </a>
+            </span>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

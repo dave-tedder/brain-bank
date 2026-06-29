@@ -33,6 +33,17 @@ export interface AgentRuntime {
   automation_state: string;
 }
 
+export interface AgentLedgerRow extends AgentRuntime {
+  automation: string | null;
+  last_heartbeat: string | null;
+  last_queue_result: string | null;
+  last_successful_run: string | null;
+  local_context: string | null;
+  optional_skills: string[];
+  notes: string | null;
+  updated_at: string;
+}
+
 export interface AgentTask {
   id: string;
   created_at: string;
@@ -73,6 +84,16 @@ export interface AgentTaskCounts {
   count: number;
 }
 
+export interface AgentTaskEvent {
+  id: string;
+  task_id: string;
+  created_at: string;
+  event_type: string;
+  agent_code: string | null;
+  payload: Record<string, unknown>;
+  evidence_url: string | null;
+}
+
 const TASK_COLS =
   "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id";
 
@@ -84,6 +105,18 @@ export async function listAgentRuntimes(): Promise<AgentRuntime[]> {
 
   if (error) throw error;
   return (data as AgentRuntime[] | null) ?? [];
+}
+
+export async function listAgentLedger(): Promise<AgentLedgerRow[]> {
+  const { data, error } = await supabase()
+    .from("agent_task_ledger")
+    .select(
+      "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at"
+    )
+    .order("agent_code", { ascending: true });
+
+  if (error) throw error;
+  return (data as AgentLedgerRow[] | null) ?? [];
 }
 
 export async function listAgentTasks(opts: {
@@ -139,6 +172,19 @@ export async function getAgentTaskCounts(): Promise<AgentTaskCounts[]> {
     status,
     count: counts.get(status) ?? 0,
   }));
+}
+
+export async function listAgentTaskEvents(taskIds: string[]): Promise<AgentTaskEvent[]> {
+  if (taskIds.length === 0) return [];
+
+  const { data, error } = await supabase()
+    .from("agent_task_events")
+    .select("id, task_id, created_at, event_type, agent_code, payload, evidence_url")
+    .in("task_id", taskIds)
+    .order("created_at", { ascending: true });
+
+  if (error) throw error;
+  return (data as AgentTaskEvent[] | null) ?? [];
 }
 
 export function formatTaskAge(iso: string | null): string {
