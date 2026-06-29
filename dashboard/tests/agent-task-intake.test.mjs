@@ -11,7 +11,6 @@ test("buildIntakeDraftInsert creates a Standing-only draft with safe defaults", 
   form.set("title", "[agent instructions][dave-codex][task] Draft caller smoke");
   form.set("agent_code", "dave-codex");
   form.set("requested_by", "dave");
-  form.set("intake_source", "dashboard");
   form.set("priority", "high");
   form.set("risk", "high");
   form.set("desired_outcome", "Create a harmless draft from the dashboard.");
@@ -26,7 +25,7 @@ test("buildIntakeDraftInsert creates a Standing-only draft with safe defaults", 
     priority: "high",
     risk: "high",
     requested_by: "dave",
-    intake_source: "dashboard",
+    intake_source: "dashboard-button",
     desired_outcome: "Create a harmless draft from the dashboard.",
     context: null,
     sources: [{ type: "dashboard", label: "manual" }],
@@ -36,6 +35,15 @@ test("buildIntakeDraftInsert creates a Standing-only draft with safe defaults", 
     boundaries: null,
     explicit_approval: false,
   });
+});
+
+test("buildIntakeDraftInsert normalizes legacy dashboard source labels", () => {
+  const form = new FormData();
+  form.set("title", "[agent instructions][dave-codex][task] Legacy source");
+  form.set("intake_source", "dashboard");
+  form.set("desired_outcome", "Normalize old dashboard source labels.");
+
+  assert.equal(buildIntakeDraftInsert(form).intake_source, "dashboard-button");
 });
 
 test("buildPromotionRpcArgs preserves the human actor and optional note", () => {
