@@ -27,4 +27,5 @@ export interface PromotionRpcArgs {
 }
 
 export function buildIntakeDraftInsert(formData: FormData): IntakeDraftInsert;
+export function buildHandoffDraftInsert(formData: FormData): IntakeDraftInsert;
 export function buildPromotionRpcArgs(formData: FormData): PromotionRpcArgs;

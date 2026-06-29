@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import {
+  buildHandoffDraftInsert,
   buildIntakeDraftInsert,
   buildPromotionRpcArgs,
 } from "@/lib/agent-task-intake";
@@ -92,6 +93,15 @@ export async function createAgentTask(formData: FormData) {
   const { error } = await supabase()
     .from("agent_tasks")
     .insert(buildIntakeDraftInsert(formData));
+
+  if (error) throw error;
+  revalidatePath("/tasks");
+}
+
+export async function createHandoffAgentTask(formData: FormData) {
+  const { error } = await supabase()
+    .from("agent_tasks")
+    .insert(buildHandoffDraftInsert(formData));
 
   if (error) throw error;
   revalidatePath("/tasks");
