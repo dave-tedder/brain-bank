@@ -9,6 +9,8 @@ const skill = readFileSync(join(here, "SKILL.md"), "utf8");
 
 const requiredSnippets = [
   "manual-only",
+  "not an enforcement boundary by itself",
+  "SQL helpers, MCP task tools, and runtime tests",
   "Stop after one task",
   "Check human-hold and blocked tasks before new work.",
   "Resume exactly one ready hold or block if possible.",
