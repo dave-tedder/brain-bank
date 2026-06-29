@@ -56,6 +56,7 @@ function statusReceipt(target: AgentTaskStatus, current: AgentTaskStatus): strin
     case "Agent Todo":
       return "AGENT FOLLOW-UP";
     case "Agent Working":
+      if (current === "Agent Todo") return "AGENT CLAIMED";
       return current === "Agent Needs Input"
         ? "AGENT HUMAN ANSWERED"
         : "AGENT RESUMED";
