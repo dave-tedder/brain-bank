@@ -1,11 +1,14 @@
 import Link from "next/link";
+import AgentLedgerPanel from "@/components/AgentLedgerPanel";
 import AgentTaskCard from "@/components/AgentTaskCard";
 import AgentTaskFilters from "@/components/AgentTaskFilters";
 import AgentTaskForm from "@/components/AgentTaskForm";
 import {
   AGENT_TASK_STATUS_FILTERS,
   getAgentTaskCounts,
+  listAgentLedger,
   listAgentRuntimes,
+  listAgentTaskEvents,
   listAgentTasks,
   type AgentTaskRisk,
 } from "@/lib/agent-tasks";
@@ -33,8 +36,10 @@ export default async function TasksPage({ searchParams }: Props) {
   const params = await searchParams;
 
   let runtimes: Awaited<ReturnType<typeof listAgentRuntimes>> = [];
+  let ledger: Awaited<ReturnType<typeof listAgentLedger>> = [];
   let counts: Awaited<ReturnType<typeof getAgentTaskCounts>> = [];
   let tasks: Awaited<ReturnType<typeof listAgentTasks>> = [];
+  let eventsByTask = new Map<string, Awaited<ReturnType<typeof listAgentTaskEvents>>>();
   let loadError = false;
 
   try {
@@ -46,7 +51,7 @@ export default async function TasksPage({ searchParams }: Props) {
     ).map((filter) => filter.value);
     const risk = state.risk === "all" ? undefined : (state.risk as AgentTaskRisk);
 
-    [counts, tasks] = await Promise.all([
+    [counts, tasks, ledger] = await Promise.all([
       getAgentTaskCounts(),
       listAgentTasks({
         statuses: statusValues,
@@ -56,7 +61,15 @@ export default async function TasksPage({ searchParams }: Props) {
         limit: PAGE_SIZE,
         offset: state.offset,
       }),
+      listAgentLedger(),
     ]);
+    const events = await listAgentTaskEvents(tasks.map((task) => task.id));
+    eventsByTask = events.reduce((map, event) => {
+      const group = map.get(event.task_id) ?? [];
+      group.push(event);
+      map.set(event.task_id, group);
+      return map;
+    }, new Map<string, typeof events>());
 
     const hasMore = tasks.length === PAGE_SIZE;
     const nextOffset = state.offset + PAGE_SIZE;
@@ -88,6 +101,8 @@ export default async function TasksPage({ searchParams }: Props) {
           sort={state.sort}
         />
 
+        <AgentLedgerPanel ledger={ledger} />
+
         <AgentTaskForm runtimes={runtimes} />
 
         {tasks.length === 0 ? (
@@ -102,6 +117,7 @@ export default async function TasksPage({ searchParams }: Props) {
               <AgentTaskCard
                 key={task.id}
                 task={task}
+                events={eventsByTask.get(task.id) ?? []}
                 runtimes={runtimes}
                 currentPath={currentPath}
                 stagger={i + 3}
