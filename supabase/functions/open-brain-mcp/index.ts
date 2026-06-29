@@ -18,6 +18,7 @@ import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
   AGENT_TASK_STATUSES,
   type AgentTaskAccessRow,
+  type AgentTaskRisk,
   type AgentTaskStatus,
   type AgentTaskToolAction,
   assertAgentCanWriteTask,
@@ -25,6 +26,7 @@ import {
   assertResumeTransitionAllowed,
   assertStatusHeartbeatAllowed,
   compactObject,
+  isAgentTaskRisk,
   isLedgerAutomationState,
   receiptForTaskTool,
 } from "./_agent_tasks.ts";
@@ -1756,13 +1758,28 @@ server.registerTool(
       "Atomically claim the oldest eligible Agent Todo task for an agent code through the SQL helper. Returns no task when none is eligible.",
     inputSchema: {
       agent_code: z.string().min(1),
+      max_risk: z.enum(["low", "medium", "high"]).optional().describe(
+        "Highest task risk this claim may select. Defaults to medium for manual callers; scheduled OE-5 runners pass low.",
+      ),
     },
   },
-  async ({ agent_code }: { agent_code: string }) => {
-    logToolInvocation("claim_next_agent_task", { agent_code }, "mcp");
+  async (
+    { agent_code, max_risk }: {
+      agent_code: string;
+      max_risk?: AgentTaskRisk;
+    },
+  ) => {
+    const effectiveMaxRisk = isAgentTaskRisk(max_risk || "")
+      ? max_risk
+      : "medium";
+    logToolInvocation("claim_next_agent_task", {
+      agent_code,
+      max_risk: effectiveMaxRisk,
+    }, "mcp");
     try {
       const { data, error } = await supabase.rpc("claim_next_agent_task", {
         p_agent_code: agent_code,
+        p_max_risk: effectiveMaxRisk,
       });
       if (error) throw error;
       const tasks = Array.isArray(data) ? data : data ? [data] : [];
@@ -1770,12 +1787,14 @@ server.registerTool(
         return textToolResponse({
           receipt: "NO_ELIGIBLE_TASK",
           agent_code,
+          max_risk: effectiveMaxRisk,
           task: null,
         });
       }
       return textToolResponse({
         receipt: "AGENT CLAIMED",
         agent_code,
+        max_risk: effectiveMaxRisk,
         task: tasks[0],
       });
     } catch (err: unknown) {
