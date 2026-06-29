@@ -8,6 +8,7 @@ const TABS = [
   { href: "/graph", label: "GRAPH", char: "G" },
   { href: "/wiki", label: "WIKI", char: "W" },
   { href: "/projects", label: "PROJ", char: "P" },
+  { href: "/tasks", label: "TASK", char: "!" },
   { href: "/thoughts", label: "LOG", char: "T" },
   { href: "/search", label: "FIND", char: "?" },
   { href: "/chat", label: "CHAT", char: ">" },

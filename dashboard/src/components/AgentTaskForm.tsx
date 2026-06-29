@@ -1,0 +1,125 @@
+import { createAgentTask } from "@/app/tasks/actions";
+import type { AgentRuntime } from "@/lib/agent-tasks";
+
+interface Props {
+  runtimes: AgentRuntime[];
+}
+
+export default function AgentTaskForm({ runtimes }: Props) {
+  return (
+    <details className="animate-in stagger-2 card">
+      <summary className="cursor-pointer font-terminal text-lg text-[var(--text-primary)] uppercase tracking-wider">
+        &gt; NEW TASK PACKET
+      </summary>
+
+      <form action={createAgentTask} className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Field name="title" label="title" required />
+        <label className="space-y-1">
+          <span className="label">agent</span>
+          <select name="agent_code" className="task-input">
+            <option value="">unassigned</option>
+            {runtimes.map((runtime) => (
+              <option key={runtime.agent_code} value={runtime.agent_code}>
+                {runtime.agent_code}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <Field name="project_slug" label="project slug" />
+        <Field name="requested_by" label="requested by" />
+        <Field name="intake_source" label="intake source" />
+
+        <label className="space-y-1">
+          <span className="label">priority</span>
+          <select name="priority" defaultValue="medium" className="task-input">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+
+        <label className="space-y-1">
+          <span className="label">risk</span>
+          <select name="risk" defaultValue="medium" className="task-input">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+
+        <label className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[var(--text-muted)] md:col-span-2">
+          <input name="explicit_approval" type="checkbox" />
+          explicit approval for high-risk work
+        </label>
+
+        <Textarea name="desired_outcome" label="desired outcome" required />
+        <Textarea name="context" label="context" />
+        <Textarea name="do_steps" label="do steps" />
+        <Textarea name="acceptance_criteria" label="acceptance criteria" />
+        <Textarea name="output_handoff" label="output handoff" />
+        <Textarea name="boundaries" label="boundaries" />
+        <Textarea
+          name="sources"
+          label="sources json array"
+          defaultValue="[]"
+        />
+
+        <div className="md:col-span-2">
+          <button type="submit" className="task-button">
+            [CREATE TASK]
+          </button>
+        </div>
+      </form>
+    </details>
+  );
+}
+
+function Field({
+  name,
+  label,
+  required = false,
+  defaultValue = "",
+}: {
+  name: string;
+  label: string;
+  required?: boolean;
+  defaultValue?: string;
+}) {
+  return (
+    <label className="space-y-1">
+      <span className="label">{label}</span>
+      <input
+        name={name}
+        required={required}
+        defaultValue={defaultValue}
+        className="task-input"
+      />
+    </label>
+  );
+}
+
+function Textarea({
+  name,
+  label,
+  required = false,
+  defaultValue = "",
+}: {
+  name: string;
+  label: string;
+  required?: boolean;
+  defaultValue?: string;
+}) {
+  return (
+    <label className="space-y-1 md:col-span-2">
+      <span className="label">{label}</span>
+      <textarea
+        name={name}
+        required={required}
+        defaultValue={defaultValue}
+        rows={3}
+        className="task-input"
+      />
+    </label>
+  );
+}

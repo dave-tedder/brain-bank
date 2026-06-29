@@ -1,0 +1,243 @@
+import {
+  AGENT_TASK_STATUSES,
+  formatTaskAge,
+  taskStatusColor,
+  type AgentRuntime,
+  type AgentTask,
+  type AgentTaskStatus,
+} from "@/lib/agent-tasks";
+import {
+  moveAgentTaskStatus,
+  updateAgentTask,
+} from "@/app/tasks/actions";
+
+interface Props {
+  task: AgentTask;
+  runtimes: AgentRuntime[];
+  currentPath: string;
+  stagger?: number;
+}
+
+export default function AgentTaskCard({
+  task,
+  runtimes,
+  currentPath,
+  stagger = 0,
+}: Props) {
+  const color = taskStatusColor(task.status);
+  const approvalNeeded = task.risk === "high" && !task.explicit_approval;
+
+  return (
+    <article
+      className={`card scanline-hover border-l-2 animate-in stagger-${Math.min(stagger, 8)}`}
+      style={{ borderLeftColor: color }}
+    >
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <h2 className="font-terminal text-xl text-[var(--text-primary)]">
+            {task.title}
+          </h2>
+          <div className="text-[10px] font-mono uppercase tracking-wider text-[var(--text-muted)] mt-1">
+            [{task.status}] · {task.agent_code ?? "unassigned"} · risk {task.risk} · priority {task.priority} · {formatTaskAge(task.updated_at)}
+          </div>
+        </div>
+        <div className="text-right text-[10px] font-mono uppercase tracking-wider text-[var(--text-muted)]">
+          {task.project_slug && <div>{task.project_slug}</div>}
+          {task.intake_source && <div>{task.intake_source}</div>}
+        </div>
+      </div>
+
+      {approvalNeeded && (
+        <div className="mt-3 border border-[var(--warning)] bg-[rgba(251,191,36,0.06)] px-3 py-2 text-xs font-mono text-[var(--warning)]">
+          HIGH RISK :: explicit approval required before Agent Working
+        </div>
+      )}
+
+      <p className="mt-4 text-sm font-mono text-[var(--text-body)] whitespace-pre-wrap">
+        {task.desired_outcome}
+      </p>
+
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs font-mono">
+        <Packet label="context" value={task.context} />
+        <Packet label="do" value={task.do_steps} />
+        <Packet label="acceptance" value={task.acceptance_criteria} />
+        <Packet label="handoff" value={task.output_handoff} />
+        <Packet label="boundaries" value={task.boundaries} />
+        <Packet label="reason" value={task.blocked_reason ?? task.review_reason ?? task.last_failure_reason} />
+      </div>
+
+      <div className="mt-4 flex gap-2 flex-wrap">
+        {AGENT_TASK_STATUSES.map((status) => (
+          <StatusButton
+            key={status}
+            task={task}
+            target={status}
+            currentPath={currentPath}
+            disabled={status === task.status || (status === "Agent Working" && approvalNeeded)}
+          />
+        ))}
+      </div>
+
+      <details className="mt-4 border-t border-[var(--border)] pt-3">
+        <summary className="cursor-pointer font-terminal text-sm uppercase tracking-wider text-[var(--text-muted)]">
+          edit packet
+        </summary>
+        <form action={updateAgentTask} className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <input type="hidden" name="task_id" value={task.id} />
+          <Field name="title" label="title" defaultValue={task.title} required />
+          <label className="space-y-1">
+            <span className="label">agent</span>
+            <select name="agent_code" defaultValue={task.agent_code ?? ""} className="task-input">
+              <option value="">unassigned</option>
+              {runtimes.map((runtime) => (
+                <option key={runtime.agent_code} value={runtime.agent_code}>
+                  {runtime.agent_code}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Field name="project_slug" label="project slug" defaultValue={task.project_slug ?? ""} />
+          <Field name="requested_by" label="requested by" defaultValue={task.requested_by ?? ""} />
+          <Field name="intake_source" label="intake source" defaultValue={task.intake_source ?? ""} />
+          <Select name="priority" label="priority" defaultValue={task.priority} />
+          <Select name="risk" label="risk" defaultValue={task.risk} />
+          <label className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[var(--text-muted)] md:col-span-2">
+            <input name="explicit_approval" type="checkbox" defaultChecked={task.explicit_approval} />
+            explicit approval for high-risk work
+          </label>
+          <Textarea name="desired_outcome" label="desired outcome" defaultValue={task.desired_outcome} required />
+          <Textarea name="context" label="context" defaultValue={task.context ?? ""} />
+          <Textarea name="do_steps" label="do steps" defaultValue={task.do_steps ?? ""} />
+          <Textarea name="acceptance_criteria" label="acceptance criteria" defaultValue={task.acceptance_criteria ?? ""} />
+          <Textarea name="output_handoff" label="output handoff" defaultValue={task.output_handoff ?? ""} />
+          <Textarea name="boundaries" label="boundaries" defaultValue={task.boundaries ?? ""} />
+          <Textarea name="sources" label="sources json array" defaultValue={JSON.stringify(task.sources ?? [])} />
+          <div className="md:col-span-2">
+            <button type="submit" className="task-button">
+              [SAVE PACKET]
+            </button>
+          </div>
+        </form>
+      </details>
+    </article>
+  );
+}
+
+function Packet({ label, value }: { label: string; value: string | null }) {
+  if (!value) return null;
+  return (
+    <div>
+      <div className="font-terminal uppercase tracking-wider text-[var(--text-muted)]">
+        {label}
+      </div>
+      <div className="mt-1 text-[var(--text-body)] whitespace-pre-wrap line-clamp-4">
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function StatusButton({
+  task,
+  target,
+  currentPath,
+  disabled,
+}: {
+  task: AgentTask;
+  target: AgentTaskStatus;
+  currentPath: string;
+  disabled: boolean;
+}) {
+  return (
+    <form action={moveAgentTaskStatus}>
+      <input type="hidden" name="task_id" value={task.id} />
+      <input type="hidden" name="target_status" value={target} />
+      <input type="hidden" name="current_status" value={task.status} />
+      <input type="hidden" name="agent_code" value={task.agent_code ?? ""} />
+      <input type="hidden" name="redirect_path" value={currentPath} />
+      <button
+        type="submit"
+        disabled={disabled}
+        className="task-button disabled:opacity-30 disabled:cursor-not-allowed"
+      >
+        [{shortStatus(target)}]
+      </button>
+    </form>
+  );
+}
+
+function shortStatus(status: AgentTaskStatus): string {
+  switch (status) {
+    case "Standing":
+      return "standing";
+    case "Agent Todo":
+      return "todo";
+    case "Agent Working":
+      return "working";
+    case "Agent Needs Input":
+      return "needs input";
+    case "Agent Review":
+      return "review";
+    case "Agent Done":
+      return "done";
+  }
+}
+
+function Field({
+  name,
+  label,
+  defaultValue,
+  required = false,
+}: {
+  name: string;
+  label: string;
+  defaultValue: string;
+  required?: boolean;
+}) {
+  return (
+    <label className="space-y-1">
+      <span className="label">{label}</span>
+      <input name={name} required={required} defaultValue={defaultValue} className="task-input" />
+    </label>
+  );
+}
+
+function Select({
+  name,
+  label,
+  defaultValue,
+}: {
+  name: string;
+  label: string;
+  defaultValue: string;
+}) {
+  return (
+    <label className="space-y-1">
+      <span className="label">{label}</span>
+      <select name={name} defaultValue={defaultValue} className="task-input">
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+      </select>
+    </label>
+  );
+}
+
+function Textarea({
+  name,
+  label,
+  defaultValue,
+  required = false,
+}: {
+  name: string;
+  label: string;
+  defaultValue: string;
+  required?: boolean;
+}) {
+  return (
+    <label className="space-y-1 md:col-span-2">
+      <span className="label">{label}</span>
+      <textarea name={name} required={required} defaultValue={defaultValue} rows={3} className="task-input" />
+    </label>
+  );
+}
