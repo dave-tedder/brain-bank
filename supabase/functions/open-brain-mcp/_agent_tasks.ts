@@ -79,6 +79,14 @@ export function assertClaimAllowed(task: AgentTaskAccessRow): void {
   }
 }
 
+export function assertStatusHeartbeatAllowed(task: AgentTaskAccessRow): void {
+  if (task.status !== "Agent Working") {
+    throw new Error(
+      "AGENT STATUS heartbeat is only allowed while the task is Agent Working.",
+    );
+  }
+}
+
 export function receiptForTaskTool(
   action: "update" | "complete" | "block" | "request-review",
 ): { status: AgentTaskStatus; receipt: AgentTaskReceipt } {

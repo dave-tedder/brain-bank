@@ -21,6 +21,7 @@ import {
   type AgentTaskStatus,
   assertAgentCanWriteTask,
   assertClaimAllowed,
+  assertStatusHeartbeatAllowed,
   compactObject,
   isLedgerAutomationState,
   receiptForTaskTool,
@@ -647,7 +648,10 @@ async function moveAgentTaskViaTool(args: {
   const task = await loadAgentTaskForTool(args.taskId);
   if (!task) throw new Error(`Task not found: ${args.taskId}`);
   assertAgentCanWriteTask(task, args.agentCode);
-  if (args.action === "update") assertClaimAllowed(task);
+  if (args.action === "update") {
+    assertStatusHeartbeatAllowed(task);
+    assertClaimAllowed(task);
+  }
 
   const { status, receipt } = receiptForTaskTool(args.action);
   const { data, error } = await supabase.rpc("move_agent_task_status", {
