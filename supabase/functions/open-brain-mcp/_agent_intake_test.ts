@@ -1,5 +1,9 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert@1";
-import { buildAgentTaskIntakeRecord } from "./_agent_intake.ts";
+import {
+  assertNoActiveActionItemDraft,
+  buildActionItemPromotionIntakeRecord,
+  buildAgentTaskIntakeRecord,
+} from "./_agent_intake.ts";
 
 const baseInput = {
   desired_outcome: "Create a draft intake task for OE-6 smoke verification.",
@@ -84,5 +88,97 @@ Deno.test("intake requires packet fields and array sources", () => {
       }),
     Error,
     "sources must be an array",
+  );
+});
+
+Deno.test("action-item promotion creates a conservative Standing draft packet", () => {
+  const record = buildActionItemPromotionIntakeRecord({
+    action_item: {
+      id: "33333333-3333-4333-8333-333333333333",
+      description: "Review the OE-6 manual action-item promotion path.",
+      status: "open",
+      source_thought_id: "44444444-4444-4444-8444-444444444444",
+    },
+    agent_code: "dave-codex",
+    project_slug: "brain-bank",
+    requested_by: "oe6-test",
+  });
+
+  assertEquals(record.status, "Standing");
+  assertEquals(record.intake_source, "action-item-promotion");
+  assertEquals(
+    record.linked_action_item_id,
+    "33333333-3333-4333-8333-333333333333",
+  );
+  assertEquals(
+    record.source_thought_id,
+    "44444444-4444-4444-8444-444444444444",
+  );
+  assertEquals(record.agent_code, "dave-codex");
+  assertEquals(record.project_slug, "brain-bank");
+  assertEquals(record.risk, "low");
+  assertEquals(record.priority, "medium");
+  assertEquals(record.explicit_approval, false);
+  assertEquals(Object.hasOwn(record, "claimed_by"), false);
+  assertEquals(Object.hasOwn(record, "claim_expires_at"), false);
+  assertEquals(
+    record.desired_outcome,
+    "Review the OE-6 manual action-item promotion path.",
+  );
+  assertEquals(record.sources, [
+    {
+      kind: "action_item",
+      id: "33333333-3333-4333-8333-333333333333",
+      source_thought_id: "44444444-4444-4444-8444-444444444444",
+    },
+  ]);
+  assertEquals(
+    record.boundaries.includes("Do not promote, claim, run, deploy, send"),
+    true,
+  );
+});
+
+Deno.test("action-item promotion rejects unsafe or invalid input", () => {
+  assertThrows(
+    () =>
+      buildActionItemPromotionIntakeRecord({
+        action_item: {
+          id: "33333333-3333-4333-8333-333333333333",
+          description: "Already handled.",
+          status: "resolved",
+        },
+      }),
+    Error,
+    "Only open action_items",
+  );
+
+  assertThrows(
+    () =>
+      buildActionItemPromotionIntakeRecord({
+        action_item: {
+          id: "33333333-3333-4333-8333-333333333333",
+          description: " ",
+          status: "open",
+        },
+      }),
+    Error,
+    "description is required",
+  );
+});
+
+Deno.test("action-item promotion rejects duplicate active linked drafts", () => {
+  assertThrows(
+    () =>
+      assertNoActiveActionItemDraft(
+        [{ id: "55555555-5555-4555-8555-555555555555", status: "Standing" }],
+        "33333333-3333-4333-8333-333333333333",
+      ),
+    Error,
+    "already has an active agent task draft",
+  );
+
+  assertNoActiveActionItemDraft(
+    [{ id: "66666666-6666-4666-8666-666666666666", status: "Agent Review" }],
+    "33333333-3333-4333-8333-333333333333",
   );
 });
