@@ -16,6 +16,11 @@ import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
+  AGENT_TASK_INTAKE_SOURCES,
+  type AgentTaskIntakeSource,
+  buildAgentTaskIntakeRecord,
+} from "./_agent_intake.ts";
+import {
   AGENT_TASK_STATUSES,
   type AgentTaskAccessRow,
   type AgentTaskRisk,
@@ -23,6 +28,7 @@ import {
   type AgentTaskToolAction,
   assertAgentCanWriteTask,
   assertClaimAllowed,
+  assertIntakePromotionAllowed,
   assertResumeTransitionAllowed,
   assertStatusHeartbeatAllowed,
   compactObject,
@@ -1745,6 +1751,136 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error fetching agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "create_agent_task_intake",
+  {
+    title: "Create Agent Task Intake",
+    description:
+      "Create a draft-safe Open Engine intake record. This always creates a Standing task, never Agent Todo, and never grants explicit approval.",
+    inputSchema: {
+      desired_outcome: z.string().min(1),
+      context: z.string().min(1),
+      sources: z.array(z.unknown()).describe(
+        "Source references for the task packet, such as handoff docs, capture IDs, or session-log paths.",
+      ),
+      do_steps: z.string().min(1),
+      acceptance_criteria: z.string().min(1),
+      output_handoff: z.string().min(1),
+      boundaries: z.string().min(1),
+      intake_source: z.enum(AGENT_TASK_INTAKE_SOURCES).describe(
+        "Allowed OE-6 intake source. Slack is intake-only; action-item promotion is manual-only.",
+      ),
+      agent_code: z.string().min(1).optional(),
+      project_slug: z.string().min(1).optional(),
+      priority: z.enum(["low", "medium", "high"]).optional(),
+      risk: z.enum(["low", "medium", "high"]).optional(),
+      requested_by: z.string().min(1).optional(),
+      title: z.string().min(1).optional(),
+      source_thought_id: z.string().uuid().optional(),
+      linked_action_item_id: z.string().uuid().optional(),
+    },
+  },
+  async (
+    args: {
+      desired_outcome: string;
+      context: string;
+      sources: unknown[];
+      do_steps: string;
+      acceptance_criteria: string;
+      output_handoff: string;
+      boundaries: string;
+      intake_source: AgentTaskIntakeSource;
+      agent_code?: string;
+      project_slug?: string;
+      priority?: "low" | "medium" | "high";
+      risk?: AgentTaskRisk;
+      requested_by?: string;
+      title?: string;
+      source_thought_id?: string;
+      linked_action_item_id?: string;
+    },
+  ) => {
+    logToolInvocation("create_agent_task_intake", {
+      intake_source: args.intake_source,
+      agent_code: args.agent_code,
+      project_slug: args.project_slug,
+      priority: args.priority,
+      risk: args.risk,
+      source_thought_id: args.source_thought_id,
+      linked_action_item_id: args.linked_action_item_id,
+    }, "mcp");
+    try {
+      const record = buildAgentTaskIntakeRecord(args);
+      const { data, error } = await supabase
+        .from("agent_tasks")
+        .insert(record)
+        .select(AGENT_TASK_SELECT)
+        .single();
+      if (error) throw error;
+      return textToolResponse({
+        receipt: "INTAKE_DRAFT_CREATED",
+        claimable_by_runner: false,
+        promotion_required: true,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error creating agent task intake: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "promote_agent_task_intake",
+  {
+    title: "Promote Agent Task Intake",
+    description:
+      "Human-controlled promotion for one Standing intake draft. Moves it to Agent Todo so normal Queue Runner claim rules can see it. Does not grant explicit approval.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      promoted_by: z.string().min(1).optional(),
+      note: z.string().min(1).optional(),
+    },
+  },
+  async (
+    { task_id, promoted_by, note }: {
+      task_id: string;
+      promoted_by?: string;
+      note?: string;
+    },
+  ) => {
+    logToolInvocation("promote_agent_task_intake", {
+      task_id,
+      promoted_by,
+    }, "mcp");
+    try {
+      const task = await loadAgentTaskForTool(task_id);
+      if (!task) throw new Error(`Task not found: ${task_id}`);
+      assertIntakePromotionAllowed(task);
+      const { data, error } = await supabase.rpc(
+        "promote_agent_task_intake",
+        {
+          p_task_id: task_id,
+          p_promoted_by: promoted_by ?? null,
+          p_note: note ?? null,
+        },
+      );
+      if (error) throw error;
+      return textToolResponse({
+        receipt: "INTAKE_PROMOTED",
+        audit_event_written: false,
+        explicit_approval_granted: false,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error promoting agent task intake: ${(err as Error).message}`,
       );
     }
   },

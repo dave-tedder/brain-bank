@@ -3,6 +3,7 @@ import {
   type AgentTaskAccessRow,
   assertAgentCanWriteTask,
   assertClaimAllowed,
+  assertIntakePromotionAllowed,
   assertResumeTransitionAllowed,
   assertStatusHeartbeatAllowed,
   canAgentWriteTask,
@@ -57,6 +58,26 @@ Deno.test("status heartbeat guard only allows active working tasks", () => {
       () => assertStatusHeartbeatAllowed({ ...baseTask, status }),
       Error,
       "only allowed while the task is Agent Working",
+    );
+  }
+});
+
+Deno.test("intake promotion guard only allows Standing drafts", () => {
+  assertIntakePromotionAllowed({ ...baseTask, status: "Standing" });
+
+  for (
+    const status of [
+      "Agent Todo",
+      "Agent Working",
+      "Agent Needs Input",
+      "Agent Review",
+      "Agent Done",
+    ] as const
+  ) {
+    assertThrows(
+      () => assertIntakePromotionAllowed({ ...baseTask, status }),
+      Error,
+      "Only Standing intake drafts",
     );
   }
 });
