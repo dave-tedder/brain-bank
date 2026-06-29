@@ -9,7 +9,7 @@ export default function AgentTaskForm({ runtimes }: Props) {
   return (
     <details className="animate-in stagger-2 card">
       <summary className="cursor-pointer font-terminal text-lg text-[var(--text-primary)] uppercase tracking-wider">
-        &gt; NEW TASK PACKET
+        &gt; NEW STANDING DRAFT
       </summary>
 
       <form action={createAgentTask} className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -48,11 +48,6 @@ export default function AgentTaskForm({ runtimes }: Props) {
           </select>
         </label>
 
-        <label className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[var(--text-muted)] md:col-span-2">
-          <input name="explicit_approval" type="checkbox" />
-          explicit approval for high-risk work
-        </label>
-
         <Textarea name="desired_outcome" label="desired outcome" required />
         <Textarea name="context" label="context" />
         <Textarea name="do_steps" label="do steps" />
@@ -67,7 +62,7 @@ export default function AgentTaskForm({ runtimes }: Props) {
 
         <div className="md:col-span-2">
           <button type="submit" className="task-button">
-            [CREATE TASK]
+            [CREATE STANDING DRAFT]
           </button>
         </div>
       </form>

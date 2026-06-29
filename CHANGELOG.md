@@ -11,6 +11,7 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 ### Added
 
 - **Open Engine OE-1 manual task board foundation.** Added the `agent_tasks`, `agent_task_events`, and `agent_task_ledger` schema with service-role-only RLS, narrowed manual-board grants, seeded local agent runtimes, SQL helpers for claim/status movement, and a high-risk explicit-approval guard. The dashboard now has a protected `/tasks` board for manually creating task packets, editing core fields, filtering by status/agent/risk, and moving tasks through Nate B. Jones' Open Engine statuses without adding an autonomous runner.
+- **Open Engine OE-6 dashboard intake controls.** The `/tasks` creation form now creates `Standing` intake drafts only, keeps `explicit_approval=false`, and preserves the human requester. Standing drafts get a dedicated human promotion action backed by `promote_agent_task_intake`, moving them to `Agent Todo` without creating receipt events or automatic executable work.
 
 ### Changed
 

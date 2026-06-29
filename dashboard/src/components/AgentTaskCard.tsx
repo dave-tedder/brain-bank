@@ -9,6 +9,7 @@ import {
 } from "@/lib/agent-tasks";
 import {
   moveAgentTaskStatus,
+  promoteAgentTaskIntake,
   updateAgentTask,
 } from "@/app/tasks/actions";
 
@@ -56,6 +57,33 @@ export default function AgentTaskCard({
         </div>
       )}
 
+      {task.status === "Standing" && (
+        <form
+          action={promoteAgentTaskIntake}
+          className="mt-3 border border-[var(--border)] bg-[rgba(95,247,157,0.05)] px-3 py-3"
+        >
+          <input type="hidden" name="task_id" value={task.id} />
+          <input type="hidden" name="redirect_path" value={currentPath} />
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(8rem,12rem)_1fr_auto] gap-2">
+            <input
+              name="promoted_by"
+              defaultValue={task.requested_by ?? "dashboard"}
+              aria-label="promoted by"
+              className="task-input h-9 text-[10px]"
+            />
+            <input
+              name="promotion_note"
+              aria-label="promotion note"
+              placeholder="human promotion note"
+              className="task-input h-9 text-[10px]"
+            />
+            <button type="submit" className="task-button">
+              [PROMOTE TO TODO]
+            </button>
+          </div>
+        </form>
+      )}
+
       <p className="mt-4 text-sm font-mono text-[var(--text-body)] whitespace-pre-wrap">
         {task.desired_outcome}
       </p>
@@ -76,7 +104,11 @@ export default function AgentTaskCard({
             task={task}
             target={status}
             currentPath={currentPath}
-            disabled={status === task.status || (status === "Agent Working" && approvalNeeded)}
+            disabled={
+              status === task.status ||
+              (status === "Agent Working" && approvalNeeded) ||
+              (task.status === "Standing" && status === "Agent Todo")
+            }
           />
         ))}
       </div>
