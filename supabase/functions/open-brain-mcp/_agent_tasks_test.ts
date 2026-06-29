@@ -3,6 +3,7 @@ import {
   type AgentTaskAccessRow,
   assertAgentCanWriteTask,
   assertClaimAllowed,
+  assertStatusHeartbeatAllowed,
   canAgentWriteTask,
   isLedgerAutomationState,
   receiptForTaskTool,
@@ -44,6 +45,18 @@ Deno.test("claim guard fails high-risk tasks without explicit approval", () => {
   );
 
   assertClaimAllowed({ ...baseTask, risk: "high", explicit_approval: true });
+});
+
+Deno.test("status heartbeat guard only allows active working tasks", () => {
+  assertStatusHeartbeatAllowed(baseTask);
+
+  for (const status of ["Agent Needs Input", "Agent Review"] as const) {
+    assertThrows(
+      () => assertStatusHeartbeatAllowed({ ...baseTask, status }),
+      Error,
+      "only allowed while the task is Agent Working",
+    );
+  }
 });
 
 Deno.test("task tool actions map to canonical receipts", () => {
