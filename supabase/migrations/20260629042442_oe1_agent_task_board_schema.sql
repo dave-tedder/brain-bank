@@ -100,8 +100,8 @@ create table if not exists public.agent_task_events (
 
 insert into public.agent_task_ledger (agent_code, operator, runtime, automation, automation_state, notes)
 values
-  ('dave-codex', 'Dave Tedder', 'Codex', 'manual', 'manual-required', 'Seeded OE-1 manual runtime.'),
-  ('dave-claude-code', 'Dave Tedder', 'Claude Code', 'manual', 'manual-required', 'Seeded OE-1 manual runtime.')
+  ('local-codex', 'Local Operator', 'Codex', 'manual', 'manual-required', 'Seeded OE-1 manual runtime.'),
+  ('local-claude-code', 'Local Operator', 'Claude Code', 'manual', 'manual-required', 'Seeded OE-1 manual runtime.')
 on conflict (agent_code) do nothing;
 
 create index if not exists agent_tasks_status_created_at_idx
