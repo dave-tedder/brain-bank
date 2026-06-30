@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.3] - 2026-06-30
+
 ### Changed
 
 - **Compile-pages scheduled synthesis now uses lower concurrency.** Scheduled wiki compilation no longer runs five slow page-synthesis calls at once, reducing provider timeout and budget-spike risk while keeping targeted and manual compile behavior unchanged.
@@ -164,7 +168,9 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 - This snapshot preceded the public `v0.1.0` release, which shipped on 2026-04-30 after the deploy-from-scratch walkthrough was verified against fresh Supabase projects.
 - The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/dave-tedder/brain-bank/compare/v0.2.2...v0.2.3
+[0.2.2]: https://github.com/dave-tedder/brain-bank/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/dave-tedder/brain-bank/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/dave-tedder/brain-bank/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/dave-tedder/brain-bank/releases/tag/v0.1.0
