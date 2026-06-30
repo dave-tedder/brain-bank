@@ -15,6 +15,19 @@ import {
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import {
+  AGENT_TASK_STATUSES,
+  type AgentTaskAccessRow,
+  type AgentTaskStatus,
+  type AgentTaskToolAction,
+  assertAgentCanWriteTask,
+  assertClaimAllowed,
+  assertResumeTransitionAllowed,
+  assertStatusHeartbeatAllowed,
+  compactObject,
+  isLedgerAutomationState,
+  receiptForTaskTool,
+} from "./_agent_tasks.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -84,7 +97,10 @@ async function isDuplicate(hash: string): Promise<boolean> {
 // timestamp only advances when the record actually changes, so an unchanged
 // re-sync is correctly skipped while a genuine edit still lands a fresh
 // capture.
-async function isNotionDuplicate(pageId: string, lastEdited: string): Promise<boolean> {
+async function isNotionDuplicate(
+  pageId: string,
+  lastEdited: string,
+): Promise<boolean> {
   const { data } = await supabase
     .from("thoughts")
     .select("id")
@@ -112,9 +128,10 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     model: "openai/gpt-4o-mini",
     response_format: { type: "json_object" },
     messages: [
-        {
-          role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
+      {
+        role: "system",
+        content:
+          `Extract metadata from the user's captured thought. Return JSON with:
 - "people": array of people mentioned by full name when possible, e.g. "${loadProfile().example_person_name}" (use full name when possible) (empty if none)
 - "action_items": array of FUTURE to-dos the user still needs to do. STRICT RULES:
     * Only include items phrased as future work: "need to X", "should X", "TODO: X", an imperative about something not yet done, or an explicit open question.
@@ -123,16 +140,22 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
     * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one). Preserve hyphenated tokens as a single tag: "fitness-training" stays as one tag, never split into ["fitness", "training"].
+- "topics": array of 1-3 short lowercase topic tags, e.g. "${
+            loadProfile().domain.vocabulary[0]
+          }" not "${
+            titleCase(loadProfile().domain.vocabulary[0])
+          }", "project management" not "Project Management" (always at least one). Preserve hyphenated tokens as a single tag: "fitness-training" stays as one tag, never split into ["fitness", "training"].
 - "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
-- "project": the project or system this note is ABOUT, e.g. ${loadProfile().example_projects.map((p) => `"${p}"`).join(", ")}, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
+- "project": the project or system this note is ABOUT, e.g. ${
+            loadProfile().example_projects.map((p) => `"${p}"`).join(", ")
+          }, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
 - "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
 
 Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or MEETING:, use that to inform the type field (decision->observation, CLIENT->person_note, IDEA->idea, MEETING->observation) and extract structured fields accordingly.
 
 Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
-        },
-        { role: "user", content: text },
+      },
+      { role: "user", content: text },
     ],
   });
   const d = data as { choices: Array<{ message: { content: string } }> };
@@ -146,7 +169,8 @@ Only extract what's explicitly there. Be conservative — empty arrays and null 
 // --- Action Item Tracking ---
 
 function normalizeActionText(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
+  return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ")
+    .trim();
 }
 
 // Content starting with any of these prefixes is a mechanical/informational capture
@@ -242,7 +266,7 @@ function quoteOverlap(quote: string, description: string): number {
         .replace(/[^a-z0-9\s]+/g, " ")
         .split(/\s+/)
         .filter((w) => w.length >= 3)
-        .map(stem)
+        .map(stem),
     );
   const a = toSet(quote);
   const b = toSet(description);
@@ -259,7 +283,7 @@ const LOG_TRUNC = 200;
 async function extractAndStoreActionItems(
   thoughtId: string,
   metadata: Record<string, unknown>,
-  content: string
+  content: string,
 ): Promise<void> {
   // Observations, references, and email-sourced captures are descriptive,
   // not commitment-shaped, so they must not create open action items.
@@ -286,7 +310,7 @@ async function extractAndStoreActionItems(
     .eq("status", "open");
 
   const existingNormalized = new Set(
-    (existingItems || []).map((item) => normalizeActionText(item.description))
+    (existingItems || []).map((item) => normalizeActionText(item.description)),
   );
 
   const rows = items
@@ -295,7 +319,9 @@ async function extractAndStoreActionItems(
       description: String(desc),
       status: "open",
     }))
-    .filter((row) => !existingNormalized.has(normalizeActionText(row.description)));
+    .filter((row) =>
+      !existingNormalized.has(normalizeActionText(row.description))
+    );
 
   if (rows.length === 0) return;
   const { error } = await supabase.from("action_items").insert(rows);
@@ -306,7 +332,7 @@ async function checkAutoResolve(
   newThoughtContent: string,
   newThoughtId: string,
   newMetadata: Record<string, unknown>,
-  excludeSourceThoughtIds: string[] = []
+  excludeSourceThoughtIds: string[] = [],
 ): Promise<string[]> {
   // LAYER 0: structural-source block. Mechanical captures (sync jobs, email
   // threads, weekly reviews, failure reports) carry topic/person metadata that
@@ -315,9 +341,11 @@ async function checkAutoResolve(
   // via a manual `done:` command or a dedicated session-log thought.
   if (isMechanicalCapture(newThoughtContent)) {
     console.log(
-      `checkAutoResolve: blocked mechanical capture (prefix match): ${newThoughtContent
-        .trimStart()
-        .slice(0, 80)}`
+      `checkAutoResolve: blocked mechanical capture (prefix match): ${
+        newThoughtContent
+          .trimStart()
+          .slice(0, 80)
+      }`,
     );
     return [];
   }
@@ -325,13 +353,20 @@ async function checkAutoResolve(
   // Scoping axes from the NEW thought. Auto-resolve is only safe when we can
   // scope candidates by project / topic / person — otherwise we fall back to
   // doing nothing rather than risk a cross-project false positive.
-  const newProject = (newMetadata?.project as string | null | undefined) || null;
+  const newProject = (newMetadata?.project as string | null | undefined) ||
+    null;
   const newTopicsRaw = newMetadata?.topics;
-  const newTopics: string[] = Array.isArray(newTopicsRaw) ? (newTopicsRaw as string[]) : [];
+  const newTopics: string[] = Array.isArray(newTopicsRaw)
+    ? (newTopicsRaw as string[])
+    : [];
   const newPeopleRaw = newMetadata?.people;
-  const newPeople: string[] = Array.isArray(newPeopleRaw) ? (newPeopleRaw as string[]) : [];
+  const newPeople: string[] = Array.isArray(newPeopleRaw)
+    ? (newPeopleRaw as string[])
+    : [];
 
-  if (!newProject && newTopics.length === 0 && newPeople.length === 0) return [];
+  if (!newProject && newTopics.length === 0 && newPeople.length === 0) {
+    return [];
+  }
 
   // Scope by project, topic, or person in SQL before LIMIT so older matching
   // items remain reachable without loading the full open queue.
@@ -344,14 +379,19 @@ async function checkAutoResolve(
     src_people: string[];
   };
 
-  const { data: enrichedRaw, error } = await supabase.rpc("find_candidate_action_items", {
-    p_project: newProject,
-    p_topics: newTopics,
-    p_people: newPeople,
-    p_exclude_source_ids: excludeSourceThoughtIds,
-  });
+  const { data: enrichedRaw, error } = await supabase.rpc(
+    "find_candidate_action_items",
+    {
+      p_project: newProject,
+      p_topics: newTopics,
+      p_people: newPeople,
+      p_exclude_source_ids: excludeSourceThoughtIds,
+    },
+  );
 
-  if (error || !enrichedRaw || (enrichedRaw as EnrichedItem[]).length === 0) return [];
+  if (error || !enrichedRaw || (enrichedRaw as EnrichedItem[]).length === 0) {
+    return [];
+  }
 
   let candidateItems = enrichedRaw as EnrichedItem[];
 
@@ -378,7 +418,9 @@ async function checkAutoResolve(
     });
     const droppedCount = beforeCount - candidateItems.length;
     if (droppedCount > 0) {
-      console.log(`checkAutoResolve: restatement guard dropped ${droppedCount} candidate(s)`);
+      console.log(
+        `checkAutoResolve: restatement guard dropped ${droppedCount} candidate(s)`,
+      );
     }
     if (candidateItems.length === 0) return [];
   }
@@ -389,8 +431,12 @@ async function checkAutoResolve(
     .map((item, i) => {
       const ctx = [
         item.src_project ? `project=${item.src_project}` : null,
-        item.src_topics.length > 0 ? `topics=${item.src_topics.join("/")}` : null,
-        item.src_people.length > 0 ? `people=${item.src_people.join("/")}` : null,
+        item.src_topics.length > 0
+          ? `topics=${item.src_topics.join("/")}`
+          : null,
+        item.src_people.length > 0
+          ? `people=${item.src_people.join("/")}`
+          : null,
       ].filter(Boolean).join(", ");
       return `${i + 1}. [${ctx || "no-context"}] ${item.description}`;
     })
@@ -408,9 +454,10 @@ async function checkAutoResolve(
     model: "anthropic/claude-sonnet-4.6",
     response_format: { type: "json_object" },
     messages: [
-        {
-          role: "system",
-          content: `You check whether a new note explicitly resolves any open action items.
+      {
+        role: "system",
+        content:
+          `You check whether a new note explicitly resolves any open action items.
 
 Return JSON shaped as: {"resolved": [{"num": 1, "reason": "short quote from the note"}]}
 If no items are clearly resolved, return {"resolved": []}.
@@ -424,11 +471,13 @@ HARD RULES — a match requires ALL of these:
 6. When unsure, do NOT resolve. Empty array is the correct default.
 
 For each match you return, the "reason" field must quote the specific phrase in the note that PROVES completion. The quote must contain an explicit past-tense completion verb ("shipped", "fixed", "finished", "deployed", "merged", "submitted", "completed", "cancelled", "closed", "sent") or an explicit forward-reference ("scheduled for Friday"). Readiness or still-to-do markers — "unblocked", "cleared", "ready", "prepped", "queued", "staged", "kicked off", "approved", "remaining", "outstanding", "pending", "to-do", "deferred", "yet to", "still to", "still need", "next", "follows" — do NOT count as completion; they describe the state before the work, or work that is still owed. If you cannot produce such a quote, do not include the match.`,
-        },
-        {
-          role: "user",
-          content: `New note context: ${newCtx || "no-context"}\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
-        },
+      },
+      {
+        role: "user",
+        content: `New note context: ${
+          newCtx || "no-context"
+        }\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
+      },
     ],
   });
   const d = data as { choices: Array<{ message: { content: string } }> };
@@ -453,8 +502,14 @@ For each match you return, the "reason" field must quote the specific phrase in 
       .filter((c: Claim | null): c is Claim => c !== null);
   } catch (error) {
     console.log(
-      `checkAutoResolve: LAYER 2 JSON parse failed: ${error instanceof Error ? error.message : String(error)} ` +
-        `(raw=${JSON.stringify((d.choices?.[0]?.message?.content ?? "").slice(0, LOG_TRUNC))})`
+      `checkAutoResolve: LAYER 2 JSON parse failed: ${
+        error instanceof Error ? error.message : String(error)
+      } ` +
+        `(raw=${
+          JSON.stringify(
+            (d.choices?.[0]?.message?.content ?? "").slice(0, LOG_TRUNC),
+          )
+        })`,
     );
     return [];
   }
@@ -474,7 +529,7 @@ For each match you return, the "reason" field must quote the specific phrase in 
     const item = candidateItems[idx];
     if (claim.reason === "") {
       console.log(
-        `checkAutoResolve: LAYER 3 blocked item ${item.id}: no quote returned by LLM (legacy bare-number response)`
+        `checkAutoResolve: LAYER 3 blocked item ${item.id}: no quote returned by LLM (legacy bare-number response)`,
       );
       continue;
     }
@@ -482,23 +537,33 @@ For each match you return, the "reason" field must quote the specific phrase in 
     if (overlap < QUOTE_OVERLAP_THRESHOLD) {
       console.log(
         `checkAutoResolve: LAYER 3 quote-overlap guard dropped item ${item.id} ` +
-          `(overlap=${overlap.toFixed(3)}, quote=${JSON.stringify(claim.reason.slice(0, LOG_TRUNC))}, ` +
-          `desc=${JSON.stringify(item.description.slice(0, LOG_TRUNC))})`
+          `(overlap=${overlap.toFixed(3)}, quote=${
+            JSON.stringify(claim.reason.slice(0, LOG_TRUNC))
+          }, ` +
+          `desc=${JSON.stringify(item.description.slice(0, LOG_TRUNC))})`,
       );
       continue;
     }
-    const stillOwed = stillOwedAdjacencyVeto(newThoughtContent, item.description, stem);
+    const stillOwed = stillOwedAdjacencyVeto(
+      newThoughtContent,
+      item.description,
+      stem,
+    );
     if (stillOwed.vetoed) {
       console.log(
         `checkAutoResolve: LAYER 3.5 still-owed veto dropped item ${item.id} ` +
           `(marker=${stillOwed.marker}, subject=${stillOwed.subject}, dist=${stillOwed.distance}, ` +
-          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`
+          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`,
       );
       continue;
     }
     await supabase
       .from("action_items")
-      .update({ status: "resolved", resolved_by_thought_id: newThoughtId, resolved_at: now })
+      .update({
+        status: "resolved",
+        resolved_by_thought_id: newThoughtId,
+        resolved_at: now,
+      })
       .eq("id", item.id);
     resolvedDescriptions.push(item.description);
   }
@@ -509,10 +574,15 @@ async function postCaptureHook(
   thoughtId: string,
   content: string,
   metadata: Record<string, unknown>,
-  excludeSourceThoughtIds: string[] = []
+  excludeSourceThoughtIds: string[] = [],
 ): Promise<string[]> {
   await extractAndStoreActionItems(thoughtId, metadata, content);
-  return await checkAutoResolve(content, thoughtId, metadata, excludeSourceThoughtIds);
+  return await checkAutoResolve(
+    content,
+    thoughtId,
+    metadata,
+    excludeSourceThoughtIds,
+  );
 }
 
 // --- REST API helpers (for ChatGPT custom GPT Actions) ---
@@ -535,6 +605,73 @@ function jsonResponse(data: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json", ...CORS_HEADERS },
   });
+}
+
+const AGENT_TASK_SELECT =
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id";
+
+const AGENT_LEDGER_SELECT =
+  "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
+
+function textToolResponse(data: unknown) {
+  return {
+    content: [{
+      type: "text" as const,
+      text: typeof data === "string" ? data : JSON.stringify(data, null, 2),
+    }],
+  };
+}
+
+function errorToolResponse(message: string) {
+  return {
+    content: [{ type: "text" as const, text: message }],
+    isError: true,
+  };
+}
+
+async function loadAgentTaskForTool(taskId: string): Promise<
+  (AgentTaskAccessRow & Record<string, unknown>) | null
+> {
+  const { data, error } = await supabase
+    .from("agent_tasks")
+    .select(AGENT_TASK_SELECT)
+    .eq("id", taskId)
+    .single();
+  if (error) throw error;
+  return data as (AgentTaskAccessRow & Record<string, unknown>) | null;
+}
+
+async function moveAgentTaskViaTool(args: {
+  taskId: string;
+  agentCode: string;
+  action: AgentTaskToolAction;
+  reason?: string;
+}) {
+  const task = await loadAgentTaskForTool(args.taskId);
+  if (!task) throw new Error(`Task not found: ${args.taskId}`);
+  assertAgentCanWriteTask(task, args.agentCode);
+  if (args.action === "update") {
+    assertStatusHeartbeatAllowed(task);
+    assertClaimAllowed(task);
+  }
+  if (
+    args.action === "resume" || args.action === "unblock" ||
+    args.action === "answer"
+  ) {
+    assertResumeTransitionAllowed(task, args.action);
+    assertClaimAllowed(task);
+  }
+
+  const { status, receipt } = receiptForTaskTool(args.action);
+  const { data, error } = await supabase.rpc("move_agent_task_status", {
+    p_task_id: args.taskId,
+    p_status: status,
+    p_event_type: receipt,
+    p_agent_code: args.agentCode,
+    p_reason: args.reason ?? null,
+  });
+  if (error) throw error;
+  return { receipt, task: data };
 }
 
 // Hard caps on user-supplied string lengths in REST handler bodies. The
@@ -566,7 +703,14 @@ async function handleRestSearch(url: URL): Promise<Response> {
     if (error) return jsonResponse({ error: error.message }, 500);
     return jsonResponse({
       count: data?.length || 0,
-      results: (data || []).map((t: { content: string; similarity: number; metadata: Record<string, unknown>; created_at: string }) => ({
+      results: (data || []).map((
+        t: {
+          content: string;
+          similarity: number;
+          metadata: Record<string, unknown>;
+          created_at: string;
+        },
+      ) => ({
         content: t.content,
         similarity: Math.round(t.similarity * 1000) / 1000,
         type: t.metadata?.type,
@@ -586,9 +730,12 @@ async function handleRestList(url: URL): Promise<Response> {
   const type = url.searchParams.get("type");
   const topic = url.searchParams.get("topic");
   const person = url.searchParams.get("person");
-  const days = url.searchParams.get("days") ? parseInt(url.searchParams.get("days")!) : null;
+  const days = url.searchParams.get("days")
+    ? parseInt(url.searchParams.get("days")!)
+    : null;
   try {
-    let q = supabase.from("thoughts").select("content, metadata, created_at").order("created_at", { ascending: false }).limit(limit);
+    let q = supabase.from("thoughts").select("content, metadata, created_at")
+      .order("created_at", { ascending: false }).limit(limit);
     if (type) q = q.contains("metadata", { type });
     if (topic) q = q.contains("metadata", { topics: [topic] });
     if (person) q = q.contains("metadata", { people: [person] });
@@ -601,7 +748,13 @@ async function handleRestList(url: URL): Promise<Response> {
     if (error) return jsonResponse({ error: error.message }, 500);
     return jsonResponse({
       count: data?.length || 0,
-      results: (data || []).map((t: { content: string; metadata: Record<string, unknown>; created_at: string }) => ({
+      results: (data || []).map((
+        t: {
+          content: string;
+          metadata: Record<string, unknown>;
+          created_at: string;
+        },
+      ) => ({
         content: t.content,
         type: t.metadata?.type,
         topics: t.metadata?.topics,
@@ -617,21 +770,42 @@ async function handleRestList(url: URL): Promise<Response> {
 
 async function handleRestStats(): Promise<Response> {
   try {
-    const { count } = await supabase.from("thoughts").select("*", { count: "exact", head: true });
-    const { data } = await supabase.from("thoughts").select("metadata, created_at").order("created_at", { ascending: false });
+    const { count } = await supabase.from("thoughts").select("*", {
+      count: "exact",
+      head: true,
+    });
+    const { data } = await supabase.from("thoughts").select(
+      "metadata, created_at",
+    ).order("created_at", { ascending: false });
     const types: Record<string, number> = {};
     const topics: Record<string, number> = {};
     const people: Record<string, number> = {};
     for (const r of data || []) {
       const m = (r.metadata || {}) as Record<string, unknown>;
       if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
-      if (Array.isArray(m.topics)) for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
-      if (Array.isArray(m.people)) for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
+      if (Array.isArray(m.topics)) {
+        for (const t of m.topics) {
+          topics[t as string] = (topics[t as string] || 0) + 1;
+        }
+      }
+      if (Array.isArray(m.people)) {
+        for (const p of m.people) {
+          people[p as string] = (people[p as string] || 0) + 1;
+        }
+      }
     }
-    const sort = (o: Record<string, number>) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([name, count]) => ({ name, count }));
+    const sort = (o: Record<string, number>) =>
+      Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 10).map((
+        [name, count],
+      ) => ({ name, count }));
     return jsonResponse({
       total: count,
-      date_range: data?.length ? { oldest: data[data.length - 1].created_at, newest: data[0].created_at } : null,
+      date_range: data?.length
+        ? {
+          oldest: data[data.length - 1].created_at,
+          newest: data[0].created_at,
+        }
+        : null,
       types: sort(types),
       top_topics: sort(topics),
       people_mentioned: sort(people),
@@ -645,9 +819,13 @@ async function handleRestCapture(req: Request): Promise<Response> {
   try {
     const body = await req.json();
     const content = body?.content;
-    if (!content || typeof content !== "string") return jsonResponse({ error: "content field required" }, 400);
+    if (!content || typeof content !== "string") {
+      return jsonResponse({ error: "content field required" }, 400);
+    }
     if (tooLong(content, MAX_CONTENT_LENGTH)) {
-      return jsonResponse({ error: `content exceeds ${MAX_CONTENT_LENGTH} chars` }, 413);
+      return jsonResponse({
+        error: `content exceeds ${MAX_CONTENT_LENGTH} chars`,
+      }, 413);
     }
 
     // Optional caller-supplied tags merge into topics. Lets sync-source
@@ -660,39 +838,70 @@ async function handleRestCapture(req: Request): Promise<Response> {
         .map((t) => t.toLowerCase().trim())
         .filter(Boolean)
       : [];
-    const source = typeof body?.source === "string" && body.source.length > 0 ? body.source : "chatgpt";
+    const source = typeof body?.source === "string" && body.source.length > 0
+      ? body.source
+      : "chatgpt";
 
     // Optional Notion-sync identity fields. When both are present, dedup runs
     // on the record identity instead of the content hash (see isNotionDuplicate).
-    const notionPageId = typeof body?.notion_page_id === "string" && body.notion_page_id.trim()
-      ? body.notion_page_id.trim()
-      : null;
-    const notionLastEdited = typeof body?.notion_last_edited === "string" && body.notion_last_edited.trim()
+    const notionPageId =
+      typeof body?.notion_page_id === "string" && body.notion_page_id.trim()
+        ? body.notion_page_id.trim()
+        : null;
+    const notionLastEdited = typeof body?.notion_last_edited === "string" &&
+        body.notion_last_edited.trim()
       ? body.notion_last_edited.trim()
       : null;
 
     const hash = await contentHash(content);
     if (notionPageId && notionLastEdited) {
       if (await isNotionDuplicate(notionPageId, notionLastEdited)) {
-        return jsonResponse({ status: "duplicate", message: "Already in the brain." });
+        return jsonResponse({
+          status: "duplicate",
+          message: "Already in the brain.",
+        });
       }
     } else if (await isDuplicate(hash)) {
-      return jsonResponse({ status: "duplicate", message: "Already in the brain." });
+      return jsonResponse({
+        status: "duplicate",
+        message: "Already in the brain.",
+      });
     }
-    const [embedding, rawMetadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
+    const [embedding, rawMetadata] = await Promise.all([
+      getEmbedding(content),
+      extractMetadata(content),
+    ]);
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
     const extractedTopics = coerced.topics;
-    const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
-    const finalMetadata: Record<string, unknown> = { ...coerced, topics: mergedTopics, source };
+    const mergedTopics = Array.from(
+      new Set([...extractedTopics, ...explicitTags]),
+    );
+    const finalMetadata: Record<string, unknown> = {
+      ...coerced,
+      topics: mergedTopics,
+      source,
+    };
     if (notionPageId) finalMetadata.notion_page_id = notionPageId;
     if (notionLastEdited) finalMetadata.notion_last_edited = notionLastEdited;
 
-    const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: finalMetadata }).select("id").single();
-    if (error || !inserted) return jsonResponse({ error: error?.message || "unknown error" }, 500);
+    const { data: inserted, error } = await supabase.from("thoughts").insert({
+      content,
+      embedding,
+      content_hash: hash,
+      metadata: finalMetadata,
+    }).select("id").single();
+    if (error || !inserted) {
+      return jsonResponse({ error: error?.message || "unknown error" }, 500);
+    }
 
     // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
-    const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
+    const resolved = await postCaptureHook(
+      inserted.id,
+      content,
+      finalMetadata,
+      [inserted.id],
+    );
 
     return jsonResponse({
       status: "captured",
@@ -710,11 +919,32 @@ async function handleRestCapture(req: Request): Promise<Response> {
 async function handleRestClient(req: Request): Promise<Response> {
   try {
     const body = await req.json();
-    const { name, email, phone, instagram, preferred_styles, notes, first_contact, last_contact } = body || {};
-    if (!name || typeof name !== "string") return jsonResponse({ error: "name field required" }, 400);
-    for (const [field, value] of Object.entries({ name, email, phone, instagram, notes })) {
+    const {
+      name,
+      email,
+      phone,
+      instagram,
+      preferred_styles,
+      notes,
+      first_contact,
+      last_contact,
+    } = body || {};
+    if (!name || typeof name !== "string") {
+      return jsonResponse({ error: "name field required" }, 400);
+    }
+    for (
+      const [field, value] of Object.entries({
+        name,
+        email,
+        phone,
+        instagram,
+        notes,
+      })
+    ) {
       if (tooLong(value, MAX_FIELD_LENGTH)) {
-        return jsonResponse({ error: `${field} exceeds ${MAX_FIELD_LENGTH} chars` }, 413);
+        return jsonResponse({
+          error: `${field} exceeds ${MAX_FIELD_LENGTH} chars`,
+        }, 413);
       }
     }
 
@@ -734,7 +964,11 @@ async function handleRestClient(req: Request): Promise<Response> {
       if (Object.keys(updates).length > 0) {
         await supabase.from("clients").update(updates).eq("id", existing[0].id);
       }
-      return jsonResponse({ status: "exists", id: existing[0].id, name: existing[0].name });
+      return jsonResponse({
+        status: "exists",
+        id: existing[0].id,
+        name: existing[0].name,
+      });
     }
 
     // Insert new client
@@ -755,7 +989,11 @@ async function handleRestClient(req: Request): Promise<Response> {
       .select("id, name")
       .single();
     if (error) return jsonResponse({ error: error.message }, 500);
-    return jsonResponse({ status: "created", id: inserted.id, name: inserted.name });
+    return jsonResponse({
+      status: "created",
+      id: inserted.id,
+      name: inserted.name,
+    });
   } catch (err: unknown) {
     return jsonResponse({ error: (err as Error).message }, 500);
   }
@@ -764,11 +1002,30 @@ async function handleRestClient(req: Request): Promise<Response> {
 async function handleRestEvent(req: Request): Promise<Response> {
   try {
     const body = await req.json();
-    const { title, event_type, date_start, date_end, location, notes, metadata } = body || {};
-    if (!title || typeof title !== "string") return jsonResponse({ error: "title field required" }, 400);
-    for (const [field, value] of Object.entries({ title, event_type, location, notes })) {
+    const {
+      title,
+      event_type,
+      date_start,
+      date_end,
+      location,
+      notes,
+      metadata,
+    } = body || {};
+    if (!title || typeof title !== "string") {
+      return jsonResponse({ error: "title field required" }, 400);
+    }
+    for (
+      const [field, value] of Object.entries({
+        title,
+        event_type,
+        location,
+        notes,
+      })
+    ) {
       if (tooLong(value, MAX_FIELD_LENGTH)) {
-        return jsonResponse({ error: `${field} exceeds ${MAX_FIELD_LENGTH} chars` }, 413);
+        return jsonResponse({
+          error: `${field} exceeds ${MAX_FIELD_LENGTH} chars`,
+        }, 413);
       }
     }
 
@@ -813,7 +1070,9 @@ async function handleRestEvent(req: Request): Promise<Response> {
       .insert(record)
       .select("id")
       .single();
-    if (error || !inserted) return jsonResponse({ error: error?.message || "unknown error" }, 500);
+    if (error || !inserted) {
+      return jsonResponse({ error: error?.message || "unknown error" }, 500);
+    }
     return jsonResponse({ status: "created", id: inserted.id });
   } catch (err: unknown) {
     return jsonResponse({ error: (err as Error).message }, 500);
@@ -841,7 +1100,7 @@ Brain Bank exposes two retrieval surfaces. Choose based on the shape of the ques
 **Edges between thoughts.** Some thoughts are linked by typed semantic relations: \`supports\`, \`contradicts\`, \`supersedes\`, \`evolved_into\`, \`depends_on\`, \`related_to\`. \`get_thought_by_id\` shows a brief Relationships summary; \`get_thought_edges\` returns the full edge list with counterpart previews. Edges enrich retrieval — they are one signal among many, not a primary surface. The wiki and raw thoughts remain the first thing to check.
 
 **Default heuristic.** Try \`search_compiled_pages\` or \`get_compiled_page\` first when a known entity is named in the question. Fall back to \`search_thoughts\` if no compiled page exists or if the question is moment-shaped.`,
-  }
+  },
 );
 
 server.registerTool(
@@ -867,50 +1126,98 @@ server.registerTool(
         filter: {},
       });
       if (error) {
-        return { content: [{ type: "text" as const, text: `Search error: ${error.message}` }], isError: true };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Search error: ${error.message}`,
+          }],
+          isError: true,
+        };
       }
       if (!data || data.length === 0) {
-        return { content: [{ type: "text" as const, text: `No thoughts found matching "${query}".` }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No thoughts found matching "${query}".`,
+          }],
+        };
       }
       const results = data.map(
-        (t: { content: string; metadata: Record<string, unknown>; similarity: number; created_at: string }, i: number) => {
+        (
+          t: {
+            content: string;
+            metadata: Record<string, unknown>;
+            similarity: number;
+            created_at: string;
+          },
+          i: number,
+        ) => {
           const m = t.metadata || {};
           const parts = [
-            `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
+            `--- Result ${i + 1} (${
+              (t.similarity * 100).toFixed(1)
+            }% match) ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
             `Type: ${m.type || "unknown"}`,
           ];
-          if (Array.isArray(m.topics) && m.topics.length) parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
-          if (Array.isArray(m.people) && m.people.length) parts.push(`People: ${(m.people as string[]).join(", ")}`);
-          if (Array.isArray(m.action_items) && m.action_items.length) parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
+          if (Array.isArray(m.topics) && m.topics.length) {
+            parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+          }
+          if (Array.isArray(m.people) && m.people.length) {
+            parts.push(`People: ${(m.people as string[]).join(", ")}`);
+          }
+          if (Array.isArray(m.action_items) && m.action_items.length) {
+            parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
+          }
           parts.push(`\n${t.content}`);
           return parts.join("\n");
-        }
+        },
       );
-      return { content: [{ type: "text" as const, text: `Found ${data.length} thought(s):\n\n${results.join("\n\n")}` }] };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Found ${data.length} thought(s):\n\n${results.join("\n\n")}`,
+        }],
+      };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
   "list_thoughts",
   {
     title: "List Recent Thoughts",
-    description: "List recently captured thoughts with optional filters by type, topic, person, or time range.",
+    description:
+      "List recently captured thoughts with optional filters by type, topic, person, or time range.",
     inputSchema: {
       limit: z.coerce.number().optional().default(10),
-      type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
+      type: z.string().optional().describe(
+        "Filter by type: observation, task, idea, reference, person_note",
+      ),
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
-      days: z.coerce.number().optional().describe("Only thoughts from the last N days"),
+      days: z.coerce.number().optional().describe(
+        "Only thoughts from the last N days",
+      ),
     },
   },
   async ({ limit, type, topic, person, days }) => {
-    logToolInvocation("list_thoughts", { limit, type, topic, person, days }, "mcp");
+    logToolInvocation(
+      "list_thoughts",
+      { limit, type, topic, person, days },
+      "mcp",
+    );
     try {
-      let q = supabase.from("thoughts").select("content, metadata, created_at").order("created_at", { ascending: false }).limit(limit);
+      let q = supabase.from("thoughts").select("content, metadata, created_at")
+        .order("created_at", { ascending: false }).limit(limit);
       if (type) q = q.contains("metadata", { type });
       if (topic) q = q.contains("metadata", { topics: [topic] });
       if (person) q = q.contains("metadata", { people: [person] });
@@ -920,20 +1227,51 @@ server.registerTool(
         q = q.gte("created_at", since.toISOString());
       }
       const { data, error } = await q;
-      if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
-      if (!data || !data.length) return { content: [{ type: "text" as const, text: "No thoughts found." }] };
+      if (error) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+          isError: true,
+        };
+      }
+      if (!data || !data.length) {
+        return {
+          content: [{ type: "text" as const, text: "No thoughts found." }],
+        };
+      }
       const results = data.map(
-        (t: { content: string; metadata: Record<string, unknown>; created_at: string }, i: number) => {
+        (
+          t: {
+            content: string;
+            metadata: Record<string, unknown>;
+            created_at: string;
+          },
+          i: number,
+        ) => {
           const m = t.metadata || {};
-          const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
-        }
+          const tags = Array.isArray(m.topics)
+            ? (m.topics as string[]).join(", ")
+            : "";
+          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${
+            m.type || "??"
+          }${tags ? " - " + tags : ""})\n   ${t.content}`;
+        },
       );
-      return { content: [{ type: "text" as const, text: `${data.length} recent thought(s):\n\n${results.join("\n\n")}` }] };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `${data.length} recent thought(s):\n\n${results.join("\n\n")}`,
+        }],
+      };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -943,16 +1281,22 @@ server.registerTool(
     description:
       "Fetch a single raw thought by its UUID. **Use this when drilling from a wiki page's 'Sources' section to inspect the original capture** — the get_compiled_page output lists the source thought IDs and this tool reads them back. Returns the full content + metadata + capture date + source. After Phase 13, also includes a brief 'Relationships' section listing typed edges (supports / contradicts / supersedes / etc.) to other thoughts; use `get_thought_edges` for full edge inspection.",
     inputSchema: {
-      id: z.string().describe("Thought UUID. Get these from the 'Sources' section of a get_compiled_page response."),
+      id: z.string().describe(
+        "Thought UUID. Get these from the 'Sources' section of a get_compiled_page response.",
+      ),
     },
   },
   async ({ id }) => {
     logToolInvocation("get_thought_by_id", { id }, "mcp");
     try {
-      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const uuidPattern =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       if (!uuidPattern.test(id)) {
         return {
-          content: [{ type: "text" as const, text: `Invalid thought ID format. Expected a UUID; got "${id}".` }],
+          content: [{
+            type: "text" as const,
+            text: `Invalid thought ID format. Expected a UUID; got "${id}".`,
+          }],
           isError: true,
         };
       }
@@ -962,7 +1306,12 @@ server.registerTool(
         .eq("id", id)
         .single();
       if (error || !data) {
-        return { content: [{ type: "text" as const, text: `No thought found with id "${id}".` }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No thought found with id "${id}".`,
+          }],
+        };
       }
       const m = (data.metadata || {}) as Record<string, unknown>;
       const parts = [
@@ -971,8 +1320,12 @@ server.registerTool(
         `Source: ${(m.source as string) || "unknown"}`,
         `Type: ${m.type || "unknown"}`,
       ];
-      if (Array.isArray(m.topics) && m.topics.length) parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
-      if (Array.isArray(m.people) && m.people.length) parts.push(`People: ${(m.people as string[]).join(", ")}`);
+      if (Array.isArray(m.topics) && m.topics.length) {
+        parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
+      }
+      if (Array.isArray(m.people) && m.people.length) {
+        parts.push(`People: ${(m.people as string[]).join(", ")}`);
+      }
       if (m.project) parts.push(`Project: ${m.project}`);
       if (Array.isArray(m.action_items) && m.action_items.length) {
         parts.push(`Actions: ${(m.action_items as string[]).join("; ")}`);
@@ -986,32 +1339,66 @@ server.registerTool(
       try {
         const { data: edges, error: eErr } = await supabase
           .from("thought_edges")
-          .select("relation, from_thought_id, to_thought_id, confidence, classifier_version")
+          .select(
+            "relation, from_thought_id, to_thought_id, confidence, classifier_version",
+          )
           .or(`from_thought_id.eq.${id},to_thought_id.eq.${id}`)
           .order("confidence", { ascending: false })
           .limit(20);
         if (!eErr && edges && edges.length > 0) {
-          const byRelation: Record<string, Array<{ counterpart: string; confidence: number; direction: "out" | "in" }>> = {};
+          const byRelation: Record<
+            string,
+            Array<
+              {
+                counterpart: string;
+                confidence: number;
+                direction: "out" | "in";
+              }
+            >
+          > = {};
           for (const e of edges) {
             const isOutgoing = e.from_thought_id === id;
-            const counterpart = isOutgoing ? e.to_thought_id : e.from_thought_id;
+            const counterpart = isOutgoing
+              ? e.to_thought_id
+              : e.from_thought_id;
             const direction: "out" | "in" = isOutgoing ? "out" : "in";
             byRelation[e.relation] = byRelation[e.relation] || [];
-            byRelation[e.relation].push({ counterpart, confidence: e.confidence ?? 0, direction });
+            byRelation[e.relation].push({
+              counterpart,
+              confidence: e.confidence ?? 0,
+              direction,
+            });
           }
-          parts.push("", `## Relationships (${edges.length} edge${edges.length === 1 ? "" : "s"})`);
-          const rOrder = ["contradicts", "supersedes", "depends_on", "supports", "evolved_into", "related_to"];
+          parts.push(
+            "",
+            `## Relationships (${edges.length} edge${
+              edges.length === 1 ? "" : "s"
+            })`,
+          );
+          const rOrder = [
+            "contradicts",
+            "supersedes",
+            "depends_on",
+            "supports",
+            "evolved_into",
+            "related_to",
+          ];
           for (const r of rOrder) {
             const list = byRelation[r];
             if (!list || list.length === 0) continue;
             const top = list.slice(0, 3);
-            const formatted = top.map(x =>
-              `${x.direction === "out" ? "->" : "<-"} ${x.counterpart} (${(x.confidence * 100).toFixed(0)}%)`
+            const formatted = top.map((x) =>
+              `${x.direction === "out" ? "->" : "<-"} ${x.counterpart} (${
+                (x.confidence * 100).toFixed(0)
+              }%)`
             ).join(", ");
             const more = list.length > 3 ? ` +${list.length - 3} more` : "";
             parts.push(`- **${r}** (${list.length}): ${formatted}${more}`);
           }
-          parts.push("", `_Use \`get_thought_edges(id="${id}")\` to inspect all relationships in detail._`);
+          parts.push(
+            "",
+            `_Use \`get_thought_edges(id="${id}")\` to inspect all relationships in detail._`,
+          );
         }
       } catch {
         // Silent: edge enrichment is best-effort.
@@ -1019,9 +1406,15 @@ server.registerTool(
 
       return { content: [{ type: "text" as const, text: parts.join("\n") }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -1031,19 +1424,41 @@ server.registerTool(
     description:
       "Inspect the typed semantic edges for a single thought. Returns each edge's relation, direction, confidence, and a short preview of the counterpart thought. Use this when the **'Relationships'** summary in `get_thought_by_id` flags an interesting edge and you want details. Optional filters: `relation` (one of supports/contradicts/evolved_into/supersedes/depends_on/related_to), `min_confidence`, `limit`. Edges are an enrichment signal — fall back to `search_thoughts` or `get_compiled_page` for primary retrieval.",
     inputSchema: {
-      id: z.string().describe("Thought UUID. Get these from get_thought_by_id, get_compiled_page Sources, or list_thoughts."),
-      relation: z.enum(["supports", "contradicts", "evolved_into", "supersedes", "depends_on", "related_to"]).optional().describe("Optional: filter by edge relation type."),
-      min_confidence: z.coerce.number().optional().default(0.0).describe("Optional: minimum confidence floor (0.0-1.0)."),
-      limit: z.coerce.number().optional().default(50).describe("Max edges to return (capped at 100)."),
+      id: z.string().describe(
+        "Thought UUID. Get these from get_thought_by_id, get_compiled_page Sources, or list_thoughts.",
+      ),
+      relation: z.enum([
+        "supports",
+        "contradicts",
+        "evolved_into",
+        "supersedes",
+        "depends_on",
+        "related_to",
+      ]).optional().describe("Optional: filter by edge relation type."),
+      min_confidence: z.coerce.number().optional().default(0.0).describe(
+        "Optional: minimum confidence floor (0.0-1.0).",
+      ),
+      limit: z.coerce.number().optional().default(50).describe(
+        "Max edges to return (capped at 100).",
+      ),
     },
   },
   async ({ id, relation, min_confidence, limit }) => {
-    logToolInvocation("get_thought_edges", { id, relation, min_confidence, limit }, "mcp");
+    logToolInvocation("get_thought_edges", {
+      id,
+      relation,
+      min_confidence,
+      limit,
+    }, "mcp");
     try {
-      const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const uuidPattern =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       if (!uuidPattern.test(id)) {
         return {
-          content: [{ type: "text" as const, text: `Invalid thought ID format. Expected a UUID; got "${id}".` }],
+          content: [{
+            type: "text" as const,
+            text: `Invalid thought ID format. Expected a UUID; got "${id}".`,
+          }],
           isError: true,
         };
       }
@@ -1052,7 +1467,9 @@ server.registerTool(
 
       let q = supabase
         .from("thought_edges")
-        .select("relation, from_thought_id, to_thought_id, confidence, valid_from, valid_until, classifier_version, support_count, metadata, created_at")
+        .select(
+          "relation, from_thought_id, to_thought_id, confidence, valid_from, valid_until, classifier_version, support_count, metadata, created_at",
+        )
         .or(`from_thought_id.eq.${id},to_thought_id.eq.${id}`)
         .gte("confidence", conf)
         .order("confidence", { ascending: false })
@@ -1061,26 +1478,43 @@ server.registerTool(
 
       const { data: edges, error } = await q;
       if (error) {
-        return { content: [{ type: "text" as const, text: `Error fetching edges: ${error.message}` }], isError: true };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Error fetching edges: ${error.message}`,
+          }],
+          isError: true,
+        };
       }
       if (!edges || edges.length === 0) {
         const filterDesc = relation ? ` of type '${relation}'` : "";
-        return { content: [{ type: "text" as const, text: `No edges${filterDesc} found for thought "${id}".` }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No edges${filterDesc} found for thought "${id}".`,
+          }],
+        };
       }
 
       // Fetch counterpart previews
-      const counterpartIds = Array.from(new Set(
-        edges.map(e => e.from_thought_id === id ? e.to_thought_id : e.from_thought_id)
-      ));
+      const counterpartIds = Array.from(
+        new Set(
+          edges.map((e) =>
+            e.from_thought_id === id ? e.to_thought_id : e.from_thought_id
+          ),
+        ),
+      );
       const { data: counterparts } = await supabase
         .from("thoughts")
         .select("id, content, created_at")
         .in("id", counterpartIds);
-      const cMap = new Map((counterparts || []).map(t => [t.id, t]));
+      const cMap = new Map((counterparts || []).map((t) => [t.id, t]));
 
       const lines: string[] = [
         `## Edges for thought ${id}`,
-        `Total: ${edges.length} edge${edges.length === 1 ? "" : "s"}${relation ? ` (filtered: ${relation})` : ""}, min_confidence=${conf}`,
+        `Total: ${edges.length} edge${edges.length === 1 ? "" : "s"}${
+          relation ? ` (filtered: ${relation})` : ""
+        }, min_confidence=${conf}`,
         "",
       ];
       for (const e of edges) {
@@ -1089,73 +1523,651 @@ server.registerTool(
         const cp = cMap.get(counterpartId);
         const arrow = isOut ? "->" : "<-";
         lines.push(`### ${e.relation} ${arrow} ${counterpartId}`);
-        lines.push(`Confidence: ${(e.confidence ?? 0).toFixed(2)} | Support: ${e.support_count} | Classifier: ${e.classifier_version || "unknown"}`);
+        lines.push(
+          `Confidence: ${
+            (e.confidence ?? 0).toFixed(2)
+          } | Support: ${e.support_count} | Classifier: ${
+            e.classifier_version || "unknown"
+          }`,
+        );
         if (e.valid_from || e.valid_until) {
-          lines.push(`Validity: ${e.valid_from || "always"} -> ${e.valid_until || "current"}`);
+          lines.push(
+            `Validity: ${e.valid_from || "always"} -> ${
+              e.valid_until || "current"
+            }`,
+          );
         }
-        const rationale = (e.metadata as Record<string, unknown> | null)?.rationale;
+        const rationale = (e.metadata as Record<string, unknown> | null)
+          ?.rationale;
         if (typeof rationale === "string" && rationale.length > 0) {
           lines.push(`Rationale: ${rationale}`);
         }
         if (cp) {
-          const preview = cp.content.length > 200 ? cp.content.slice(0, 200) + "..." : cp.content;
+          const preview = cp.content.length > 200
+            ? cp.content.slice(0, 200) + "..."
+            : cp.content;
           lines.push(`Counterpart preview: ${preview}`);
         }
         lines.push("");
       }
-      lines.push(`_Use \`get_thought_by_id(id="<counterpart_id>")\` to read a counterpart in full._`);
+      lines.push(
+        `_Use \`get_thought_by_id(id="<counterpart_id>")\` to read a counterpart in full._`,
+      );
 
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
   "thought_stats",
   {
     title: "Thought Statistics",
-    description: "Get a summary of all captured thoughts: totals, types, top topics, and people.",
+    description:
+      "Get a summary of all captured thoughts: totals, types, top topics, and people.",
     inputSchema: {},
   },
   async () => {
     logToolInvocation("thought_stats", {}, "mcp");
     try {
-      const { count } = await supabase.from("thoughts").select("*", { count: "exact", head: true });
-      const { data } = await supabase.from("thoughts").select("metadata, created_at").order("created_at", { ascending: false });
+      const { count } = await supabase.from("thoughts").select("*", {
+        count: "exact",
+        head: true,
+      });
+      const { data } = await supabase.from("thoughts").select(
+        "metadata, created_at",
+      ).order("created_at", { ascending: false });
       const types: Record<string, number> = {};
       const topics: Record<string, number> = {};
       const people: Record<string, number> = {};
       for (const r of data || []) {
         const m = (r.metadata || {}) as Record<string, unknown>;
-        if (m.type) types[m.type as string] = (types[m.type as string] || 0) + 1;
-        if (Array.isArray(m.topics)) for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
-        if (Array.isArray(m.people)) for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
+        if (m.type) {
+          types[m.type as string] = (types[m.type as string] || 0) + 1;
+        }
+        if (Array.isArray(m.topics)) {
+          for (const t of m.topics) {
+            topics[t as string] = (topics[t as string] || 0) + 1;
+          }
+        }
+        if (Array.isArray(m.people)) {
+          for (const p of m.people) {
+            people[p as string] = (people[p as string] || 0) + 1;
+          }
+        }
       }
-      const sort = (o: Record<string, number>): [string, number][] => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 10);
+      const sort = (o: Record<string, number>): [string, number][] =>
+        Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 10);
       const lines: string[] = [
         `Total thoughts: ${count}`,
-        `Date range: ${data?.length ? new Date(data[data.length - 1].created_at).toLocaleDateString() + " to " + new Date(data[0].created_at).toLocaleDateString() : "N/A"}`,
-        "", "Types:", ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
+        `Date range: ${
+          data?.length
+            ? new Date(data[data.length - 1].created_at).toLocaleDateString() +
+              " to " + new Date(data[0].created_at).toLocaleDateString()
+            : "N/A"
+        }`,
+        "",
+        "Types:",
+        ...sort(types).map(([k, v]) => `  ${k}: ${v}`),
       ];
-      if (Object.keys(topics).length) { lines.push("", "Top topics:"); for (const [k, v] of sort(topics)) lines.push(`  ${k}: ${v}`); }
-      if (Object.keys(people).length) { lines.push("", "People mentioned:"); for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`); }
+      if (Object.keys(topics).length) {
+        lines.push("", "Top topics:");
+        for (const [k, v] of sort(topics)) lines.push(`  ${k}: ${v}`);
+      }
+      if (Object.keys(people).length) {
+        lines.push("", "People mentioned:");
+        for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`);
+      }
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
+);
+
+server.registerTool(
+  "list_agent_tasks",
+  {
+    title: "List Agent Tasks",
+    description:
+      "List Open Engine task-board records with optional filters. Use before claiming work or checking blocked/review queues.",
+    inputSchema: {
+      statuses: z.array(z.enum(AGENT_TASK_STATUSES)).optional().describe(
+        "Optional status filters. Defaults to active non-done tasks.",
+      ),
+      agent_code: z.string().optional().describe(
+        "Optional runtime code filter, e.g. local-codex.",
+      ),
+      risk: z.enum(["low", "medium", "high"]).optional(),
+      project_slug: z.string().optional(),
+      include_done: z.boolean().optional().describe(
+        "Set true to include Agent Done tasks when statuses is omitted.",
+      ),
+      limit: z.number().int().min(1).max(50).optional(),
+    },
+  },
+  async (
+    {
+      statuses,
+      agent_code,
+      risk,
+      project_slug,
+      include_done,
+      limit,
+    }: {
+      statuses?: AgentTaskStatus[];
+      agent_code?: string;
+      risk?: "low" | "medium" | "high";
+      project_slug?: string;
+      include_done?: boolean;
+      limit?: number;
+    },
+  ) => {
+    logToolInvocation("list_agent_tasks", {
+      statuses,
+      agent_code,
+      risk,
+      project_slug,
+      include_done,
+      limit,
+    }, "mcp");
+    try {
+      const cap = Math.max(1, Math.min(50, limit ?? 20));
+      let query = supabase
+        .from("agent_tasks")
+        .select(AGENT_TASK_SELECT)
+        .order("updated_at", { ascending: false })
+        .limit(cap);
+      if (statuses && statuses.length > 0) {
+        query = query.in("status", statuses);
+      } else if (!include_done) {
+        query = query.neq("status", "Agent Done");
+      }
+      if (agent_code) query = query.eq("agent_code", agent_code);
+      if (risk) query = query.eq("risk", risk);
+      if (project_slug) query = query.eq("project_slug", project_slug);
+
+      const { data, error } = await query;
+      if (error) throw error;
+      return textToolResponse({ count: data?.length ?? 0, tasks: data ?? [] });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error listing agent tasks: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "get_agent_task",
+  {
+    title: "Get Agent Task",
+    description:
+      "Read one Open Engine task packet plus its immutable receipt/event history.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+    },
+  },
+  async ({ task_id }: { task_id: string }) => {
+    logToolInvocation("get_agent_task", { task_id }, "mcp");
+    try {
+      const { data: task, error: taskError } = await supabase
+        .from("agent_tasks")
+        .select(AGENT_TASK_SELECT)
+        .eq("id", task_id)
+        .single();
+      if (taskError) throw taskError;
+      const { data: events, error: eventsError } = await supabase
+        .from("agent_task_events")
+        .select(
+          "id, task_id, created_at, event_type, agent_code, payload, evidence_url",
+        )
+        .eq("task_id", task_id)
+        .order("created_at", { ascending: true });
+      if (eventsError) throw eventsError;
+      return textToolResponse({ task, events: events ?? [] });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error fetching agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "claim_next_agent_task",
+  {
+    title: "Claim Next Agent Task",
+    description:
+      "Atomically claim the oldest eligible Agent Todo task for an agent code through the SQL helper. Returns no task when none is eligible.",
+    inputSchema: {
+      agent_code: z.string().min(1),
+    },
+  },
+  async ({ agent_code }: { agent_code: string }) => {
+    logToolInvocation("claim_next_agent_task", { agent_code }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc("claim_next_agent_task", {
+        p_agent_code: agent_code,
+      });
+      if (error) throw error;
+      const tasks = Array.isArray(data) ? data : data ? [data] : [];
+      if (tasks.length === 0) {
+        return textToolResponse({
+          receipt: "NO_ELIGIBLE_TASK",
+          agent_code,
+          task: null,
+        });
+      }
+      return textToolResponse({
+        receipt: "AGENT CLAIMED",
+        agent_code,
+        task: tasks[0],
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error claiming agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "update_agent_task",
+  {
+    title: "Update Agent Task",
+    description:
+      "Write an AGENT STATUS heartbeat/update for a task the runtime has claimed or is explicitly assigned to.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      status_note: z.string().min(1).describe(
+        "Short receipt note describing current progress or next checkpoint.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, status_note }: {
+      task_id: string;
+      agent_code: string;
+      status_note: string;
+    },
+  ) => {
+    logToolInvocation("update_agent_task", {
+      task_id,
+      agent_code,
+      status_note,
+    }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "update",
+          reason: status_note,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error updating agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "complete_agent_task",
+  {
+    title: "Complete Agent Task",
+    description:
+      "Mark a claimed or assigned task as agent-done and ready for human review. This writes AGENT DONE and moves the task to Agent Review, not Agent Done.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      result: z.string().min(1).describe("Completion receipt for Dave."),
+    },
+  },
+  async (
+    { task_id, agent_code, result }: {
+      task_id: string;
+      agent_code: string;
+      result: string;
+    },
+  ) => {
+    logToolInvocation("complete_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "complete",
+          reason: result,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error completing agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "block_agent_task",
+  {
+    title: "Block Agent Task",
+    description:
+      "Move a claimed or assigned task to Agent Needs Input with an AGENT BLOCKED receipt.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      blocker: z.string().min(1).describe(
+        "The exact blocker or question that needs human input.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, blocker }: {
+      task_id: string;
+      agent_code: string;
+      blocker: string;
+    },
+  ) => {
+    logToolInvocation("block_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "block",
+          reason: blocker,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error blocking agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "request_agent_review",
+  {
+    title: "Request Agent Review",
+    description:
+      "Move a claimed or assigned task to Agent Review with an AGENT DONE receipt when the runtime needs Dave to inspect the result.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      review_note: z.string().min(1),
+    },
+  },
+  async (
+    { task_id, agent_code, review_note }: {
+      task_id: string;
+      agent_code: string;
+      review_note: string;
+    },
+  ) => {
+    logToolInvocation("request_agent_review", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "request-review",
+          reason: review_note,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error requesting agent review: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "resume_agent_task",
+  {
+    title: "Resume Agent Task",
+    description:
+      "Resume a claimed or assigned Agent Needs Input or Agent Review task back to Agent Working with an AGENT RESUMED receipt.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      resume_note: z.string().min(1).describe(
+        "Short receipt note explaining why this task is ready to resume.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, resume_note }: {
+      task_id: string;
+      agent_code: string;
+      resume_note: string;
+    },
+  ) => {
+    logToolInvocation("resume_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "resume",
+          reason: resume_note,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error resuming agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "unblock_agent_task",
+  {
+    title: "Unblock Agent Task",
+    description:
+      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT UNBLOCKED receipt.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      unblock_note: z.string().min(1).describe(
+        "Short receipt note explaining what cleared the blocker.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, unblock_note }: {
+      task_id: string;
+      agent_code: string;
+      unblock_note: string;
+    },
+  ) => {
+    logToolInvocation("unblock_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "unblock",
+          reason: unblock_note,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error unblocking agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "answer_agent_task",
+  {
+    title: "Answer Agent Task",
+    description:
+      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT HUMAN ANSWERED receipt.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      answer_note: z.string().min(1).describe(
+        "Short receipt note with the human answer or local input that cleared the hold.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, answer_note }: {
+      task_id: string;
+      agent_code: string;
+      answer_note: string;
+    },
+  ) => {
+    logToolInvocation("answer_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "answer",
+          reason: answer_note,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error answering agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "read_agent_ledger",
+  {
+    title: "Read Agent Ledger",
+    description:
+      "Read Open Engine runtime ledger rows, optionally filtered to one agent code.",
+    inputSchema: {
+      agent_code: z.string().optional(),
+    },
+  },
+  async ({ agent_code }: { agent_code?: string }) => {
+    logToolInvocation("read_agent_ledger", { agent_code }, "mcp");
+    try {
+      let query = supabase
+        .from("agent_task_ledger")
+        .select(AGENT_LEDGER_SELECT)
+        .order("agent_code", { ascending: true });
+      if (agent_code) query = query.eq("agent_code", agent_code);
+      const { data, error } = await query;
+      if (error) throw error;
+      return textToolResponse({ count: data?.length ?? 0, ledger: data ?? [] });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error reading agent ledger: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "write_agent_ledger",
+  {
+    title: "Write Agent Ledger",
+    description:
+      "Update an existing Open Engine runtime ledger row. This never creates or deletes ledger identities.",
+    inputSchema: {
+      agent_code: z.string().min(1),
+      automation_state: z
+        .enum(["installed", "manual-required", "blocked", "paused"])
+        .optional(),
+      last_queue_result: z.string().optional(),
+      local_context: z.string().optional(),
+      optional_skills: z.array(z.string()).optional(),
+      notes: z.string().optional(),
+    },
+  },
+  async (
+    {
+      agent_code,
+      automation_state,
+      last_queue_result,
+      local_context,
+      optional_skills,
+      notes,
+    }: {
+      agent_code: string;
+      automation_state?: string;
+      last_queue_result?: string;
+      local_context?: string;
+      optional_skills?: string[];
+      notes?: string;
+    },
+  ) => {
+    logToolInvocation("write_agent_ledger", {
+      agent_code,
+      automation_state,
+      last_queue_result,
+      local_context,
+      optional_skills,
+    }, "mcp");
+    try {
+      if (automation_state && !isLedgerAutomationState(automation_state)) {
+        throw new Error(`Invalid automation_state: ${automation_state}`);
+      }
+      const patch = compactObject({
+        automation_state,
+        last_queue_result,
+        local_context,
+        optional_skills,
+        notes,
+        last_heartbeat: new Date().toISOString(),
+      });
+      const { data, error } = await supabase
+        .from("agent_task_ledger")
+        .update(patch)
+        .eq("agent_code", agent_code)
+        .select(AGENT_LEDGER_SELECT)
+        .single();
+      if (error) throw error;
+      return textToolResponse({ receipt: "AGENT STATUS", ledger: data });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error writing agent ledger: ${(err as Error).message}`,
+      );
+    }
+  },
 );
 
 server.registerTool(
   "capture_thought",
   {
     title: "Capture Thought",
-    description: "Save a new thought to Brain Bank. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client. Pass `tags` to pin explicit topic tags (e.g. a project slug) onto the capture — they merge with the auto-extracted topics.",
+    description:
+      "Save a new thought to Brain Bank. Generates an embedding and extracts metadata automatically. Use this when the user wants to save something to their brain directly from any AI client. Pass `tags` to pin explicit topic tags (e.g. a project slug) onto the capture — they merge with the auto-extracted topics.",
     inputSchema: {
       content: z.string().describe("The thought to capture"),
-      tags: z.array(z.string()).optional().describe("Optional explicit topic tags to attach (merged with the auto-extracted topics). Use underscores, not hyphens, for multi-word slugs."),
+      tags: z.array(z.string()).optional().describe(
+        "Optional explicit topic tags to attach (merged with the auto-extracted topics). Use underscores, not hyphens, for multi-word slugs.",
+      ),
     },
   },
   async ({ content, tags }: { content: string; tags?: string[] }) => {
@@ -1163,7 +2175,12 @@ server.registerTool(
     try {
       const hash = await contentHash(content);
       if (await isDuplicate(hash)) {
-        return { content: [{ type: "text" as const, text: "Already in the brain (duplicate detected)." }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Already in the brain (duplicate detected).",
+          }],
+        };
       }
       // Optional caller-supplied tags merge into the auto-extracted topics —
       // mirrors the explicitTags logic in handleRestCapture.
@@ -1173,28 +2190,74 @@ server.registerTool(
           .map((t) => t.toLowerCase().trim())
           .filter(Boolean)
         : [];
-      const [embedding, rawMetadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
+      const [embedding, rawMetadata] = await Promise.all([
+        getEmbedding(content),
+        extractMetadata(content),
+      ]);
       const knownSlugs = await loadKnownSlugs(supabase);
       const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
       const extractedTopics = coerced.topics;
-      const mergedTopics = Array.from(new Set([...extractedTopics, ...explicitTags]));
-      const finalMetadata: Record<string, unknown> = { ...coerced, topics: mergedTopics, source: "mcp" };
-      const { data: inserted, error } = await supabase.from("thoughts").insert({ content, embedding, content_hash: hash, metadata: finalMetadata }).select("id").single();
-      if (error || !inserted) return { content: [{ type: "text" as const, text: `Failed to capture: ${error?.message || "unknown error"}` }], isError: true };
+      const mergedTopics = Array.from(
+        new Set([...extractedTopics, ...explicitTags]),
+      );
+      const finalMetadata: Record<string, unknown> = {
+        ...coerced,
+        topics: mergedTopics,
+        source: "mcp",
+      };
+      const { data: inserted, error } = await supabase.from("thoughts").insert({
+        content,
+        embedding,
+        content_hash: hash,
+        metadata: finalMetadata,
+      }).select("id").single();
+      if (error || !inserted) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Failed to capture: ${error?.message || "unknown error"}`,
+          }],
+          isError: true,
+        };
+      }
 
       // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
-      const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
+      const resolved = await postCaptureHook(
+        inserted.id,
+        content,
+        finalMetadata,
+        [inserted.id],
+      );
 
       let confirmation = `Captured as ${finalMetadata.type || "thought"}`;
       if (mergedTopics.length) confirmation += ` - ${mergedTopics.join(", ")}`;
-      if (Array.isArray(finalMetadata.people) && finalMetadata.people.length) confirmation += ` | People: ${(finalMetadata.people as string[]).join(", ")}`;
-      if (Array.isArray(finalMetadata.action_items) && finalMetadata.action_items.length) confirmation += ` | Actions: ${(finalMetadata.action_items as string[]).join("; ")}`;
-      if (resolved.length > 0) confirmation += ` | Auto-resolved: ${resolved.join("; ")}`;
+      if (Array.isArray(finalMetadata.people) && finalMetadata.people.length) {
+        confirmation += ` | People: ${
+          (finalMetadata.people as string[]).join(", ")
+        }`;
+      }
+      if (
+        Array.isArray(finalMetadata.action_items) &&
+        finalMetadata.action_items.length
+      ) {
+        confirmation += ` | Actions: ${
+          (finalMetadata.action_items as string[]).join("; ")
+        }`;
+      }
+      if (resolved.length > 0) {
+        confirmation += ` | Auto-resolved: ${resolved.join("; ")}`;
+      }
       return { content: [{ type: "text" as const, text: confirmation }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 // --- Client Extension MCP Tools ---
@@ -1214,11 +2277,20 @@ server.registerTool(
         .array(z.string())
         .optional()
         .describe("Style preferences"),
-      notes: z.string().optional().describe("Any initial notes about this client"),
+      notes: z.string().optional().describe(
+        "Any initial notes about this client",
+      ),
     },
   },
   async ({ name, email, phone, instagram, preferred_styles, notes }) => {
-    logToolInvocation("add_client", { name, email, phone, instagram, preferred_styles, notes }, "mcp");
+    logToolInvocation("add_client", {
+      name,
+      email,
+      phone,
+      instagram,
+      preferred_styles,
+      notes,
+    }, "mcp");
     try {
       // Check if client with same name already exists
       const { data: existing } = await supabase
@@ -1231,7 +2303,9 @@ server.registerTool(
           content: [
             {
               type: "text" as const,
-              text: `A client named "${existing[0].name}" already exists. Use find_client to look them up or use a more specific name.`,
+              text: `A client named "${
+                existing[0].name
+              }" already exists. Use find_client to look them up or use a more specific name.`,
             },
           ],
         };
@@ -1253,15 +2327,29 @@ server.registerTool(
         .select("id, name")
         .single();
       if (error) {
-        return { content: [{ type: "text" as const, text: `Failed to add client: ${error.message}` }], isError: true };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Failed to add client: ${error.message}`,
+          }],
+          isError: true,
+        };
       }
       let msg = `Client "${data.name}" added (${data.id}).`;
-      if (preferred_styles?.length) msg += ` Styles: ${preferred_styles.join(", ")}.`;
+      if (preferred_styles?.length) {
+        msg += ` Styles: ${preferred_styles.join(", ")}.`;
+      }
       return { content: [{ type: "text" as const, text: msg }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -1279,34 +2367,68 @@ server.registerTool(
     try {
       const { data, error } = await supabase
         .from("clients")
-        .select("id, name, email, phone, instagram, preferred_styles, notes, first_contact, last_contact")
+        .select(
+          "id, name, email, phone, instagram, preferred_styles, notes, first_contact, last_contact",
+        )
         .ilike("name", `%${name}%`)
         .order("last_contact", { ascending: false })
         .limit(10);
       if (error) {
-        return { content: [{ type: "text" as const, text: `Search error: ${error.message}` }], isError: true };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Search error: ${error.message}`,
+          }],
+          isError: true,
+        };
       }
       if (!data || data.length === 0) {
-        return { content: [{ type: "text" as const, text: `No clients found matching "${name}".` }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No clients found matching "${name}".`,
+          }],
+        };
       }
       const results = data.map((c) => {
         const lines = [`Name: ${c.name} (${c.id})`];
         if (c.email) lines.push(`Email: ${c.email}`);
         if (c.phone) lines.push(`Phone: ${c.phone}`);
         if (c.instagram) lines.push(`Instagram: ${c.instagram}`);
-        if (c.preferred_styles?.length) lines.push(`Styles: ${c.preferred_styles.join(", ")}`);
+        if (c.preferred_styles?.length) {
+          lines.push(`Styles: ${c.preferred_styles.join(", ")}`);
+        }
         if (c.notes) lines.push(`Notes: ${c.notes}`);
-        if (c.first_contact) lines.push(`First contact: ${new Date(c.first_contact).toLocaleDateString()}`);
-        if (c.last_contact) lines.push(`Last contact: ${new Date(c.last_contact).toLocaleDateString()}`);
+        if (c.first_contact) {
+          lines.push(
+            `First contact: ${new Date(c.first_contact).toLocaleDateString()}`,
+          );
+        }
+        if (c.last_contact) {
+          lines.push(
+            `Last contact: ${new Date(c.last_contact).toLocaleDateString()}`,
+          );
+        }
         return lines.join("\n");
       });
       return {
-        content: [{ type: "text" as const, text: `Found ${data.length} client(s):\n\n${results.join("\n\n---\n\n")}` }],
+        content: [{
+          type: "text" as const,
+          text: `Found ${data.length} client(s):\n\n${
+            results.join("\n\n---\n\n")
+          }`,
+        }],
       };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -1317,7 +2439,9 @@ server.registerTool(
       `Get full context on a client: profile and related brain thoughts. Use before a ${loadProfile().domain.singular_noun} or when a client reaches out.`,
     inputSchema: {
       client_id: z.string().optional().describe("Client UUID (if known)"),
-      name: z.string().optional().describe("Client name (used if client_id not provided)"),
+      name: z.string().optional().describe(
+        "Client name (used if client_id not provided)",
+      ),
     },
   },
   async ({ client_id, name }) => {
@@ -1325,7 +2449,10 @@ server.registerTool(
     try {
       if (!client_id && !name) {
         return {
-          content: [{ type: "text" as const, text: "Provide either client_id or name." }],
+          content: [{
+            type: "text" as const,
+            text: "Provide either client_id or name.",
+          }],
           isError: true,
         };
       }
@@ -1339,7 +2466,13 @@ server.registerTool(
           .eq("id", client_id)
           .single();
         if (error || !data) {
-          return { content: [{ type: "text" as const, text: `Client not found: ${error?.message || "no match"}` }], isError: true };
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Client not found: ${error?.message || "no match"}`,
+            }],
+            isError: true,
+          };
         }
         client = data;
       } else {
@@ -1349,15 +2482,26 @@ server.registerTool(
           .ilike("name", `%${name}%`)
           .limit(1);
         if (error || !data?.length) {
-          return { content: [{ type: "text" as const, text: `No client found matching "${name}".` }] };
+          return {
+            content: [{
+              type: "text" as const,
+              text: `No client found matching "${name}".`,
+            }],
+          };
         }
         client = data[0];
       }
 
       // Cross-reference thoughts table for mentions of this client's name
       const clientNameParts = client.name.split(" ");
-      const searchName = clientNameParts.length > 1 ? client.name : clientNameParts[0];
-      let relatedThoughts: { content: string; metadata: Record<string, unknown>; created_at: string }[] = [];
+      const searchName = clientNameParts.length > 1
+        ? client.name
+        : clientNameParts[0];
+      let relatedThoughts: {
+        content: string;
+        metadata: Record<string, unknown>;
+        created_at: string;
+      }[] = [];
       try {
         const nameEmb = await getEmbedding(searchName);
         const { data: thoughts } = await supabase.rpc("match_thoughts", {
@@ -1368,9 +2512,13 @@ server.registerTool(
         });
         // Filter to thoughts that actually mention the client's name (any part)
         if (thoughts) {
-          const lowerParts = clientNameParts.map((p: string) => p.toLowerCase());
+          const lowerParts = clientNameParts.map((p: string) =>
+            p.toLowerCase()
+          );
           relatedThoughts = thoughts.filter((t: { content: string }) =>
-            lowerParts.some((part: string) => t.content.toLowerCase().includes(part))
+            lowerParts.some((part: string) =>
+              t.content.toLowerCase().includes(part)
+            )
           );
         }
       } catch {
@@ -1386,12 +2534,21 @@ server.registerTool(
         .limit(10);
 
       // Merge and deduplicate thoughts
-      const allThoughts = new Map<string, { content: string; metadata: Record<string, unknown>; created_at: string }>();
+      const allThoughts = new Map<
+        string,
+        {
+          content: string;
+          metadata: Record<string, unknown>;
+          created_at: string;
+        }
+      >();
       for (const t of [...relatedThoughts, ...(peopleThoughts || [])]) {
         allThoughts.set(t.content, t);
       }
       const uniqueThoughts = Array.from(allThoughts.values())
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .sort((a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        )
         .slice(0, 10);
 
       // Build response
@@ -1403,26 +2560,50 @@ server.registerTool(
       if (client.email) lines.push(`Email: ${client.email}`);
       if (client.phone) lines.push(`Phone: ${client.phone}`);
       if (client.instagram) lines.push(`Instagram: ${client.instagram}`);
-      if (client.preferred_styles?.length) lines.push(`Preferred styles: ${client.preferred_styles.join(", ")}`);
+      if (client.preferred_styles?.length) {
+        lines.push(`Preferred styles: ${client.preferred_styles.join(", ")}`);
+      }
       if (client.notes) lines.push(`Notes: ${client.notes}`);
-      if (client.first_contact) lines.push(`First contact: ${new Date(client.first_contact).toLocaleDateString()}`);
-      if (client.last_contact) lines.push(`Last contact: ${new Date(client.last_contact).toLocaleDateString()}`);
+      if (client.first_contact) {
+        lines.push(
+          `First contact: ${
+            new Date(client.first_contact).toLocaleDateString()
+          }`,
+        );
+      }
+      if (client.last_contact) {
+        lines.push(
+          `Last contact: ${new Date(client.last_contact).toLocaleDateString()}`,
+        );
+      }
 
       // Related thoughts
       if (uniqueThoughts.length > 0) {
         lines.push("", "## Related Brain Thoughts");
         for (const t of uniqueThoughts) {
           const m = t.metadata || {};
-          const tags = Array.isArray(m.topics) ? ` (${(m.topics as string[]).join(", ")})` : "";
-          lines.push(`- [${new Date(t.created_at).toLocaleDateString()}]${tags} ${t.content}`);
+          const tags = Array.isArray(m.topics)
+            ? ` (${(m.topics as string[]).join(", ")})`
+            : "";
+          lines.push(
+            `- [${
+              new Date(t.created_at).toLocaleDateString()
+            }]${tags} ${t.content}`,
+          );
         }
       }
 
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 // --- Content Pipeline Extension MCP Tools ---
@@ -1438,21 +2619,40 @@ server.registerTool(
       content_type: z
         .enum(contentTypes as [string, ...string[]])
         .describe("Type of content"),
-      subject: z.string().optional().describe("What the content shows, e.g. 'in-progress work'"),
-      client_id: z.string().optional().describe("Client UUID if content features a specific client's work"),
+      subject: z.string().optional().describe(
+        "What the content shows, e.g. 'in-progress work'",
+      ),
+      client_id: z.string().optional().describe(
+        "Client UUID if content features a specific client's work",
+      ),
       stage: z
         .enum(["captured", "edited", "scheduled", "published", "archived"])
         .optional()
         .default("captured")
         .describe("Current pipeline stage"),
-      platform: z.string().optional().describe("Target platform: instagram, facebook, wordpress, all"),
+      platform: z.string().optional().describe(
+        "Target platform: instagram, facebook, wordpress, all",
+      ),
       notes: z.string().optional().describe("Notes about this content"),
     },
   },
-  async ({ title, content_type, subject, client_id, stage, platform, notes }) => {
-    logToolInvocation("log_content", { title, content_type, subject, client_id, stage, platform, notes }, "mcp");
+  async (
+    { title, content_type, subject, client_id, stage, platform, notes },
+  ) => {
+    logToolInvocation("log_content", {
+      title,
+      content_type,
+      subject,
+      client_id,
+      stage,
+      platform,
+      notes,
+    }, "mcp");
     try {
-      const record: Record<string, unknown> = { content_type, stage: stage || "captured" };
+      const record: Record<string, unknown> = {
+        content_type,
+        stage: stage || "captured",
+      };
       if (title) record.title = title;
       if (subject) record.subject = subject;
       if (client_id) record.client_id = client_id;
@@ -1465,16 +2665,28 @@ server.registerTool(
         .select("id, title, content_type, stage")
         .single();
       if (error) {
-        return { content: [{ type: "text" as const, text: `Failed to log content: ${error.message}` }], isError: true };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Failed to log content: ${error.message}`,
+          }],
+          isError: true,
+        };
       }
       let msg = `Content logged: ${data.content_type} (${data.stage})`;
       if (data.title) msg += ` "${data.title}"`;
       msg += ` [${data.id}]`;
       return { content: [{ type: "text" as const, text: msg }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -1490,8 +2702,12 @@ server.registerTool(
         .optional()
         .describe("New pipeline stage"),
       platform: z.string().optional().describe("Platform published to"),
-      scheduled_date: z.string().optional().describe("Scheduled date YYYY-MM-DD"),
-      published_date: z.string().optional().describe("Published date YYYY-MM-DD"),
+      scheduled_date: z.string().optional().describe(
+        "Scheduled date YYYY-MM-DD",
+      ),
+      published_date: z.string().optional().describe(
+        "Published date YYYY-MM-DD",
+      ),
       performance: z
         .object({
           likes: z.coerce.number().optional(),
@@ -1504,8 +2720,26 @@ server.registerTool(
       notes: z.string().optional().describe("Updated notes"),
     },
   },
-  async ({ content_id, stage, platform, scheduled_date, published_date, performance, notes }) => {
-    logToolInvocation("update_content", { content_id, stage, platform, scheduled_date, published_date, performance, notes }, "mcp");
+  async (
+    {
+      content_id,
+      stage,
+      platform,
+      scheduled_date,
+      published_date,
+      performance,
+      notes,
+    },
+  ) => {
+    logToolInvocation("update_content", {
+      content_id,
+      stage,
+      platform,
+      scheduled_date,
+      published_date,
+      performance,
+      notes,
+    }, "mcp");
     try {
       const updates: Record<string, unknown> = {};
       if (stage) updates.stage = stage;
@@ -1516,7 +2750,12 @@ server.registerTool(
       if (notes) updates.notes = notes;
 
       if (Object.keys(updates).length === 0) {
-        return { content: [{ type: "text" as const, text: "Nothing to update. Provide at least one field." }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Nothing to update. Provide at least one field.",
+          }],
+        };
       }
 
       const { data, error } = await supabase
@@ -1526,16 +2765,28 @@ server.registerTool(
         .select("id, title, content_type, stage")
         .single();
       if (error) {
-        return { content: [{ type: "text" as const, text: `Failed to update: ${error.message}` }], isError: true };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Failed to update: ${error.message}`,
+          }],
+          isError: true,
+        };
       }
       let msg = `Updated: ${data.content_type}`;
       if (data.title) msg += ` "${data.title}"`;
       if (stage) msg += ` -> ${stage}`;
       return { content: [{ type: "text" as const, text: msg }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -1545,17 +2796,25 @@ server.registerTool(
     description:
       "See what's in the content pipeline at each stage. Optionally filter by content type or platform.",
     inputSchema: {
-      content_type: z.string().optional().describe(`Filter by type: ${contentTypes.join(", ")}`),
+      content_type: z.string().optional().describe(
+        `Filter by type: ${contentTypes.join(", ")}`,
+      ),
       platform: z.string().optional().describe("Filter by platform"),
       limit: z.coerce.number().optional().default(20),
     },
   },
   async ({ content_type, platform, limit }) => {
-    logToolInvocation("content_status", { content_type, platform, limit }, "mcp");
+    logToolInvocation(
+      "content_status",
+      { content_type, platform, limit },
+      "mcp",
+    );
     try {
       let q = supabase
         .from("content_items")
-        .select("id, title, content_type, subject, stage, platform, scheduled_date, published_date, performance, notes, created_at")
+        .select(
+          "id, title, content_type, subject, stage, platform, scheduled_date, published_date, performance, notes, created_at",
+        )
         .order("created_at", { ascending: false })
         .limit(limit);
       if (content_type) q = q.eq("content_type", content_type);
@@ -1563,14 +2822,28 @@ server.registerTool(
 
       const { data, error } = await q;
       if (error) {
-        return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+        return {
+          content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+          isError: true,
+        };
       }
       if (!data?.length) {
-        return { content: [{ type: "text" as const, text: "No content in the pipeline." }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No content in the pipeline.",
+          }],
+        };
       }
 
       // Group by stage
-      const stages = ["captured", "edited", "scheduled", "published", "archived"];
+      const stages = [
+        "captured",
+        "edited",
+        "scheduled",
+        "published",
+        "archived",
+      ];
       const grouped: Record<string, typeof data> = {};
       for (const item of data) {
         const s = item.stage || "captured";
@@ -1588,22 +2861,38 @@ server.registerTool(
           if (item.title) parts.push(`"${item.title}"`);
           if (item.subject) parts.push(`(${item.subject})`);
           if (item.platform) parts.push(`[${item.platform}]`);
-          if (item.scheduled_date) parts.push(`scheduled: ${item.scheduled_date}`);
-          if (item.published_date) parts.push(`published: ${item.published_date}`);
+          if (item.scheduled_date) {
+            parts.push(`scheduled: ${item.scheduled_date}`);
+          }
+          if (item.published_date) {
+            parts.push(`published: ${item.published_date}`);
+          }
           const perf = item.performance as Record<string, number> | null;
           if (perf && Object.keys(perf).length > 0) {
-            const metrics = Object.entries(perf).map(([k, v]) => `${k}: ${v}`).join(", ");
+            const metrics = Object.entries(perf).map(([k, v]) => `${k}: ${v}`)
+              .join(", ");
             parts.push(`{${metrics}}`);
           }
           lines.push(parts.join(" "));
         }
       }
 
-      return { content: [{ type: "text" as const, text: `Content pipeline (${data.length} items):${lines.join("\n")}` }] };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Content pipeline (${data.length} items):${lines.join("\n")}`,
+        }],
+      };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -1613,7 +2902,9 @@ server.registerTool(
     description:
       "See how published content is performing. Shows top content by engagement metrics.",
     inputSchema: {
-      days: z.coerce.number().optional().default(30).describe("Look back N days"),
+      days: z.coerce.number().optional().default(30).describe(
+        "Look back N days",
+      ),
       limit: z.coerce.number().optional().default(10),
     },
   },
@@ -1631,10 +2922,18 @@ server.registerTool(
         .order("published_date", { ascending: false })
         .limit(limit);
       if (error) {
-        return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+        return {
+          content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+          isError: true,
+        };
       }
       if (!data?.length) {
-        return { content: [{ type: "text" as const, text: `No published content in the last ${days} days.` }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No published content in the last ${days} days.`,
+          }],
+        };
       }
 
       const lines = data.map((item) => {
@@ -1644,17 +2943,29 @@ server.registerTool(
         if (item.platform) parts.push(`[${item.platform}]`);
         const perf = item.performance as Record<string, number> | null;
         if (perf && Object.keys(perf).length > 0) {
-          const metrics = Object.entries(perf).map(([k, v]) => `${k}: ${v}`).join(", ");
+          const metrics = Object.entries(perf).map(([k, v]) => `${k}: ${v}`)
+            .join(", ");
           parts.push(`{${metrics}}`);
         }
         return parts.join(" ");
       });
 
-      return { content: [{ type: "text" as const, text: `Published content (last ${days} days):\n\n${lines.join("\n")}` }] };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Published content (last ${days} days):\n\n${lines.join("\n")}`,
+        }],
+      };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 // --- Business Operations Extension MCP Tools ---
@@ -1663,21 +2974,29 @@ server.registerTool(
   "log_event",
   {
     title: "Log Business Event",
-    description:
-      `Record a business event: ${eventTypes.join(", ")}.`,
+    description: `Record a business event: ${eventTypes.join(", ")}.`,
     inputSchema: {
       event_type: z
         .enum(eventTypes as [string, ...string[]])
         .describe("Type of event"),
       title: z.string().describe("Event title"),
       date_start: z.string().optional().describe("Start date YYYY-MM-DD"),
-      date_end: z.string().optional().describe("End date YYYY-MM-DD (for multi-day events)"),
+      date_end: z.string().optional().describe(
+        "End date YYYY-MM-DD (for multi-day events)",
+      ),
       location: z.string().optional().describe("Event location"),
       notes: z.string().optional().describe("Notes about the event"),
     },
   },
   async ({ event_type, title, date_start, date_end, location, notes }) => {
-    logToolInvocation("log_event", { event_type, title, date_start, date_end, location, notes }, "mcp");
+    logToolInvocation("log_event", {
+      event_type,
+      title,
+      date_start,
+      date_end,
+      location,
+      notes,
+    }, "mcp");
     try {
       const record: Record<string, unknown> = { event_type, title };
       if (date_start) record.date_start = date_start;
@@ -1691,16 +3010,30 @@ server.registerTool(
         .select("id, event_type, title")
         .single();
       if (error) {
-        return { content: [{ type: "text" as const, text: `Failed to log event: ${error.message}` }], isError: true };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Failed to log event: ${error.message}`,
+          }],
+          isError: true,
+        };
       }
       let msg = `Event logged: ${data.event_type} "${data.title}"`;
-      if (date_start) msg += ` (${date_start}${date_end ? " to " + date_end : ""})`;
+      if (date_start) {
+        msg += ` (${date_start}${date_end ? " to " + date_end : ""})`;
+      }
       if (location) msg += ` at ${location}`;
       return { content: [{ type: "text" as const, text: msg }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -1710,8 +3043,12 @@ server.registerTool(
     description:
       "Show upcoming business events. Optionally filter by event type.",
     inputSchema: {
-      event_type: z.string().optional().describe(`Filter: ${eventTypes.join(", ")}`),
-      days: z.coerce.number().optional().default(90).describe("Look ahead N days"),
+      event_type: z.string().optional().describe(
+        `Filter: ${eventTypes.join(", ")}`,
+      ),
+      days: z.coerce.number().optional().default(90).describe(
+        "Look ahead N days",
+      ),
     },
   },
   async ({ event_type, days }) => {
@@ -1732,14 +3069,24 @@ server.registerTool(
 
       const { data, error } = await q;
       if (error) {
-        return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
+        return {
+          content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+          isError: true,
+        };
       }
       if (!data?.length) {
-        return { content: [{ type: "text" as const, text: `No upcoming events in the next ${days} days.` }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No upcoming events in the next ${days} days.`,
+          }],
+        };
       }
 
       const lines = data.map((e) => {
-        const parts = [`${e.date_start}${e.date_end ? " to " + e.date_end : ""}`];
+        const parts = [
+          `${e.date_start}${e.date_end ? " to " + e.date_end : ""}`,
+        ];
         parts.push(`[${e.event_type}]`);
         parts.push(e.title);
         if (e.location) parts.push(`at ${e.location}`);
@@ -1747,11 +3094,22 @@ server.registerTool(
         return parts.join(" ");
       });
 
-      return { content: [{ type: "text" as const, text: `Upcoming events (next ${days} days):\n\n${lines.join("\n")}` }] };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Upcoming events (next ${days} days):\n\n${lines.join("\n")}`,
+        }],
+      };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -1806,7 +3164,11 @@ server.registerTool(
       const lines: string[] = ["## Business Snapshot"];
 
       // Clients
-      lines.push(`\nClients: ${totalClients || 0} total, ${activeClients || 0} active (last 30 days)`);
+      lines.push(
+        `\nClients: ${totalClients || 0} total, ${
+          activeClients || 0
+        } active (last 30 days)`,
+      );
 
       // Content pipeline
       if (Object.keys(stageCounts).length > 0) {
@@ -1820,7 +3182,13 @@ server.registerTool(
       if (events?.length) {
         lines.push("\nUpcoming events:");
         for (const e of events) {
-          lines.push(`  ${e.date_start}${e.date_end ? "-" + e.date_end : ""} [${e.event_type}] ${e.title}${e.location ? " at " + e.location : ""}`);
+          lines.push(
+            `  ${e.date_start}${
+              e.date_end ? "-" + e.date_end : ""
+            } [${e.event_type}] ${e.title}${
+              e.location ? " at " + e.location : ""
+            }`,
+          );
         }
       } else {
         lines.push("\nNo upcoming events.");
@@ -1828,9 +3196,15 @@ server.registerTool(
 
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 // --- Cross-Extension Intelligence ---
@@ -1851,7 +3225,12 @@ server.registerTool(
       const sections: string[] = [`## Full Context: "${query}"\n`];
 
       // 1. Semantic search on thoughts
-      let relatedThoughts: { content: string; similarity: number; metadata: Record<string, unknown>; created_at: string }[] = [];
+      let relatedThoughts: {
+        content: string;
+        similarity: number;
+        metadata: Record<string, unknown>;
+        created_at: string;
+      }[] = [];
       try {
         const qEmb = await getEmbedding(query);
         const { data } = await supabase.rpc("match_thoughts", {
@@ -1882,7 +3261,15 @@ server.registerTool(
         .limit(10);
 
       // Merge and dedup thoughts
-      const thoughtMap = new Map<string, { content: string; metadata: Record<string, unknown>; created_at: string; similarity?: number }>();
+      const thoughtMap = new Map<
+        string,
+        {
+          content: string;
+          metadata: Record<string, unknown>;
+          created_at: string;
+          similarity?: number;
+        }
+      >();
       for (const t of relatedThoughts) {
         thoughtMap.set(t.content, { ...t });
       }
@@ -1892,7 +3279,9 @@ server.registerTool(
         }
       }
       const allThoughts = Array.from(thoughtMap.values())
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .sort((a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        )
         .slice(0, 15);
 
       // 2. Client match
@@ -1934,7 +3323,9 @@ server.registerTool(
       const { data: events } = await supabase
         .from("business_events")
         .select("*")
-        .or(`title.ilike.%${query}%,location.ilike.%${query}%,notes.ilike.%${query}%`)
+        .or(
+          `title.ilike.%${query}%,location.ilike.%${query}%,notes.ilike.%${query}%`,
+        )
         .order("date_start", { ascending: false })
         .limit(10);
 
@@ -1946,16 +3337,31 @@ server.registerTool(
           if (c.email) lines.push(`Email: ${c.email}`);
           if (c.phone) lines.push(`Phone: ${c.phone}`);
           if (c.instagram) lines.push(`Instagram: @${c.instagram}`);
-          if (c.preferred_styles?.length) lines.push(`Styles: ${c.preferred_styles.join(", ")}`);
+          if (c.preferred_styles?.length) {
+            lines.push(`Styles: ${c.preferred_styles.join(", ")}`);
+          }
           if (c.notes) lines.push(`Notes: ${c.notes}`);
-          if (c.last_contact) lines.push(`Last contact: ${new Date(c.last_contact).toLocaleDateString()}`);
+          if (c.last_contact) {
+            lines.push(
+              `Last contact: ${new Date(c.last_contact).toLocaleDateString()}`,
+            );
+          }
           sections.push(lines.join("\n"));
         }
       }
 
       if (allContent.length > 0) {
         sections.push("\n### Related Content");
-        for (const c of allContent as { content_type: string; title?: string; subject?: string; stage: string; platform?: string; published_date?: string }[]) {
+        for (
+          const c of allContent as {
+            content_type: string;
+            title?: string;
+            subject?: string;
+            stage: string;
+            platform?: string;
+            published_date?: string;
+          }[]
+        ) {
           const parts = [`${c.content_type}`];
           if (c.title) parts.push(`"${c.title}"`);
           if (c.subject) parts.push(`(${c.subject})`);
@@ -1969,7 +3375,9 @@ server.registerTool(
       if (events && events.length > 0) {
         sections.push("\n### Business Events");
         for (const e of events) {
-          const parts = [`${e.date_start || "TBD"}${e.date_end ? " to " + e.date_end : ""}`];
+          const parts = [
+            `${e.date_start || "TBD"}${e.date_end ? " to " + e.date_end : ""}`,
+          ];
           parts.push(`[${e.event_type}]`);
           parts.push(e.title);
           if (e.location) parts.push(`at ${e.location}`);
@@ -1981,10 +3389,16 @@ server.registerTool(
         sections.push("\n### Brain Thoughts");
         for (const t of allThoughts) {
           const m = t.metadata || {};
-          const tags = Array.isArray(m.topics) ? ` (${(m.topics as string[]).join(", ")})` : "";
+          const tags = Array.isArray(m.topics)
+            ? ` (${(m.topics as string[]).join(", ")})`
+            : "";
           const sim = (t as { similarity?: number }).similarity;
           const simStr = sim ? ` [${(sim * 100).toFixed(0)}%]` : "";
-          sections.push(`- [${new Date(t.created_at).toLocaleDateString()}]${tags}${simStr} ${t.content}`);
+          sections.push(
+            `- [${
+              new Date(t.created_at).toLocaleDateString()
+            }]${tags}${simStr} ${t.content}`,
+          );
         }
       }
 
@@ -1997,16 +3411,29 @@ server.registerTool(
       ].filter(Boolean);
 
       if (counts.length === 0) {
-        return { content: [{ type: "text" as const, text: `No information found for "${query}" across any table.` }] };
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No information found for "${query}" across any table.`,
+          }],
+        };
       }
 
       sections.splice(1, 0, `Found: ${counts.join(", ")}\n`);
 
-      return { content: [{ type: "text" as const, text: sections.join("\n") }] };
+      return {
+        content: [{ type: "text" as const, text: sections.join("\n") }],
+      };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 // --- Wiki Compiled Pages MCP Tools ---
@@ -2018,38 +3445,66 @@ server.registerTool(
     description:
       "Read a pre-synthesized wiki page about a known entity (client, topic, or project). **Prefer this over `search_thoughts` when the question is entity-shaped** ('what do we know about X?', 'what's our history with Y?'). Returns synthesized markdown plus a tail of new activity captured since the last compile. After Phase 12.D, includes a 'Sources' section with thought IDs you can drill into via `get_thought_by_id`. If no compiled page exists, fall back to `search_thoughts`.",
     inputSchema: {
-      slug: z.string().optional().describe(`Page slug, e.g. 'client/${slugify(loadProfile().example_person_name)}' or 'topic/${slugify(loadProfile().domain.vocabulary[0])}'`),
-      name: z.string().optional().describe("Page title to search for (used if slug not provided)"),
-      page_type: z.string().optional().describe("Filter by type: client, topic, project (used with name search)"),
+      slug: z.string().optional().describe(
+        `Page slug, e.g. 'client/${
+          slugify(loadProfile().example_person_name)
+        }' or 'topic/${slugify(loadProfile().domain.vocabulary[0])}'`,
+      ),
+      name: z.string().optional().describe(
+        "Page title to search for (used if slug not provided)",
+      ),
+      page_type: z.string().optional().describe(
+        "Filter by type: client, topic, project (used with name search)",
+      ),
     },
   },
   async ({ slug, name, page_type }) => {
     try {
       logToolInvocation("get_compiled_page", { slug, name, page_type }, "mcp");
       if (!slug && !name) {
-        return { content: [{ type: "text" as const, text: "Provide either slug or name." }], isError: true };
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Provide either slug or name.",
+          }],
+          isError: true,
+        };
       }
 
       let page;
       if (slug) {
         const { data, error } = await supabase
           .from("compiled_pages")
-          .select("slug, title, page_type, content, backlinks, last_compiled, source_thought_ids")
+          .select(
+            "slug, title, page_type, content, backlinks, last_compiled, source_thought_ids",
+          )
           .eq("slug", slug)
           .single();
         if (error || !data) {
-          return { content: [{ type: "text" as const, text: `No compiled page found for slug "${slug}".` }] };
+          return {
+            content: [{
+              type: "text" as const,
+              text: `No compiled page found for slug "${slug}".`,
+            }],
+          };
         }
         page = data;
       } else {
         let q = supabase
           .from("compiled_pages")
-          .select("slug, title, page_type, content, backlinks, last_compiled, source_thought_ids")
+          .select(
+            "slug, title, page_type, content, backlinks, last_compiled, source_thought_ids",
+          )
           .ilike("title", `%${name}%`);
         if (page_type) q = q.eq("page_type", page_type);
         const { data, error } = await q.limit(1);
         if (error || !data?.length) {
-          return { content: [{ type: "text" as const, text: `No compiled page found matching "${name}".` }] };
+          return {
+            content: [{
+              type: "text" as const,
+              text: `No compiled page found matching "${name}".`,
+            }],
+          };
         }
         page = data[0];
       }
@@ -2057,7 +3512,11 @@ server.registerTool(
       const lines = [
         `## ${page.title}`,
         `Type: ${page.page_type} | Slug: ${page.slug}`,
-        `Last compiled: ${page.last_compiled ? new Date(page.last_compiled).toLocaleString() : "never"}`,
+        `Last compiled: ${
+          page.last_compiled
+            ? new Date(page.last_compiled).toLocaleString()
+            : "never"
+        }`,
       ];
       if (page.backlinks?.length) {
         lines.push(`Backlinks: ${page.backlinks.join(", ")}`);
@@ -2068,10 +3527,15 @@ server.registerTool(
       // Show up to 20 most-recent source thought IDs with truncated previews.
       // Hint at get_thought_by_id for full reads. Best-effort: errors swallowed
       // so the page read never fails on Sources alone.
-      if (Array.isArray((page as { source_thought_ids?: string[] }).source_thought_ids)
-        && (page as { source_thought_ids: string[] }).source_thought_ids.length > 0) {
+      if (
+        Array.isArray(
+          (page as { source_thought_ids?: string[] }).source_thought_ids,
+        ) &&
+        (page as { source_thought_ids: string[] }).source_thought_ids.length > 0
+      ) {
         try {
-          const allIds = (page as { source_thought_ids: string[] }).source_thought_ids;
+          const allIds =
+            (page as { source_thought_ids: string[] }).source_thought_ids;
           // Most-recent 20 by capture order: query thoughts by id, take 20 most recent.
           const { data: sources } = await supabase
             .from("thoughts")
@@ -2080,13 +3544,21 @@ server.registerTool(
             .order("created_at", { ascending: false })
             .limit(20);
           if (sources && sources.length > 0) {
-            lines.push("", `## Sources (${allIds.length} total, showing ${sources.length} most recent)`);
+            lines.push(
+              "",
+              `## Sources (${allIds.length} total, showing ${sources.length} most recent)`,
+            );
             for (const s of sources) {
               const d = new Date(s.created_at).toLocaleDateString();
-              const preview = s.content.length > 200 ? s.content.substring(0, 200) + "..." : s.content;
+              const preview = s.content.length > 200
+                ? s.content.substring(0, 200) + "..."
+                : s.content;
               lines.push(`- \`${s.id}\` [${d}] ${preview}`);
             }
-            lines.push("", `_Drill into any source with \`get_thought_by_id(id)\`._`);
+            lines.push(
+              "",
+              `_Drill into any source with \`get_thought_by_id(id)\`._`,
+            );
           }
         } catch (_err) {
           // Sources is best-effort.
@@ -2122,7 +3594,9 @@ server.registerTool(
             if (page.page_type === "client") {
               recentQ = recentQ.contains("metadata", { people: [page.title] });
             } else {
-              recentQ = recentQ.contains("metadata", { topics: [page.title.toLowerCase()] });
+              recentQ = recentQ.contains("metadata", {
+                topics: [page.title.toLowerCase()],
+              });
             }
 
             const result = await recentQ;
@@ -2130,10 +3604,15 @@ server.registerTool(
           }
 
           if (recent && recent.length > 0) {
-            lines.push("", `## Recent activity since last compile (${recent.length})`);
+            lines.push(
+              "",
+              `## Recent activity since last compile (${recent.length})`,
+            );
             for (const t of recent) {
               const d = new Date(t.created_at).toLocaleString();
-              const preview = t.content.length > 300 ? t.content.substring(0, 300) + "..." : t.content;
+              const preview = t.content.length > 300
+                ? t.content.substring(0, 300) + "..."
+                : t.content;
               lines.push(`- [${d}] ${preview}`);
             }
           }
@@ -2150,10 +3629,17 @@ server.registerTool(
             .order("last_compiled", { ascending: false })
             .limit(20);
           if (changedPages && changedPages.length > 0) {
-            lines.push("", `## Pages compiled since ${new Date(page.last_compiled).toLocaleDateString()} (${changedPages.length})`);
+            lines.push(
+              "",
+              `## Pages compiled since ${
+                new Date(page.last_compiled).toLocaleDateString()
+              } (${changedPages.length})`,
+            );
             for (const p of changedPages) {
               const d = new Date(p.last_compiled!).toLocaleDateString();
-              lines.push(`- **${p.title}** (\`${p.slug}\`, ${p.page_type}) — compiled ${d}`);
+              lines.push(
+                `- **${p.title}** (\`${p.slug}\`, ${p.page_type}) — compiled ${d}`,
+              );
             }
           }
         } catch (_err) {
@@ -2163,9 +3649,15 @@ server.registerTool(
 
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -2176,13 +3668,19 @@ server.registerTool(
       "Find which wiki pages exist on a subject. Returns titles + 150-char previews (use `get_compiled_page` for full content). **Prefer this over `search_thoughts` when you want to know whether an entity is written up at all** ('is there a page on X?', 'what topics have I been logging about?').",
     inputSchema: {
       query: z.string().describe("Search term"),
-      page_type: z.string().optional().describe("Filter by type: client, topic, project"),
+      page_type: z.string().optional().describe(
+        "Filter by type: client, topic, project",
+      ),
       limit: z.coerce.number().optional().default(10),
     },
   },
   async ({ query, page_type, limit }) => {
     try {
-      logToolInvocation("search_compiled_pages", { query, page_type, limit }, "mcp");
+      logToolInvocation(
+        "search_compiled_pages",
+        { query, page_type, limit },
+        "mcp",
+      );
       let q = supabase
         .from("compiled_pages")
         .select("slug, title, page_type, last_compiled, content")
@@ -2192,20 +3690,47 @@ server.registerTool(
       if (page_type) q = q.eq("page_type", page_type);
 
       const { data, error } = await q;
-      if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
-      if (!data?.length) return { content: [{ type: "text" as const, text: `No compiled pages found matching "${query}".` }] };
+      if (error) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+          isError: true,
+        };
+      }
+      if (!data?.length) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `No compiled pages found matching "${query}".`,
+          }],
+        };
+      }
 
       const results = data.map((p) => {
-        const preview = p.content ? p.content.substring(0, 150).replace(/\n/g, " ") + "..." : "(not yet compiled)";
-        const compiled = p.last_compiled ? new Date(p.last_compiled).toLocaleDateString() : "never";
+        const preview = p.content
+          ? p.content.substring(0, 150).replace(/\n/g, " ") + "..."
+          : "(not yet compiled)";
+        const compiled = p.last_compiled
+          ? new Date(p.last_compiled).toLocaleDateString()
+          : "never";
         return `- **${p.title}** [${p.page_type}] (${p.slug}) - compiled ${compiled}\n  ${preview}`;
       });
 
-      return { content: [{ type: "text" as const, text: `Found ${data.length} page(s):\n\n${results.join("\n\n")}` }] };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Found ${data.length} page(s):\n\n${results.join("\n\n")}`,
+        }],
+      };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 server.registerTool(
@@ -2215,7 +3740,9 @@ server.registerTool(
     description:
       "Browse the wiki's full table of contents, optionally filtered by type (client / topic / project / index). **Use this for orientation when starting a session** — gives a one-screen view of every entity the wiki tracks. For a curated narrative version, get the page at slug `index/wiki` (auto-compiled).",
     inputSchema: {
-      page_type: z.string().optional().describe("Filter by type: client, topic, project"),
+      page_type: z.string().optional().describe(
+        "Filter by type: client, topic, project",
+      ),
       limit: z.coerce.number().optional().default(50),
     },
   },
@@ -2231,8 +3758,20 @@ server.registerTool(
       if (page_type) q = q.eq("page_type", page_type);
 
       const { data, error } = await q;
-      if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
-      if (!data?.length) return { content: [{ type: "text" as const, text: "No compiled pages exist yet." }] };
+      if (error) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${error.message}` }],
+          isError: true,
+        };
+      }
+      if (!data?.length) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "No compiled pages exist yet.",
+          }],
+        };
+      }
 
       // Group by type
       const grouped: Record<string, typeof data> = {};
@@ -2245,7 +3784,9 @@ server.registerTool(
       for (const [type, pages] of Object.entries(grouped)) {
         lines.push(`### ${type.toUpperCase()} (${pages.length})`);
         for (const p of pages) {
-          const compiled = p.last_compiled ? new Date(p.last_compiled).toLocaleDateString() : "never";
+          const compiled = p.last_compiled
+            ? new Date(p.last_compiled).toLocaleDateString()
+            : "never";
           lines.push(`- ${p.title} (${p.slug}) - compiled ${compiled}`);
         }
         lines.push("");
@@ -2253,9 +3794,15 @@ server.registerTool(
 
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
     } catch (err: unknown) {
-      return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Error: ${(err as Error).message}`,
+        }],
+        isError: true,
+      };
     }
-  }
+  },
 );
 
 // --- REST handler for compiled pages ---
@@ -2280,7 +3827,11 @@ async function handleRestPages(url: URL): Promise<Response> {
     }
 
     if (query) {
-      logToolInvocation("search_compiled_pages", { query, type, limit }, "rest");
+      logToolInvocation(
+        "search_compiled_pages",
+        { query, type, limit },
+        "rest",
+      );
     } else {
       logToolInvocation("list_compiled_pages", { type, limit }, "rest");
     }
@@ -2324,24 +3875,36 @@ Deno.serve(async (req: Request) => {
   const path = url.pathname.split("/open-brain-mcp").pop() || "/";
 
   // REST API routes
-  if (path === "/search" || path === "/list" || path === "/stats" || path === "/capture" || path === "/event" || path === "/client" || path === "/pages") {
+  if (
+    path === "/search" || path === "/list" || path === "/stats" ||
+    path === "/capture" || path === "/event" || path === "/client" ||
+    path === "/pages"
+  ) {
     // CORS preflight
     if (req.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
     // Accept auth via x-brain-key header or Authorization Bearer.
     const authHeader = req.headers.get("authorization") || "";
-    const bearerKey = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    const bearerKey = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : null;
     const provided = req.headers.get("x-brain-key") || bearerKey;
     if (!provided || provided !== MCP_ACCESS_KEY) {
       return jsonResponse({ error: "Invalid or missing access key" }, 401);
     }
-    if (req.method === "GET" && path === "/search") return handleRestSearch(url);
+    if (req.method === "GET" && path === "/search") {
+      return handleRestSearch(url);
+    }
     if (req.method === "GET" && path === "/list") return handleRestList(url);
     if (req.method === "GET" && path === "/stats") return handleRestStats();
-    if (req.method === "POST" && path === "/capture") return handleRestCapture(req);
+    if (req.method === "POST" && path === "/capture") {
+      return handleRestCapture(req);
+    }
     if (req.method === "POST" && path === "/event") return handleRestEvent(req);
-    if (req.method === "POST" && path === "/client") return handleRestClient(req);
+    if (req.method === "POST" && path === "/client") {
+      return handleRestClient(req);
+    }
     if (req.method === "GET" && path === "/pages") return handleRestPages(url);
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
@@ -2358,7 +3921,7 @@ Deno.serve(async (req: Request) => {
         "accept",
         accept
           ? `${accept}, text/event-stream`
-          : "application/json, text/event-stream"
+          : "application/json, text/event-stream",
       );
       const patched = new Request(req.url, {
         method: req.method,
