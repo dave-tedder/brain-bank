@@ -13,23 +13,23 @@ import {
 } from "./_agent_tasks.ts";
 
 const baseTask: AgentTaskAccessRow = {
-  agent_code: "dave-codex",
-  claimed_by: "dave-codex",
+  agent_code: "local-codex",
+  claimed_by: "local-codex",
   risk: "medium",
   explicit_approval: false,
   status: "Agent Working",
 };
 
 Deno.test("task write guard allows claimed or assigned agent only", () => {
-  assertEquals(canAgentWriteTask(baseTask, "dave-codex"), true);
+  assertEquals(canAgentWriteTask(baseTask, "local-codex"), true);
   assertEquals(
-    canAgentWriteTask({ ...baseTask, claimed_by: null }, "dave-codex"),
+    canAgentWriteTask({ ...baseTask, claimed_by: null }, "local-codex"),
     true,
   );
-  assertEquals(canAgentWriteTask(baseTask, "dave-claude-code"), false);
+  assertEquals(canAgentWriteTask(baseTask, "local-claude-code"), false);
 
   assertThrows(
-    () => assertAgentCanWriteTask(baseTask, "dave-claude-code"),
+    () => assertAgentCanWriteTask(baseTask, "local-claude-code"),
     Error,
     "claimed or tasks assigned",
   );

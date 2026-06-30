@@ -1664,7 +1664,7 @@ server.registerTool(
         "Optional status filters. Defaults to active non-done tasks.",
       ),
       agent_code: z.string().optional().describe(
-        "Optional runtime code filter, e.g. dave-codex.",
+        "Optional runtime code filter, e.g. local-codex.",
       ),
       risk: z.enum(["low", "medium", "high"]).optional(),
       project_slug: z.string().optional(),
