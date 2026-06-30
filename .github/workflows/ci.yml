@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+
+jobs:
+  test:
+    name: Engine + skill + dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Seed profile.json
+        run: cp profile.example.json profile.json
+
+      - name: Install Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Run engine Deno tests (open-brain-mcp)
+        run: deno test --allow-read --allow-env --config supabase/functions/open-brain-mcp/deno.json supabase/functions/open-brain-mcp/_agent_tasks_test.ts
+
+      - name: Verify queue-runner skill contract
+        run: node skills/queue-runner/verify.mjs
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Run dashboard node:test suites
+        working-directory: dashboard
+        run: node --test tests/*.test.mjs
+
+      - name: Type-check dashboard
+        working-directory: dashboard
+        run: npx tsc --noEmit
+
+      - name: Build dashboard
+        working-directory: dashboard
+        env:
+          # Build-time env stubs. The dashboard reads real secrets at runtime via Railway,
+          # but Next.js's lint/type pass crashes if these are unset at build time.
+          SUPABASE_URL: https://ci.invalid
+          SUPABASE_SERVICE_ROLE_KEY: ci-placeholder
+          OPENROUTER_API_KEY: ci-placeholder
+          DASHBOARD_PASSWORD: ci-placeholder
+          BRAIN_BANK_URL: https://ci.invalid
+          BRAIN_BANK_API_KEY: ci-placeholder
+        run: npm run build

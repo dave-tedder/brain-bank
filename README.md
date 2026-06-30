@@ -1,6 +1,6 @@
 # Brain Bank
 
-Personal semantic memory for knowledge workers. Capture thoughts from anywhere, search them back when you need them, and wake up to a synthesized digest of what mattered yesterday delivered to Slack every morning.
+Personal semantic memory for knowledge workers. Capture thoughts from anywhere, search them back when you need them, and wake up to a synthesized digest of what mattered yesterday delivered to Slack every morning. A self-hosted Next.js dashboard at `dashboard/` is the primary surface for browsing captures, projects, wiki pages, search, and the manual Open Engine task board.
 
 ## What it does
 
@@ -10,8 +10,11 @@ Every thought that passes through your day (a Slack note to yourself, an email y
 - **Proactive morning digests** delivered to Slack with yesterday's narrative, today's meeting briefings, open action items, and client cross-references.
 - **Auto-compiled wiki pages** for people, topics, and projects that come up often, regenerated as the underlying captures change.
 - **Action-item tracking with auto-resolution** that recognizes when a follow-up thought indicates something got done and closes the loop without manual bookkeeping.
+- **Manual Open Engine task board** at `dashboard/tasks` for queuing agent work packets with explicit risk, claim, and receipt rules. The Queue Runner skill at [`skills/queue-runner/SKILL.md`](skills/queue-runner/SKILL.md) walks an operator-driven runtime through one heartbeat at a time. No autonomous loop, no scheduled runner.
 
-Brain Bank is an engine. You bring the captures (Slack, Gmail, calendar, voice, Apple Notes, Notion, a ChatGPT custom GPT, or anything that speaks MCP or a plain REST POST). It handles the rest.
+Brain Bank is an engine plus a dashboard. You bring the captures (Slack, Gmail, calendar, voice, Apple Notes, Notion, a ChatGPT custom GPT, or anything that speaks MCP or a plain REST POST). It stores, synthesizes, and surfaces the rest, and you drive the manual task board from the dashboard or the MCP task tools.
+
+Release notes for every cut, including the current one, live in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Architecture
 
@@ -21,10 +24,24 @@ At a glance:
 - **Supabase Edge Functions** (Deno) for four worker services: `ingest-thought` (capture router), `open-brain-mcp` (MCP server + REST API), `brain-digest` (morning synthesis), `compile-pages` (wiki builder)
 - **pg_cron + pg_net** for scheduled work (daily and weekly digests, nightly page compilation)
 - **OpenRouter** for model access (OpenAI embeddings, GPT-4o-mini for metadata extraction, Claude Sonnet for digest prose)
-- **Next.js dashboard** (in `dashboard/`) for browsing, chat, and a running archive of past digests
+- **Next.js dashboard** (in `dashboard/`) for browsing captures, projects, wiki pages, search, past digests, chat over your memory, and the manual Open Engine task board
 - **Slack** as the primary capture surface and delivery channel for the digest
 
 Everything on the backend is stateless. Secrets live in Supabase's vault, so key rotation is a one-row update.
+
+## Hosted dashboard
+
+The `dashboard/` directory is a Next.js app that runs as a long-lived web service, not part of the Supabase Edge Function deploy. It is the primary surface for day-to-day operator use: browsing captures, projects, wiki pages, search, past digests, chat over your memory, and the manual Open Engine `/tasks` board.
+
+The reference deployment runs on Railway with the standalone Next.js output target:
+
+- Build root: `dashboard/`
+- Watch pattern: `dashboard/**` (Railway only rebuilds when files under this path change)
+- Required env vars: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENROUTER_API_KEY`, `DASHBOARD_PASSWORD`, `BRAIN_BANK_URL`, `BRAIN_BANK_API_KEY`
+
+See [`dashboard/README.md`](dashboard/README.md) for env-var details, the Railway watch pattern, the standalone-output gotcha, and the local-dev quickstart. [`dashboard/AGENTS.md`](dashboard/AGENTS.md) is the agent-facing companion with file-by-file conventions.
+
+The dashboard is optional for the engine itself. If you only want Slack capture and morning digests, you can skip `dashboard/` entirely.
 
 ## Personal customization via profile.json
 
@@ -100,6 +117,17 @@ brain-bank/
 
 **Skills:** Claude Code skills live in `skills/<name>/SKILL.md`. Auto-discovered when brain-bank is installed as a plugin or Claude Code runs inside a brain-bank clone.
 
+## Open Engine task board
+
+Open Engine is Nate B. Jones' framework for human-controlled, manually queued agent work. Brain Bank's adaptation ships as:
+
+- **Schema:** `agent_tasks`, `agent_task_events`, `agent_task_ledger` (service-role-only RLS). Each task carries a status (`Standing`, `Agent Todo`, `Doing`, `Human Hold`, `Blocked`, `Review`, `Done`, `Archived`), a risk band (`low`, `medium`, `high`), an `agent_code` runtime, and a receipt history.
+- **Dashboard board:** the protected `dashboard/tasks` page lets you create packets, move tasks through Open Engine statuses, edit core fields, filter by status / agent / risk, and inspect a per-task event timeline plus a runtime ledger panel.
+- **MCP task tools:** 12 guarded tools surface the same operations through MCP — `list_agent_tasks`, `get_agent_task`, `claim_next_agent_task`, `update_agent_task`, `complete_agent_task`, `block_agent_task`, `request_agent_review`, `resume_agent_task`, `unblock_agent_task`, `answer_agent_task`, `read_agent_ledger`, and `write_agent_ledger`. A heartbeat guard prevents `update_agent_task` from silently resuming a `Human Hold` or `Blocked` task; resume / unblock / answer are explicit transitions.
+- **Queue Runner skill:** [`skills/queue-runner/SKILL.md`](skills/queue-runner/SKILL.md) walks an operator-driven runtime through one heartbeat at a time: read the project guidance, claim the oldest eligible task, do exactly one task, write a receipt, stop. The skill is manual-only in this release; no cron, no autonomous loop, no scheduled trigger.
+
+For deeper background, see Nate's posts and the Open Engine specification text Brain Bank's adaptation is built against.
+
 ## Trust model
 
 Brain Bank assumes a **single trusted operator**. Every Edge Function endpoint is gated by a shared secret (`MCP_ACCESS_KEY` for MCP / REST, the Slack signing secret for Slack inbound), but the engine does not implement per-key rate limiting, per-tenant isolation, or quotas. A leaked key allows an attacker to write captures and read all stored thoughts until the key is rotated. The mitigations are upstream:
@@ -112,7 +140,7 @@ If you intend to expose Brain Bank to multiple users or untrusted callers, place
 
 ## Status
 
-**v0.2.1 current stable** (2026-06-15): `v0.2.0` added project pages, typed reasoning edges, safer auto-resolve behavior, expanded integrations, OpenRouter telemetry, digest and wiki improvements, and dashboard updates. `v0.2.1` is a dashboard patch release that protects API routes behind dashboard auth, aligns project detail timelines with canonical project-page resolution, and fixes project rail links/overflow.
+**v0.3.0 current stable** (2026-06-30): adds the manual Open Engine task board end-to-end: schema (`agent_tasks` / `agent_task_events` / `agent_task_ledger`), the dashboard `dashboard/tasks` page, 12 guarded MCP task tools with explicit resume / unblock / answer transitions and a status heartbeat guard, and the Queue Runner skill for one-task-at-a-time manual runs. OE-5 (scheduled queue runner) and OE-6 (intake foundation, dashboard intake, action-item intake, thought intake, promotion) are not in this release. See [`CHANGELOG.md`](CHANGELOG.md) for the full entry. Prior releases (v0.2.x, v0.1.x) are summarized there too.
 
 ## Inspired by
 
