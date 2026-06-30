@@ -66,9 +66,8 @@ interface GetTaskResponse {
   events: Array<Record<string, unknown>>;
 }
 
-const DEFAULT_AGENT_CODE = "dave-codex";
-const DEFAULT_PROJECT_PATH =
-  "/Users/davetedder/Library/Mobile Documents/com~apple~CloudDocs/Projects/Apps/brain-bank";
+const DEFAULT_AGENT_CODE = "local-codex";
+const DEFAULT_PROJECT_PATH = "<local-brain-bank-checkout>";
 
 export async function runQueueRunnerHeartbeat(
   options: QueueRunnerOptions,

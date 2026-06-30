@@ -129,7 +129,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
     const url = new URL(req.url);
     const sendSlack = url.searchParams.get("send_slack") !== "false";
-    const agentCode = url.searchParams.get("agent_code") || "dave-codex";
+    const agentCode = url.searchParams.get("agent_code") || "local-codex";
     const result = await runQueueRunnerHeartbeat({
       agentCode,
       maxRisk: "low",

@@ -9,23 +9,23 @@ import {
 
 test("buildIntakeDraftInsert creates a Standing-only draft with safe defaults", () => {
   const form = new FormData();
-  form.set("title", "[agent instructions][dave-codex][task] Draft caller smoke");
-  form.set("agent_code", "dave-codex");
-  form.set("requested_by", "dave");
+  form.set("title", "[agent instructions][local-codex][task] Draft caller smoke");
+  form.set("agent_code", "local-codex");
+  form.set("requested_by", "operator");
   form.set("priority", "high");
   form.set("risk", "high");
   form.set("desired_outcome", "Create a harmless draft from the dashboard.");
   form.set("sources", JSON.stringify([{ type: "dashboard", label: "manual" }]));
 
   assert.deepEqual(buildIntakeDraftInsert(form), {
-    title: "[agent instructions][dave-codex][task] Draft caller smoke",
+    title: "[agent instructions][local-codex][task] Draft caller smoke",
     label: "agent-instructions",
-    agent_code: "dave-codex",
+    agent_code: "local-codex",
     project_slug: null,
     status: "Standing",
     priority: "high",
     risk: "high",
-    requested_by: "dave",
+    requested_by: "operator",
     intake_source: "dashboard-button",
     desired_outcome: "Create a harmless draft from the dashboard.",
     context: null,
@@ -40,7 +40,7 @@ test("buildIntakeDraftInsert creates a Standing-only draft with safe defaults", 
 
 test("buildIntakeDraftInsert normalizes legacy dashboard source labels", () => {
   const form = new FormData();
-  form.set("title", "[agent instructions][dave-codex][task] Legacy source");
+  form.set("title", "[agent instructions][local-codex][task] Legacy source");
   form.set("intake_source", "dashboard");
   form.set("desired_outcome", "Normalize old dashboard source labels.");
 
@@ -49,10 +49,10 @@ test("buildIntakeDraftInsert normalizes legacy dashboard source labels", () => {
 
 test("buildHandoffDraftInsert creates a conservative Standing draft from pasted handoff text", () => {
   const form = new FormData();
-  form.set("title", "[agent instructions][dave-codex][task] Build handoff intake helper");
-  form.set("agent_code", "dave-codex");
+  form.set("title", "[agent instructions][local-codex][task] Build handoff intake helper");
+  form.set("agent_code", "local-codex");
   form.set("project_slug", "open_brain");
-  form.set("requested_by", "dave");
+  form.set("requested_by", "operator");
   form.set("priority", "high");
   form.set("risk", "medium");
   form.set(
@@ -79,14 +79,14 @@ test("buildHandoffDraftInsert creates a conservative Standing draft from pasted 
   );
 
   assert.deepEqual(buildHandoffDraftInsert(form), {
-    title: "[agent instructions][dave-codex][task] Build handoff intake helper",
+    title: "[agent instructions][local-codex][task] Build handoff intake helper",
     label: "agent-instructions",
-    agent_code: "dave-codex",
+    agent_code: "local-codex",
     project_slug: "open_brain",
     status: "Standing",
     priority: "high",
     risk: "medium",
-    requested_by: "dave",
+    requested_by: "operator",
     intake_source: "handoff-doc",
     desired_outcome: "Build a small safe helper for pasted session handoffs.",
     context: [
@@ -119,7 +119,7 @@ test("buildHandoffDraftInsert creates a conservative Standing draft from pasted 
 
 test("buildHandoffDraftInsert parses common markdown handoff headings", () => {
   const form = new FormData();
-  form.set("title", "[agent instructions][dave-codex][task] Markdown headings");
+  form.set("title", "[agent instructions][local-codex][task] Markdown headings");
   form.set(
     "handoff_text",
     [
