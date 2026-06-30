@@ -8,9 +8,28 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-30
+
+Open Engine OE-1 through OE-4 land together. Brain Bank now ships a manual agent task board end-to-end: schema, dashboard surface, MCP task tools with guarded transitions, and a one-task-at-a-time Queue Runner skill. Nothing runs autonomously. OE-5 (scheduled queue runner) and OE-6 (intake foundation, dashboard intake, action-item intake, thought intake, promotion) are intentionally not in this cut and remain in private operator state until they are publicly genericized.
+
 ### Added
 
 - **Open Engine OE-1 manual task board foundation.** Added the `agent_tasks`, `agent_task_events`, and `agent_task_ledger` schema with service-role-only RLS, narrowed manual-board grants, seeded local agent runtimes, SQL helpers for claim/status movement, and a high-risk explicit-approval guard. The dashboard now has a protected `/tasks` board for manually creating task packets, editing core fields, filtering by status/agent/risk, and moving tasks through Nate B. Jones' Open Engine statuses without adding an autonomous runner.
+- **Open Engine OE-2 guarded MCP task tools and dashboard ledger surfaces.** 12 MCP task tools cover the full manual board lifecycle: `list_agent_tasks`, `get_agent_task`, `claim_next_agent_task`, `update_agent_task`, `complete_agent_task`, `block_agent_task`, `request_agent_review`, `resume_agent_task`, `unblock_agent_task`, `answer_agent_task`, `read_agent_ledger`, and `write_agent_ledger`. Each tool routes through a shared `handleAgentTaskOp(...)` helper that logs the invocation, validates the runtime, and applies the build-plan receipt rules. The dashboard `/tasks` page gains a per-task event history panel and a runtime ledger panel rendered from `agent_task_ledger` so an operator can see receipts and last-claim state without leaving the board.
+- **Open Engine OE-3 status heartbeat guard and explicit resume/unblock/answer transitions.** `update_agent_task` no longer silently flips a `Human Hold` or `Blocked` task back to `Doing`; the underlying SQL helper rejects the transition and the MCP tool surfaces a clear error. Three dedicated MCP tools handle those transitions explicitly: `resume_agent_task` lifts a `Human Hold` back to `Doing`, `unblock_agent_task` clears a `Blocked` state, and `answer_agent_task` records a human answer plus optional follow-up status. The dashboard receipt UI also ignores stale `agent_task_status` submits so a slow click does not overwrite a newer receipt. Sources: ported from Open Brain Sessions 217-218 and 221.
+- **Open Engine OE-4 manual Queue Runner skill.** New `skills/queue-runner/` ships a Claude Code skill that walks an operator-driven runtime through one Queue Runner heartbeat: read the project guidance, read the tracker, claim the oldest eligible `Agent Todo` task, do exactly one task, write a receipt, then stop. The skill is manual-only — no cron, no autonomous loop, no scheduled trigger. It is behavioral guidance for the agent; real enforcement lives in the SQL helpers, MCP task tools, and runtime tests. A companion `skills/queue-runner/verify.mjs` pins the required-snippets contract so contributors cannot silently regress the manual-only and stop-after-one-task invariants. Sources: ported from Open Brain commits `53754ca` and `e8bdded`.
+- **Public runtime examples in the Open Engine docs are now generic.** All Open-Engine-facing runtime examples in the public source tree use neutral runtime codes (`your-codex`, `your-claude-code`) instead of operator-specific identifiers like `dave-codex`. The schema, MCP task tools, and SQL helpers continue to accept any `agent_code` string; only the docs and skill prose changed. Operators porting Brain Bank into their own workspace can register their own runtimes without first scrubbing example strings.
+
+### Changed
+
+- **Dashboard `/projects` and `/tasks` status receipts ignore stale submissions.** Both pages now drop a `agent_task_status` (or projects-equivalent) submit when the cached row version no longer matches the live row. Prevents a slow click from overwriting a newer status or receipt written by another tab or the MCP tools.
+
+### Held back
+
+The following Open Engine work is finished in the upstream Open Brain project but is not part of this public release. Each remains held until it can be genericized for public Brain Bank without leaking operator-specific identifiers, schedules, or routine IDs:
+
+- **OE-5: scheduled Queue Runner.** A daily pg_cron + vault-wrapper + Edge Function pattern that walks a single runtime through one heartbeat. Will land publicly once the cron pattern and Slack summary path are generalized.
+- **OE-6: intake foundation, dashboard intake, action-item intake, thought intake, and promotion.** A draft-safe intake path that creates `Standing` records from MCP, dashboard buttons, pasted handoff text, action items, and captured thoughts, plus the human-controlled promotion helper that flips a `Standing` row to `Agent Todo`. Will land publicly once the action-item and thought linkage helpers are reviewed for public defaults.
 
 ## [0.2.3] - 2026-06-30
 
@@ -170,7 +189,8 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 - This snapshot preceded the public `v0.1.0` release, which shipped on 2026-04-30 after the deploy-from-scratch walkthrough was verified against fresh Supabase projects.
 - The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/dave-tedder/brain-bank/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/dave-tedder/brain-bank/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/dave-tedder/brain-bank/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/dave-tedder/brain-bank/compare/v0.2.0...v0.2.1
