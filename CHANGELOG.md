@@ -10,7 +10,13 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ### Changed
 
+- **Compile-pages scheduled synthesis now uses lower concurrency.** Scheduled wiki compilation no longer runs five slow page-synthesis calls at once, reducing provider timeout and budget-spike risk while keeping targeted and manual compile behavior unchanged.
 - **Dashboard Projects opens in grid view by default and gains URL-backed sorting.** `/projects` now defaults to the grid layout, keeps log/grid mode across filters and pagination, and lets operators sort both views by most recent project update or project name A-Z.
+
+### Fixed
+
+- **Compile-pages catch-up mode now shrinks oversized prompts before synthesis.** Catch-up batches that exceed the soft prompt budget fall back to a smaller source slice instead of sending an oversized prompt, and `compile_pages_runs` records compiled diagnostics for better operator visibility.
+- **Reschedule operation commands no longer create false completion evidence.** The action-item triage helper now treats explicit-time reschedule captures from `brain-channel` as operation commands, keeping appointment scheduling records from accidentally resolving unrelated action items.
 
 ## [0.2.2] - 2026-06-17
 
