@@ -3,6 +3,17 @@ import {
   assertStringIncludes,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
+const forbiddenSourceContracts = [
+  {
+    name: "direct OpenRouter endpoint literal",
+    tokens: ["https:", "/", "/", "openrouter.ai"],
+  },
+  {
+    name: "direct OpenRouter API key usage",
+    tokens: ["OPENROUTER", "_", "API", "_", "KEY"],
+  },
+];
+
 const captureFunctions = [
   {
     path: "../supabase/functions/ingest-thought/index.ts",
@@ -23,16 +34,53 @@ const captureFunctions = [
   },
 ];
 
+function hasAdjacentTokens(source: string, tokens: string[]): boolean {
+  const firstToken = tokens[0];
+  if (!firstToken) return false;
+
+  let searchFrom = 0;
+  while (searchFrom < source.length) {
+    const start = source.indexOf(firstToken, searchFrom);
+    if (start === -1) return false;
+
+    let cursor = start + firstToken.length;
+    let matched = true;
+    for (const token of tokens.slice(1)) {
+      if (source.slice(cursor, cursor + token.length) !== token) {
+        matched = false;
+        break;
+      }
+      cursor += token.length;
+    }
+
+    if (matched) return true;
+    searchFrom = start + 1;
+  }
+
+  return false;
+}
+
+function assertNoDirectOpenRouterAccess(source: string, label: string) {
+  for (const contract of forbiddenSourceContracts) {
+    assertEquals(
+      hasAdjacentTokens(source, contract.tokens),
+      false,
+      `${label} should not contain ${contract.name}`,
+    );
+  }
+}
+
 for (const target of captureFunctions) {
   Deno.test(`${target.slug} routes every OpenRouter call through the shared wrapper`, async () => {
-    const source = await Deno.readTextFile(new URL(target.path, import.meta.url));
+    const source = await Deno.readTextFile(
+      new URL(target.path, import.meta.url),
+    );
     assertStringIncludes(
       source,
       'import { callOpenRouter } from "../_shared/openrouter.ts";',
     );
     assertStringIncludes(source, `const FUNCTION_SLUG = "${target.slug}";`);
-    assertEquals(source.includes("https://openrouter.ai"), false);
-    assertEquals(source.includes("OPENROUTER_API_KEY"), false);
+    assertNoDirectOpenRouterAccess(source, target.slug);
     for (const label of target.labels) {
       assertStringIncludes(source, `call_site: "${label}"`);
     }
@@ -53,10 +101,15 @@ Deno.test("classify-edges keeps capped budget math while adding both telemetry s
   assertStringIncludes(source, '"classify_pair"');
   assertStringIncludes(source, "computeCost(FILTER_MODEL, 500, 128) ?? 0");
   assertStringIncludes(source, "computeCost(CLASSIFY_MODEL, 800, 512) ?? 0");
-  assertStringIncludes(source, "computeCost(FILTER_MODEL, inTokens, outTokens) ?? 0");
-  assertStringIncludes(source, "computeCost(CLASSIFY_MODEL, inTokens, outTokens) ?? 0");
-  assertEquals(source.includes("https://openrouter.ai"), false);
-  assertEquals(source.includes("OPENROUTER_API_KEY"), false);
+  assertStringIncludes(
+    source,
+    "computeCost(FILTER_MODEL, inTokens, outTokens) ?? 0",
+  );
+  assertStringIncludes(
+    source,
+    "computeCost(CLASSIFY_MODEL, inTokens, outTokens) ?? 0",
+  );
+  assertNoDirectOpenRouterAccess(source, "classify-edges");
 });
 
 Deno.test("compile-pages preserves abort timeout and exposes three telemetry labels", async () => {
@@ -73,9 +126,11 @@ Deno.test("compile-pages preserves abort timeout and exposes three telemetry lab
   assertStringIncludes(source, 'llmCall("compile_index"');
   assertStringIncludes(source, 'llmCall("compile_entity_page"');
   assertStringIncludes(source, '"lint_crossref_check"');
-  assertStringIncludes(source, "model: options?.model || DEFAULT_COMPILE_MODEL");
-  assertEquals(source.includes("https://openrouter.ai"), false);
-  assertEquals(source.includes("OPENROUTER_API_KEY"), false);
+  assertStringIncludes(
+    source,
+    "model: options?.model || DEFAULT_COMPILE_MODEL",
+  );
+  assertNoDirectOpenRouterAccess(source, "compile-pages");
 });
 
 Deno.test("brain-digest labels daily and weekly synthesis separately", async () => {
@@ -91,6 +146,5 @@ Deno.test("brain-digest labels daily and weekly synthesis separately", async () 
     source,
     'call_site: mode === "weekly" ? "digest_synth_weekly" : "digest_synth_daily"',
   );
-  assertEquals(source.includes("https://openrouter.ai"), false);
-  assertEquals(source.includes("OPENROUTER_API_KEY"), false);
+  assertNoDirectOpenRouterAccess(source, "brain-digest");
 });
