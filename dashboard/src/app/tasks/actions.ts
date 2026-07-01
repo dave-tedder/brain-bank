@@ -6,6 +6,10 @@ import {
   buildIntakeDraftInsert,
   buildPromotionRpcArgs,
 } from "@/lib/agent-task-intake";
+import {
+  buildApplyReviewRpcArgs,
+  buildFollowUpDraftInsert,
+} from "@/lib/agent-task-review-controls";
 import { supabase } from "@/lib/supabase";
 import type {
   AgentTaskPriority,
@@ -117,6 +121,27 @@ export async function promoteAgentTaskIntake(formData: FormData) {
   revalidatePath(redirectPath(formData));
 }
 
+export async function createFollowUpDraft(formData: FormData) {
+  const path = redirectPath(formData);
+  const { error } = await supabase()
+    .from("agent_tasks")
+    .insert(buildFollowUpDraftInsert(formData));
+
+  if (error) throw error;
+  revalidatePath(path);
+}
+
+export async function applyReviewedTask(formData: FormData) {
+  const path = redirectPath(formData);
+  const { error } = await supabase().rpc(
+    "apply_agent_task_review",
+    buildApplyReviewRpcArgs(formData)
+  );
+
+  if (error) throw error;
+  revalidatePath(path);
+}
+
 export async function updateAgentTask(formData: FormData) {
   const id = requireText(formData, "task_id");
   const title = requireText(formData, "title");
@@ -157,6 +182,10 @@ export async function moveAgentTaskStatus(formData: FormData) {
 
   if (!STATUSES.has(target) || !STATUSES.has(current)) {
     throw new Error("invalid task status");
+  }
+
+  if (current === "Agent Review" && target === "Agent Done") {
+    throw new Error("Use the review apply controls for Agent Review tasks");
   }
 
   const { error } = await supabase().rpc("move_agent_task_status", {
