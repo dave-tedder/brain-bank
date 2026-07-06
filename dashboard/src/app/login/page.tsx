@@ -1,13 +1,27 @@
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { APP } from "@/config/app";
 import { signSessionToken } from "@/lib/auth";
+import {
+  checkLoginRateLimit,
+  clearLoginFailures,
+  constantTimeEqualStr,
+  recordFailedLogin,
+} from "@/lib/login-security";
 
 async function login(formData: FormData) {
   "use server";
+  const hdrs = await headers();
+  const clientKey = (hdrs.get("x-forwarded-for") ?? "unknown")
+    .split(",")[0]
+    .trim() || "unknown";
+  if (!checkLoginRateLimit(clientKey).allowed) {
+    redirect("/login?error=rate");
+  }
   const password = formData.get("password") as string;
   const expected = process.env.DASHBOARD_PASSWORD;
-  if (expected && password === expected) {
+  if (expected && constantTimeEqualStr(password, expected)) {
+    clearLoginFailures(clientKey);
     const sessionToken = await signSessionToken(expected);
     const cookieStore = await cookies();
     cookieStore.set("bb-auth", sessionToken, {
@@ -18,6 +32,7 @@ async function login(formData: FormData) {
     });
     redirect("/");
   }
+  recordFailedLogin(clientKey);
   redirect("/login?error=1");
 }
 
@@ -68,7 +83,9 @@ export default async function LoginPage({
               animation: "flicker 0.3s ease-in-out",
             }}
           >
-            ACCESS DENIED
+            {params.error === "rate"
+              ? "TOO MANY ATTEMPTS — WAIT 15 MINUTES"
+              : "ACCESS DENIED"}
           </div>
         )}
 
