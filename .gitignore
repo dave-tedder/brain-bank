@@ -67,3 +67,8 @@ integrations/action-item-triage/out/
 
 # Handoff scratch files
 HANDOFF-*.md
+
+# Open Engine closeout controller operator files (routes hold local paths;
+# generated drafts embed them)
+scripts/open-engine/project-closeout-registry.json
+docs/handoffs/pending-closeouts/

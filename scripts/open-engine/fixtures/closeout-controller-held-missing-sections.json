@@ -1,0 +1,32 @@
+{
+  "_note": "Synthetic HELD fixture: the AGENT DONE receipt carries only 6 of the 8 required sections (missing Limitations and Follow-up recommendation) and review_reason is empty, so the expected hold reason is RECEIPT_MISSING_SECTION. Pair with fixtures/test-registry.json.",
+  "generated_at": "2026-07-01T12:00:00.000Z",
+  "tasks": [
+    {
+      "id": "00000000-0000-4000-a000-0000000000b2",
+      "title": "[agent instructions][local-codex][task] Synthetic six-section receipt",
+      "status": "Agent Review",
+      "risk": "low",
+      "project_slug": "brain-bank",
+      "explicit_approval": false,
+      "claimed_by": "local-codex",
+      "linked_action_item_id": null,
+      "review_reason": null,
+      "updated_at": "2026-07-01T11:59:00.000000+00:00",
+      "events": [
+        {
+          "task_id": "00000000-0000-4000-a000-0000000000b2",
+          "event_type": "AGENT DONE",
+          "agent_code": "local-codex",
+          "payload": {
+            "reason": "Work summary:\nSynthetic fixture receipt written before the 8-section contract existed; it has no Limitations or Follow-up recommendation section.\n\nVerification:\nFixture-only.\n\nTouched files or records:\nNone. Synthetic fixture.\n\nTracker draft:\n- [x] Synthetic fixture tracker line. Never write this anywhere real. [Risk: low]\n\nSession-log draft:\nSynthetic fixture session-log line. Never write this anywhere real.\n\nBrain Bank capture draft:\nSynthetic fixture capture line. Never capture this.",
+            "status": "Agent Review",
+            "from_status": "Agent Working"
+          },
+          "created_at": "2026-07-01T11:58:00.000000+00:00"
+        }
+      ]
+    }
+  ],
+  "actionItems": []
+}

@@ -1,0 +1,30 @@
+{
+  "_note": "Synthetic routing fixture: the task carries a complete 8-section receipt and passes status/risk gates, but its project_slug 'mystery-project' has no registry entry, so the ONLY expected hold reason is UNKNOWN_PROJECT_ROUTE. Proves the controller reports unknown routing as an exception instead of guessing a destination, and that --write-drafts produces zero files for it. Pair with fixtures/test-registry.json.",
+  "generated_at": "2026-07-01T12:00:00.000Z",
+  "tasks": [
+    {
+      "id": "00000000-0000-4000-a000-0000000000d4",
+      "title": "Synthetic unknown-route fixture task",
+      "status": "Agent Review",
+      "risk": "low",
+      "project_slug": "mystery-project",
+      "explicit_approval": false,
+      "claimed_by": "local-codex",
+      "linked_action_item_id": null,
+      "review_reason": null,
+      "events": [
+        {
+          "event_type": "AGENT DONE",
+          "agent_code": "local-codex",
+          "payload": {
+            "reason": "Work summary:\nSynthetic fixture receipt. No real work occurred.\n\nVerification:\nFixture-only; no live evidence exists.\n\nTouched files or records:\nNone.\n\nLimitations:\nThis receipt exists only to exercise the unknown-route hold path.\n\nTracker draft:\n- [x] Synthetic fixture line. Never write this anywhere.\n\nSession-log draft:\nSynthetic fixture session-log line. Never write this anywhere.\n\nBrain Bank capture draft:\nSynthetic fixture capture line. Never capture this.\n\nFollow-up recommendation:\nNone.",
+            "status": "Agent Review",
+            "from_status": "Agent Working"
+          },
+          "created_at": "2026-07-01T12:00:00.000Z"
+        }
+      ]
+    }
+  ],
+  "actionItems": []
+}

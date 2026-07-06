@@ -1,0 +1,9 @@
+{
+  "_note": "Fixture-only registry for exercising the closeout controller in dry-run mode from the repo root. The route paths deliberately point at files that exist in every clone so route-resolution gates pass; dry-run and --expect runs never write to them.",
+  "brain-bank": {
+    "workspace_path": ".",
+    "tracker_path": "README.md",
+    "session_log_path": "CHANGELOG.md",
+    "capture_tag": "brain-bank"
+  }
+}
