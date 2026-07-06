@@ -10,6 +10,7 @@ import {
   coerceMetadata,
   isOperationCommandCapture,
   loadKnownSlugs,
+  normalizeTopic,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
@@ -297,6 +298,11 @@ function quoteOverlap(quote: string, description: string): number {
 
 const QUOTE_OVERLAP_THRESHOLD = 0.25;
 const LOG_TRUNC = 200;
+// Per-call ceiling on the LAYER 2 auto-resolve LLM call. A small
+// classification prompt normally answers in seconds; if it hangs, aborting
+// and skipping auto-resolve (fail-safe: no resolution) beats stalling the
+// capture path toward the Edge Runtime wall.
+const AUTO_RESOLVE_LLM_TIMEOUT_MS = 30_000;
 
 async function extractAndStoreActionItems(
   thoughtId: string,
@@ -397,15 +403,12 @@ async function checkAutoResolve(
     src_people: string[];
   };
 
-  const { data: enrichedRaw, error } = await supabase.rpc(
-    "find_candidate_action_items",
-    {
-      p_project: newProject,
-      p_topics: newTopics,
-      p_people: newPeople,
-      p_exclude_source_ids: excludeSourceThoughtIds,
-    },
-  );
+  const { data: enrichedRaw, error } = await supabase.rpc("find_candidate_action_items", {
+    p_project: newProject,
+    p_topics: newTopics,
+    p_people: newPeople,
+    p_exclude_source_ids: excludeSourceThoughtIds,
+  });
 
   if (error || !enrichedRaw || (enrichedRaw as EnrichedItem[]).length === 0) {
     return [];
@@ -466,11 +469,22 @@ async function checkAutoResolve(
     newPeople.length > 0 ? `people=${newPeople.join("/")}` : null,
   ].filter(Boolean).join(", ");
 
-  const { data } = await callOpenRouter({
+  // Bounded LLM call: abort past AUTO_RESOLVE_LLM_TIMEOUT_MS and treat any
+  // failure (timeout, budget, 5xx) as "no resolutions" — auto-resolve is an
+  // enhancement, never worth failing or stalling the capture for.
+  const abortController = new AbortController();
+  const abortTimer = setTimeout(
+    () => abortController.abort(),
+    AUTO_RESOLVE_LLM_TIMEOUT_MS,
+  );
+  let data: Awaited<ReturnType<typeof callOpenRouter>>["data"];
+  try {
+    ({ data } = await callOpenRouter({
     function_slug: FUNCTION_SLUG,
     call_site: "checkAutoResolve",
     model: "anthropic/claude-sonnet-4.6",
     response_format: { type: "json_object" },
+    signal: abortController.signal,
     messages: [
       {
         role: "system",
@@ -497,7 +511,17 @@ For each match you return, the "reason" field must quote the specific phrase in 
         }\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
       },
     ],
-  });
+    }));
+  } catch (e) {
+    console.error(
+      `checkAutoResolve: LAYER 2 LLM call failed (${
+        e instanceof Error ? e.name : "unknown"
+      }): ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return [];
+  } finally {
+    clearTimeout(abortTimer);
+  }
   const d = data as { choices: Array<{ message: { content: string } }> };
   type Claim = { num: number; reason: string };
   let claims: Claim[] = [];
@@ -562,20 +586,16 @@ For each match you return, the "reason" field must quote the specific phrase in 
       );
       continue;
     }
-    const stillOwed = stillOwedAdjacencyVeto(
-      newThoughtContent,
-      item.description,
-      stem,
-    );
+    const stillOwed = stillOwedAdjacencyVeto(newThoughtContent, item.description, stem);
     if (stillOwed.vetoed) {
       console.log(
         `checkAutoResolve: LAYER 3.5 still-owed veto dropped item ${item.id} ` +
           `(marker=${stillOwed.marker}, subject=${stillOwed.subject}, dist=${stillOwed.distance}, ` +
-          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`,
+          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`
       );
       continue;
     }
-    await supabase
+    const { error: updateError } = await supabase
       .from("action_items")
       .update({
         status: "resolved",
@@ -583,6 +603,12 @@ For each match you return, the "reason" field must quote the specific phrase in 
         resolved_at: now,
       })
       .eq("id", item.id);
+    if (updateError) {
+      console.error(
+        `checkAutoResolve: resolve UPDATE failed for item ${item.id}: ${updateError.message}`,
+      );
+      continue;
+    }
     resolvedDescriptions.push(item.description);
   }
   return resolvedDescriptions;
@@ -594,13 +620,31 @@ async function postCaptureHook(
   metadata: Record<string, unknown>,
   excludeSourceThoughtIds: string[] = [],
 ): Promise<string[]> {
-  await extractAndStoreActionItems(thoughtId, metadata, content);
-  return await checkAutoResolve(
-    content,
-    thoughtId,
-    metadata,
-    excludeSourceThoughtIds,
-  );
+  // Post-insert work must never throw: the thought is already stored, so a
+  // failure here (action-item insert, auto-resolve LLM) degrades to a logged
+  // skip — it must not surface as a failed capture to the caller.
+  try {
+    await extractAndStoreActionItems(thoughtId, metadata, content);
+  } catch (err) {
+    console.error(
+      `postCaptureHook: extractAndStoreActionItems failed for thought ${thoughtId}:`,
+      err,
+    );
+  }
+  try {
+    return await checkAutoResolve(
+      content,
+      thoughtId,
+      metadata,
+      excludeSourceThoughtIds,
+    );
+  } catch (err) {
+    console.error(
+      `postCaptureHook: checkAutoResolve failed for thought ${thoughtId}:`,
+      err,
+    );
+    return [];
+  }
 }
 
 // --- REST API helpers (for ChatGPT custom GPT Actions) ---
@@ -853,10 +897,12 @@ async function handleRestCapture(req: Request): Promise<Response> {
     // integrations (calendar sync, notion sync, fitness sync) tag captures
     // authoritatively instead of relying solely on metadata-extraction LLM
     // re-deriving topics from prose.
+    // Explicit tags run through the same normalizeTopic as auto-extracted topics so
+    // `open_engine` and `open-engine` land on ONE wiki identity, not two.
     const explicitTags = Array.isArray(body?.tags)
       ? (body.tags as unknown[])
         .filter((t): t is string => typeof t === "string")
-        .map((t) => t.toLowerCase().trim())
+        .map((t) => normalizeTopic(t))
         .filter(Boolean)
       : [];
     const source = typeof body?.source === "string" && body.source.length > 0
@@ -917,12 +963,7 @@ async function handleRestCapture(req: Request): Promise<Response> {
     }
 
     // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
-    const resolved = await postCaptureHook(
-      inserted.id,
-      content,
-      finalMetadata,
-      [inserted.id],
-    );
+    const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
 
     return jsonResponse({
       status: "captured",
@@ -2753,7 +2794,7 @@ server.registerTool(
     inputSchema: {
       content: z.string().describe("The thought to capture"),
       tags: z.array(z.string()).optional().describe(
-        "Optional explicit topic tags to attach (merged with the auto-extracted topics). Use underscores, not hyphens, for multi-word slugs.",
+        "Optional explicit topic tags to attach (merged with the auto-extracted topics). Tags are normalized to hyphenated lowercase slugs (spaces/underscores/punctuation become hyphens), matching the auto-extracted topic format.",
       ),
     },
   },
@@ -2770,11 +2811,13 @@ server.registerTool(
         };
       }
       // Optional caller-supplied tags merge into the auto-extracted topics —
-      // mirrors the explicitTags logic in handleRestCapture.
+      // mirrors the explicitTags logic in handleRestCapture. Explicit tags run
+      // through the same normalizeTopic as auto-extracted topics so
+      // `open_engine` and `open-engine` land on ONE wiki identity, not two.
       const explicitTags = Array.isArray(tags)
         ? tags
           .filter((t): t is string => typeof t === "string")
-          .map((t) => t.toLowerCase().trim())
+          .map((t) => normalizeTopic(t))
           .filter(Boolean)
         : [];
       const [embedding, rawMetadata] = await Promise.all([

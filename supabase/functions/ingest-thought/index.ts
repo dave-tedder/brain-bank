@@ -365,6 +365,11 @@ function quoteOverlap(quote: string, description: string): number {
 
 const QUOTE_OVERLAP_THRESHOLD = 0.25;
 const LOG_TRUNC = 200;
+// Per-call ceiling on the LAYER 2 auto-resolve LLM call. A small
+// classification prompt normally answers in seconds; if it hangs, aborting
+// and skipping auto-resolve (fail-safe: no resolution) beats stalling the
+// capture path toward the Edge Runtime wall.
+const AUTO_RESOLVE_LLM_TIMEOUT_MS = 30_000;
 
 async function extractAndStoreActionItems(
   thoughtId: string,
@@ -513,11 +518,22 @@ async function checkAutoResolve(
     newPeople.length > 0 ? `people=${newPeople.join("/")}` : null,
   ].filter(Boolean).join(", ");
 
-  const { data } = await callOpenRouter({
+  // Bounded LLM call: abort past AUTO_RESOLVE_LLM_TIMEOUT_MS and treat any
+  // failure (timeout, budget, 5xx) as "no resolutions" — auto-resolve is an
+  // enhancement, never worth failing or stalling the capture for.
+  const abortController = new AbortController();
+  const abortTimer = setTimeout(
+    () => abortController.abort(),
+    AUTO_RESOLVE_LLM_TIMEOUT_MS,
+  );
+  let data: Awaited<ReturnType<typeof callOpenRouter>>["data"];
+  try {
+    ({ data } = await callOpenRouter({
     function_slug: FUNCTION_SLUG,
     call_site: "checkAutoResolve",
     model: "anthropic/claude-sonnet-4.6",
     response_format: { type: "json_object" },
+    signal: abortController.signal,
     messages: [
         {
           role: "system",
@@ -541,7 +557,17 @@ For each match you return, the "reason" field must quote the specific phrase in 
           content: `New note context: ${newCtx || "no-context"}\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
         },
     ],
-  });
+    }));
+  } catch (e) {
+    console.error(
+      `checkAutoResolve: LAYER 2 LLM call failed (${
+        e instanceof Error ? e.name : "unknown"
+      }): ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return [];
+  } finally {
+    clearTimeout(abortTimer);
+  }
   const d = data as { choices: Array<{ message: { content: string } }> };
 
   type Claim = { num: number; reason: string };
@@ -608,10 +634,16 @@ For each match you return, the "reason" field must quote the specific phrase in 
       );
       continue;
     }
-    await supabase
+    const { error: updateError } = await supabase
       .from("action_items")
       .update({ status: "resolved", resolved_by_thought_id: newThoughtId, resolved_at: now })
       .eq("id", item.id);
+    if (updateError) {
+      console.error(
+        `checkAutoResolve: resolve UPDATE failed for item ${item.id}: ${updateError.message}`,
+      );
+      continue;
+    }
     resolvedDescriptions.push(item.description);
   }
   return resolvedDescriptions;
@@ -623,13 +655,27 @@ async function postCaptureHook(
   metadata: Record<string, unknown>,
   excludeSourceThoughtIds: string[] = []
 ): Promise<string[]> {
-  // Store any new action items from this thought
-  await extractAndStoreActionItems(thoughtId, metadata, content);
-
-  // Check if this thought resolves any existing open items
-  // Exclusion list prevents same-thread items from being falsely resolved
-  const resolved = await checkAutoResolve(content, thoughtId, metadata, excludeSourceThoughtIds);
-  return resolved;
+  // Post-insert work must never throw: the thought is already stored, so a
+  // failure here (action-item insert, auto-resolve LLM) degrades to a logged
+  // skip — it must not surface as a failed capture to the caller.
+  try {
+    await extractAndStoreActionItems(thoughtId, metadata, content);
+  } catch (err) {
+    console.error(
+      `postCaptureHook: extractAndStoreActionItems failed for thought ${thoughtId}:`,
+      err,
+    );
+  }
+  try {
+    // Exclusion list prevents same-thread items from being falsely resolved
+    return await checkAutoResolve(content, thoughtId, metadata, excludeSourceThoughtIds);
+  } catch (err) {
+    console.error(
+      `postCaptureHook: checkAutoResolve failed for thought ${thoughtId}:`,
+      err,
+    );
+    return [];
+  }
 }
 
 // --- "done:" Command ---
@@ -693,33 +739,77 @@ async function handleDoneCommand(
   }
 
   const closed: string[] = [];
+  const failed: string[] = [];
   const now = new Date().toISOString();
   for (const num of matched) {
     const idx = num - 1;
     if (idx >= 0 && idx < filteredItems.length) {
       const item = filteredItems[idx];
-      await supabase
+      const { error: updateError } = await supabase
         .from("action_items")
         .update({ status: "resolved", resolved_at: now })
         .eq("id", item.id);
+      if (updateError) {
+        console.error(
+          `handleDoneCommand: resolve UPDATE failed for item ${item.id}: ${updateError.message}`,
+        );
+        failed.push(item.description);
+        continue;
+      }
       closed.push(item.description);
     }
   }
 
-  await replyInSlack(
-    channel,
-    messageTs,
-    `Marked ${closed.length} item${closed.length > 1 ? "s" : ""} as done:\n${closed.map((d) => `- ${d}`).join("\n")}`
-  );
+  let reply = closed.length > 0
+    ? `Marked ${closed.length} item${closed.length > 1 ? "s" : ""} as done:\n${
+      closed.map((d) => `- ${d}`).join("\n")
+    }`
+    : "";
+  if (failed.length > 0) {
+    reply += `${reply ? "\n" : ""}:warning: Failed to mark ${failed.length} item${
+      failed.length > 1 ? "s" : ""
+    } (database error, still open):\n${failed.map((d) => `- ${d}`).join("\n")}`;
+  }
+  if (!reply) {
+    reply = `No items were updated for "${doneText}".`;
+  }
+  await replyInSlack(channel, messageTs, reply);
 }
 
 // --- Capture Processing ---
+
+// Shared failure-reply helper for the capture paths. A failed capture must
+// answer in-channel instead of vanishing (the budget-incident class:
+// embedding/metadata extraction throws before insert and the thought is
+// silently lost). `insertedId` distinguishes a genuinely lost capture from
+// a post-insert confirmation failure so the reply never lies about what was
+// saved. Best-effort: if the failure reply itself fails, log and move on.
+async function replyCaptureFailure(
+  channel: string,
+  threadTs: string,
+  err: unknown,
+  insertedId: string | null,
+): Promise<void> {
+  const detail = (err instanceof Error ? err.message : String(err)).slice(
+    0,
+    300,
+  );
+  const text = insertedId
+    ? `:warning: Captured, but the confirmation step failed: ${detail}`
+    : `:warning: Capture FAILED (nothing saved) — please retry: ${detail}`;
+  try {
+    await replyInSlack(channel, threadTs, text);
+  } catch (replyErr) {
+    console.error("Capture failure reply also failed:", replyErr);
+  }
+}
 
 async function processCaptureMessage(
   messageText: string,
   channel: string,
   messageTs: string
 ): Promise<void> {
+  let insertedId: string | null = null;
   try {
     const hash = await contentHash(messageText);
     if (await isDuplicate(hash)) {
@@ -749,6 +839,8 @@ async function processCaptureMessage(
       return;
     }
 
+    insertedId = inserted.id;
+
     // Post-capture: track action items and auto-resolve
     const resolved = await postCaptureHook(inserted.id, messageText, finalMetadata, [inserted.id]);
 
@@ -766,6 +858,7 @@ async function processCaptureMessage(
     await replyInSlack(channel, messageTs, confirmation);
   } catch (err) {
     console.error("Capture processing error:", err);
+    await replyCaptureFailure(channel, messageTs, err, insertedId);
   }
 }
 
@@ -777,6 +870,7 @@ async function processCaptureThreadReply(
   messageTs: string,
   threadTs: string
 ): Promise<void> {
+  let insertedId: string | null = null;
   try {
     // Fetch parent message for context
     const threadMessages = await fetchSlackThread(channel, threadTs);
@@ -821,6 +915,8 @@ async function processCaptureThreadReply(
       return;
     }
 
+    insertedId = inserted.id;
+
     // Look up the parent thought's ID so we can exclude its action items from auto-resolve
     const excludeIds = [inserted.id]; // always exclude self
     const { data: parentThought } = await supabase
@@ -850,6 +946,7 @@ async function processCaptureThreadReply(
     await replyInSlack(channel, threadTs, confirmation);
   } catch (err) {
     console.error("Thread capture processing error:", err);
+    await replyCaptureFailure(channel, threadTs, err, insertedId);
   }
 }
 
@@ -888,6 +985,7 @@ async function handleQueryThreadReply(
 // --- Silent Brain Channel Processing ---
 
 async function processBrainMessage(messageText: string, messageTs: string): Promise<void> {
+  let insertedId: string | null = null;
   try {
     const hash = await contentHash(messageText);
     if (await isDuplicate(hash)) return; // silent channel, silent skip
@@ -909,13 +1007,28 @@ async function processBrainMessage(messageText: string, messageTs: string): Prom
 
     if (error || !inserted) {
       console.error("Brain channel insert error:", error);
+      // Silent on success, but never silent on data loss: reply in-thread so
+      // a failed shadow capture is visible instead of vanishing.
+      await replyCaptureFailure(
+        SLACK_BRAIN_CHANNEL,
+        messageTs,
+        new Error(error?.message || "insert returned no row"),
+        null,
+      );
       return;
     }
+    insertedId = inserted.id;
 
     // Post-capture: track action items and auto-resolve (silent, no Slack reply)
     await postCaptureHook(inserted.id, messageText, finalMetadata, [inserted.id]);
   } catch (err) {
     console.error("Brain channel processing error:", err);
+    // Only break channel silence when the capture was genuinely lost —
+    // post-insert noise stays silent here (unlike the capture channel,
+    // which always confirms).
+    if (!insertedId) {
+      await replyCaptureFailure(SLACK_BRAIN_CHANNEL, messageTs, err, null);
+    }
   }
 }
 
