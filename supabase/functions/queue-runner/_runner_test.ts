@@ -31,7 +31,7 @@ class FakeMcp implements ToolClient {
 
 const completeTask: AgentTask = {
   id: "00000000-0000-4000-8000-000000000001",
-  title: "[agent instructions][dave-codex][task] harmless scheduled smoke",
+  title: "[agent instructions][local-codex][task] harmless scheduled smoke",
   status: "Agent Working",
   risk: "low",
   explicit_approval: false,
@@ -44,7 +44,7 @@ const completeTask: AgentTask = {
 };
 
 function ledger() {
-  return { count: 1, ledger: [{ agent_code: "dave-codex" }] };
+  return { count: 1, ledger: [{ agent_code: "local-codex" }] };
 }
 
 Deno.test("runner writes ledger and Slack summary when no low-risk task is available", async () => {
@@ -166,7 +166,7 @@ Deno.test("runner stops before claim when required tools are unavailable", async
 Deno.test("Slack summary contains the final task result, not a pre-run notice", () => {
   const text = renderSlackSummary({
     status: "completed",
-    agent_code: "dave-codex",
+    agent_code: "local-codex",
     task_id: completeTask.id,
     receipt: "AGENT DONE",
     summary: "Queue Runner completed task with AGENT DONE.",

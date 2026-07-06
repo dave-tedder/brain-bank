@@ -6,7 +6,7 @@ This note audits the Brain Bank `personal-staging` Open Engine stack after the `
 
 ## Current Branch State
 
-- Source checkout: `/Users/davetedder/Library/Mobile Documents/com~apple~CloudDocs/Projects/Apps/brain-bank`
+- Source checkout: `<local-brain-bank-checkout>`
 - Source branch: `personal-staging`
 - Source head: `5e61497` (`Genericize Open Engine runtime examples`)
 - Remote target base: `origin/dev` and `origin/main` at `af978e2` (`docs: prepare v0.2.3 release notes`)

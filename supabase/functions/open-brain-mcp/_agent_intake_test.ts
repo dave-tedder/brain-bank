@@ -36,7 +36,7 @@ Deno.test("intake creates Standing draft records with safe defaults", () => {
 Deno.test("intake preserves full task packet fields and optional linkage", () => {
   const record = buildAgentTaskIntakeRecord({
     ...baseInput,
-    agent_code: "dave-codex",
+    agent_code: "local-codex",
     project_slug: "brain-bank",
     priority: "high",
     risk: "low",
@@ -45,7 +45,7 @@ Deno.test("intake preserves full task packet fields and optional linkage", () =>
     linked_action_item_id: "22222222-2222-4222-8222-222222222222",
   });
 
-  assertEquals(record.agent_code, "dave-codex");
+  assertEquals(record.agent_code, "local-codex");
   assertEquals(record.project_slug, "brain-bank");
   assertEquals(record.priority, "high");
   assertEquals(record.risk, "low");
@@ -101,7 +101,7 @@ Deno.test("action-item promotion creates a conservative Standing draft packet", 
       status: "open",
       source_thought_id: "44444444-4444-4444-8444-444444444444",
     },
-    agent_code: "dave-codex",
+    agent_code: "local-codex",
     project_slug: "brain-bank",
     requested_by: "oe6-test",
   });
@@ -116,7 +116,7 @@ Deno.test("action-item promotion creates a conservative Standing draft packet", 
     record.source_thought_id,
     "44444444-4444-4444-8444-444444444444",
   );
-  assertEquals(record.agent_code, "dave-codex");
+  assertEquals(record.agent_code, "local-codex");
   assertEquals(record.project_slug, "brain-bank");
   assertEquals(record.risk, "low");
   assertEquals(record.priority, "medium");
@@ -198,7 +198,7 @@ Deno.test("thought intake creates a conservative Standing draft packet", () => {
       },
       created_at: "2026-06-29T16:20:00Z",
     },
-    agent_code: "dave-codex",
+    agent_code: "local-codex",
     project_slug: "brain-bank",
     requested_by: "session-233",
   });
@@ -210,7 +210,7 @@ Deno.test("thought intake creates a conservative Standing draft packet", () => {
     "77777777-7777-4777-8777-777777777777",
   );
   assertEquals(record.linked_action_item_id, null);
-  assertEquals(record.agent_code, "dave-codex");
+  assertEquals(record.agent_code, "local-codex");
   assertEquals(record.project_slug, "brain-bank");
   assertEquals(record.risk, "low");
   assertEquals(record.priority, "medium");
