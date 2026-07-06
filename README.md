@@ -115,7 +115,7 @@ brain-bank/
 └── CHANGELOG.md
 ```
 
-**Skills:** Claude Code skills live in `skills/<name>/SKILL.md`. Auto-discovered when brain-bank is installed as a plugin or Claude Code runs inside a brain-bank clone.
+**Skills:** Claude Code skills live in `skills/<name>/SKILL.md`. They are auto-discovered when brain-bank is installed as a plugin, but Claude Code does NOT scan a repo-root `skills/` folder when simply running inside a clone — the committed `.claude/skills/<name>` symlinks register them for the Skill tool. Fresh clones on macOS/Linux get working symlinks from git automatically; on Windows, enable Developer Mode (or `git config core.symlinks true` before cloning) so git checks them out as real symlinks.
 
 ## Open Engine task board
 
