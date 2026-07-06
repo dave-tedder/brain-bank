@@ -3,9 +3,11 @@ import {
   type AgentTaskAccessRow,
   assertAgentCanWriteTask,
   assertClaimAllowed,
+  assertIntakePromotionAllowed,
   assertResumeTransitionAllowed,
   assertStatusHeartbeatAllowed,
   canAgentWriteTask,
+  isAgentTaskRisk,
   isLedgerAutomationState,
   receiptForTaskTool,
 } from "./_agent_tasks.ts";
@@ -60,6 +62,26 @@ Deno.test("status heartbeat guard only allows active working tasks", () => {
   }
 });
 
+Deno.test("intake promotion guard only allows Standing drafts", () => {
+  assertIntakePromotionAllowed({ ...baseTask, status: "Standing" });
+
+  for (
+    const status of [
+      "Agent Todo",
+      "Agent Working",
+      "Agent Needs Input",
+      "Agent Review",
+      "Agent Done",
+    ] as const
+  ) {
+    assertThrows(
+      () => assertIntakePromotionAllowed({ ...baseTask, status }),
+      Error,
+      "Only Standing intake drafts",
+    );
+  }
+});
+
 Deno.test("task tool actions map to canonical receipts", () => {
   assertEquals(receiptForTaskTool("update"), {
     status: "Agent Working",
@@ -95,6 +117,13 @@ Deno.test("ledger writes accept only canonical automation states", () => {
   assertEquals(isLedgerAutomationState("manual-required"), true);
   assertEquals(isLedgerAutomationState("paused"), true);
   assertEquals(isLedgerAutomationState("autonomous-now"), false);
+});
+
+Deno.test("claim risk caps accept only canonical risk tiers", () => {
+  assertEquals(isAgentTaskRisk("low"), true);
+  assertEquals(isAgentTaskRisk("medium"), true);
+  assertEquals(isAgentTaskRisk("high"), true);
+  assertEquals(isAgentTaskRisk("urgent"), false);
 });
 
 Deno.test("resume tools only allow blocked or review work back to working", () => {

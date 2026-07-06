@@ -1,6 +1,11 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import {
+  buildHandoffDraftInsert,
+  buildIntakeDraftInsert,
+  buildPromotionRpcArgs,
+} from "@/lib/agent-task-intake";
 import { supabase } from "@/lib/supabase";
 import type {
   AgentTaskPriority,
@@ -85,31 +90,31 @@ function isRecoverableStatusMoveError(error: { code?: string; message?: string }
 }
 
 export async function createAgentTask(formData: FormData) {
-  const title = requireText(formData, "title");
-  const desired_outcome = requireText(formData, "desired_outcome");
-  const sources = parseSources(textValue(formData, "sources"));
-
-  const { error } = await supabase().from("agent_tasks").insert({
-    title,
-    label: "agent-instructions",
-    agent_code: textValue(formData, "agent_code"),
-    project_slug: textValue(formData, "project_slug"),
-    priority: parsePriority(textValue(formData, "priority")),
-    risk: parseRisk(textValue(formData, "risk")),
-    requested_by: textValue(formData, "requested_by"),
-    intake_source: textValue(formData, "intake_source"),
-    desired_outcome,
-    context: textValue(formData, "context"),
-    sources,
-    do_steps: textValue(formData, "do_steps"),
-    acceptance_criteria: textValue(formData, "acceptance_criteria"),
-    output_handoff: textValue(formData, "output_handoff"),
-    boundaries: textValue(formData, "boundaries"),
-    explicit_approval: formData.get("explicit_approval") === "on",
-  });
+  const { error } = await supabase()
+    .from("agent_tasks")
+    .insert(buildIntakeDraftInsert(formData));
 
   if (error) throw error;
   revalidatePath("/tasks");
+}
+
+export async function createHandoffAgentTask(formData: FormData) {
+  const { error } = await supabase()
+    .from("agent_tasks")
+    .insert(buildHandoffDraftInsert(formData));
+
+  if (error) throw error;
+  revalidatePath("/tasks");
+}
+
+export async function promoteAgentTaskIntake(formData: FormData) {
+  const { error } = await supabase().rpc(
+    "promote_agent_task_intake",
+    buildPromotionRpcArgs(formData)
+  );
+
+  if (error) throw error;
+  revalidatePath(redirectPath(formData));
 }
 
 export async function updateAgentTask(formData: FormData) {
