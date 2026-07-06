@@ -37,6 +37,9 @@ export type AgentTaskReceipt = (typeof AGENT_TASK_RECEIPTS)[number];
 export type AgentLedgerAutomationState =
   (typeof AGENT_LEDGER_AUTOMATION_STATES)[number];
 export type AgentTaskRisk = "low" | "medium" | "high";
+export type AgentTaskReviewResolution =
+  | "accepted"
+  | "accepted_with_follow_up";
 export type AgentTaskToolAction =
   | "update"
   | "complete"
@@ -67,6 +70,12 @@ export function isLedgerAutomationState(
 
 export function isAgentTaskRisk(value: string): value is AgentTaskRisk {
   return value === "low" || value === "medium" || value === "high";
+}
+
+export function isReviewResolution(
+  value: string,
+): value is AgentTaskReviewResolution {
+  return value === "accepted" || value === "accepted_with_follow_up";
 }
 
 export function canAgentWriteTask(
@@ -106,6 +115,12 @@ export function assertIntakePromotionAllowed(task: AgentTaskAccessRow): void {
     throw new Error(
       "Only Standing intake drafts can be promoted to Agent Todo.",
     );
+  }
+}
+
+export function assertReviewApplyAllowed(task: AgentTaskAccessRow): void {
+  if (task.status !== "Agent Review") {
+    throw new Error("AGENT APPLIED requires Agent Review.");
   }
 }
 
