@@ -1,3 +1,5 @@
+import { parsePageSections, serializePage } from "./_section_merge.ts";
+
 export interface CompileThoughtLike {
   content: string;
 }
@@ -35,6 +37,12 @@ export interface CompilePromptDiagnostics {
   is_new_page: boolean;
   has_h2: boolean;
   use_edit_mode: boolean;
+  page_truncation_applied?: boolean;
+  page_view_chars?: number;
+  page_omitted_sections?: number;
+  page_omitted_chars?: number;
+  backlinks_capped?: boolean;
+  backlink_slugs_shown?: number;
 }
 
 export function selectCompileThoughts<T extends CompileThoughtLike>(
@@ -83,6 +91,9 @@ export function buildCompilePromptDiagnostics<
   isNewPage: boolean;
   hasH2: boolean;
   useEditMode: boolean;
+  pageTruncation?: PageTruncationResult;
+  backlinksCapped?: boolean;
+  backlinkSlugsShown?: number;
 }): CompilePromptDiagnostics {
   const diagnostics: CompilePromptDiagnostics = {
     is_catchup: input.isCatchup,
@@ -114,6 +125,18 @@ export function buildCompilePromptDiagnostics<
   }
   if (input.initialPromptChars !== undefined) {
     diagnostics.initial_prompt_chars = input.initialPromptChars;
+  }
+  if (input.pageTruncation?.truncationApplied) {
+    diagnostics.page_truncation_applied = true;
+    diagnostics.page_view_chars = input.pageTruncation.content.length;
+    diagnostics.page_omitted_sections = input.pageTruncation.omittedSections;
+    diagnostics.page_omitted_chars = input.pageTruncation.omittedChars;
+  }
+  if (input.backlinksCapped) {
+    diagnostics.backlinks_capped = true;
+  }
+  if (input.backlinkSlugsShown !== undefined) {
+    diagnostics.backlink_slugs_shown = input.backlinkSlugsShown;
   }
   return diagnostics;
 }
@@ -193,4 +216,119 @@ export function applyCatchupPromptFallback<T extends CompileThoughtLike>(
     ),
     initialPromptChars: options.promptChars,
   };
+}
+
+// --- Edit-mode page-side prompt truncation (CAP-1) ---
+//
+// applyCatchupPromptFallback only shrinks the thought slice. A page whose
+// existing body + backlink list dominate the prompt (topic/trend-analysis,
+// 2026-06-29: 18K body + 5.6K backlinks) stays over the soft limit no matter
+// how small the slice gets and aborts on the LLM timeout every scheduled run.
+// In edit mode the model only needs section HEADERS to target edits, so older
+// section bodies can be dropped from the prompt view while every header stays
+// addressable. Only the prompt view shrinks — applyEdits still runs against
+// the full stored page body.
+
+export const OMITTED_SECTION_MARKER =
+  "[section body omitted for prompt budget; do not update this section]";
+
+export interface PageTruncationResult {
+  content: string;
+  truncationApplied: boolean;
+  omittedSections: number;
+  omittedChars: number;
+}
+
+export function truncatePageContentForPrompt(
+  pageContent: string,
+  maxChars: number,
+): PageTruncationResult {
+  if (pageContent.length <= maxChars) {
+    return {
+      content: pageContent,
+      truncationApplied: false,
+      omittedSections: 0,
+      omittedChars: 0,
+    };
+  }
+
+  const sections = parsePageSections(pageContent);
+  const names = [...sections.keys()].filter((name) => name !== "");
+  const preamble = sections.get("") ?? "";
+
+  // Fixed cost: preamble, every H2 header line, and a worst-case marker per
+  // section. Whatever budget remains goes to real section bodies, newest
+  // (bottom-most) sections first, stopping at the first body that no longer
+  // fits so the kept region is a contiguous most-recent block.
+  let budget = maxChars - preamble.length;
+  for (const name of names) {
+    budget -= `## ${name}\n`.length + OMITTED_SECTION_MARKER.length + 1;
+  }
+
+  const keep = new Set<string>();
+  for (let i = names.length - 1; i >= 0; i--) {
+    const body = sections.get(names[i]) ?? "";
+    // The kept body replaces this section's reserved marker cost.
+    const cost = body.length - (OMITTED_SECTION_MARKER.length + 1);
+    if (cost > budget) break;
+    keep.add(names[i]);
+    budget -= cost;
+  }
+
+  let omittedSections = 0;
+  let omittedChars = 0;
+  const view = new Map<string, string>();
+  view.set("", preamble);
+  for (const name of names) {
+    const body = sections.get(name) ?? "";
+    if (keep.has(name)) {
+      view.set(name, body);
+    } else {
+      omittedSections++;
+      omittedChars += body.length;
+      view.set(name, `${OMITTED_SECTION_MARKER}\n`);
+    }
+  }
+
+  if (omittedSections === 0) {
+    // Nothing could be dropped (e.g. one giant section that also fits once
+    // marker overhead is refunded) — return the original untouched.
+    return {
+      content: pageContent,
+      truncationApplied: false,
+      omittedSections: 0,
+      omittedChars: 0,
+    };
+  }
+
+  return {
+    content: serializePage(view),
+    truncationApplied: true,
+    omittedSections,
+    omittedChars,
+  };
+}
+
+// Cap the backlink candidate list shown to the model. The page's existing
+// backlinks go first so a successful compile can re-emit them instead of
+// silently dropping cross-references it can no longer see.
+export function capBacklinkSlugs(
+  otherSlugs: string[],
+  existingBacklinks: string[],
+  maxSlugs: number,
+): { slugs: string[]; capped: boolean } {
+  if (otherSlugs.length <= maxSlugs) {
+    return { slugs: otherSlugs, capped: false };
+  }
+  const available = new Set(otherSlugs);
+  const slugs: string[] = [];
+  for (const slug of existingBacklinks) {
+    if (slugs.length >= maxSlugs) break;
+    if (available.has(slug) && !slugs.includes(slug)) slugs.push(slug);
+  }
+  for (const slug of otherSlugs) {
+    if (slugs.length >= maxSlugs) break;
+    if (!slugs.includes(slug)) slugs.push(slug);
+  }
+  return { slugs, capped: true };
 }
