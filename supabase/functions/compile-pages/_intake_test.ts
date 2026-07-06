@@ -2,7 +2,10 @@ import { assertEquals } from "https://deno.land/std@0.220.0/assert/mod.ts";
 import {
   applyCatchupPromptFallback,
   buildCompilePromptDiagnostics,
+  capBacklinkSlugs,
+  OMITTED_SECTION_MARKER,
   selectCompileThoughts,
+  truncatePageContentForPrompt,
 } from "./_intake.ts";
 
 function thought(id: string, content: string) {
@@ -239,4 +242,92 @@ Deno.test("applyCatchupPromptFallback: fallback always lets one oversized though
   assertEquals(result.thoughts.map((t) => t.id), ["1"]);
   assertEquals(result.selectionMode, "catchup_fallback");
   assertEquals(result.fallbackApplied, true);
+});
+
+// --- truncatePageContentForPrompt (CAP-1) ---
+
+function sectionBlock(name: string, body: string): string {
+  return `## ${name}\n${body}\n`;
+}
+
+Deno.test("truncatePageContentForPrompt: no-op when content fits", () => {
+  const content = "# Title\n\n" + sectionBlock("A", "aaa") +
+    sectionBlock("B", "bbb");
+
+  const result = truncatePageContentForPrompt(content, 10_000);
+
+  assertEquals(result.truncationApplied, false);
+  assertEquals(result.content, content);
+  assertEquals(result.omittedSections, 0);
+  assertEquals(result.omittedChars, 0);
+});
+
+Deno.test("truncatePageContentForPrompt: keeps preamble, all headers, newest bodies", () => {
+  const preamble = "# Trend Analysis\n\nIntro paragraph.\n\n";
+  const content = preamble +
+    sectionBlock("Oldest", "x".repeat(3000)) +
+    sectionBlock("Middle", "y".repeat(3000)) +
+    sectionBlock("Newest", "z".repeat(500));
+
+  const result = truncatePageContentForPrompt(content, 2_000);
+
+  assertEquals(result.truncationApplied, true);
+  // All headers survive
+  for (const name of ["Oldest", "Middle", "Newest"]) {
+    assertEquals(result.content.includes(`## ${name}\n`), true);
+  }
+  // Preamble survives
+  assertEquals(result.content.startsWith(preamble), true);
+  // Newest body kept in full; older bodies replaced by the marker
+  assertEquals(result.content.includes("z".repeat(500)), true);
+  assertEquals(result.content.includes("x".repeat(3000)), false);
+  assertEquals(result.content.includes("y".repeat(3000)), false);
+  assertEquals(result.omittedSections, 2);
+  assertEquals(result.omittedChars > 6000, true);
+  assertEquals(result.content.includes(OMITTED_SECTION_MARKER), true);
+});
+
+Deno.test("truncatePageContentForPrompt: kept region is contiguous from the bottom", () => {
+  // Middle is small enough to fit alone, but Newest is huge: once Newest
+  // fails to fit the walk stops, so Middle is omitted too (no cherry-picking
+  // that would misrepresent recency).
+  const content = sectionBlock("Old", "a".repeat(2000)) +
+    sectionBlock("Middle", "b".repeat(100)) +
+    sectionBlock("Newest", "c".repeat(5000));
+
+  const result = truncatePageContentForPrompt(content, 1_000);
+
+  assertEquals(result.truncationApplied, true);
+  assertEquals(result.content.includes("c".repeat(5000)), false);
+  assertEquals(result.content.includes("b".repeat(100)), false);
+  assertEquals(result.omittedSections, 3);
+});
+
+Deno.test("truncatePageContentForPrompt: view lands at or under budget for real-shaped pages", () => {
+  const content = "# Page\n\n" +
+    Array.from(
+      { length: 8 },
+      (_, i) => sectionBlock(`Section ${i}`, "w".repeat(2500)),
+    ).join("");
+
+  const result = truncatePageContentForPrompt(content, 12_000);
+
+  assertEquals(result.truncationApplied, true);
+  assertEquals(result.content.length <= 12_000, true);
+});
+
+// --- capBacklinkSlugs (CAP-1) ---
+
+Deno.test("capBacklinkSlugs: no-op under the cap", () => {
+  const result = capBacklinkSlugs(["a", "b"], ["b"], 5);
+  assertEquals(result.capped, false);
+  assertEquals(result.slugs, ["a", "b"]);
+});
+
+Deno.test("capBacklinkSlugs: existing backlinks first, then fill, no dupes", () => {
+  const others = ["p1", "p2", "p3", "p4", "p5"];
+  const result = capBacklinkSlugs(others, ["p4", "gone-page", "p2"], 4);
+
+  assertEquals(result.capped, true);
+  assertEquals(result.slugs, ["p4", "p2", "p1", "p3"]);
 });
