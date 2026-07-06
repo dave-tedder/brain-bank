@@ -8,6 +8,31 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-06
+
+Brain Bank v0.4.1 is the post-audit hardening and reliability batch: the Open Engine board gains a formal review/apply layer, database-enforced state guards, an honest claim-and-hold scheduled runner, and a closeout controller, while the capture and wiki-compile paths pick up the reliability fixes proven live upstream. Execution stays human-controlled throughout — the scheduled path can now only claim, validate, and hold.
+
+### Added
+
+- **Open Engine OE-7 review/apply contract.** New `apply_agent_task_review` RPC and guarded MCP `apply_agent_task_review` + `create_agent_task_follow_up` tools give `Agent Review` work an explicit human apply gate: `accepted` or `accepted_with_follow_up`, linked action-item resolution only on plain acceptance, and follow-up work lands as child `Standing` drafts (never auto-promoted). One `AGENT APPLIED` event records the resolution, note, child tasks, and closeout evidence.
+- **Open Engine hardening migration.** `move_agent_task_status` now validates the FROM state against a full transition matrix, `claim_next_agent_task` is locked to `service_role`, the `agent_task_events` log is immutable (UPDATE revoked plus a reject trigger), intake promotion writes an audit event, `apply_agent_task_review` reports the linked action-item outcome honestly, a `release_expired_agent_claims()` reaper returns stuck claims to `Agent Todo`, and `agent_tasks.archived_at` (with partial index) supports board hygiene.
+- **Honest claim-and-hold scheduled Queue Runner.** The scheduled runner never writes `AGENT DONE`: it claims through the guarded MCP path, validates the packet, and posts `AGENT HUMAN HOLD` with an honest 8-section hold receipt draft. Post-claim failures write `AGENT FAILED` (attempt count incremented, claim cleared); before-claim failures report `NO_RECEIPT`. New guarded MCP tools: `hold_agent_task`, `fail_agent_task`, `release_expired_agent_claims`; `list_agent_tasks` now excludes archived rows by default. The queue-runner skill documents the 12-step heartbeat (reaper before any claim) and the canonical 8-section receipt contract.
+- **OE-8 closeout controller.** `scripts/open-engine/closeout-controller.mjs` evaluates `Agent Review` receipts against the 8-section contract, routes by `project_slug` through a gitignored registry, and supports dry-run, `--write-drafts` (byte-verifiable pending-closeout drafts, never overwritten), `--live-check`, and a hard-gated single-task `--apply` (exactly one `AGENT APPLIED`, marker-guarded tracker/session-log appends, one capture per project batch, never runs git). Human review notes can augment ONLY missing receipt sections; the 8-section gate itself is never relaxed. Ships with synthetic fixtures and a fixture-only test registry.
+- **Committed `.claude/skills` symlinks.** Claude Code does not scan a repo-root `skills/` folder when running inside a clone; the committed symlinks register `auto-resolve-patterns`, `brain-bank-setup`, and `queue-runner` for the Skill tool. The setup skill now verifies and self-heals the links (Windows operators: enable Developer Mode so git checks them out as real symlinks).
+
+### Fixed
+
+- **Wiki compile reliability.** Edit-mode compiles that stay over the prompt budget after the thought-slice fallback now shrink the page VIEW (every H2 header stays addressable, newest bodies kept) and cap the backlink list — the stored page body is never modified. Pages that fail three consecutive compiles are quarantined from scheduled runs (still reported through `errored`, so the digest health warning surfaces them); a targeted `?slug=` run bypasses and resets on success. `PAGE_AUTO_CREATE_EXCLUDE_TAGS` now also skips matching topic pages in scheduled compiles.
+- **Capture-side reliability.** Auto-resolve UPDATEs check their database result and never report an unresolved item as resolved; `done:` failures are reported in the Slack reply instead of confirmed. Failed Slack captures answer in-channel (`Capture FAILED (nothing saved)` vs `Captured, but the confirmation step failed`) instead of vanishing; post-insert hook failures never masquerade as lost captures. Explicit REST/MCP tags run through the same `normalizeTopic` as auto-extracted topics so underscore and hyphen spellings land on one wiki identity. The LAYER 2 auto-resolve LLM call is bounded by a 30-second abort that degrades to no-resolutions.
+- **Digest delivery honesty.** `brain-digest` reports `delivery_failed` with a 502 when the Slack post fails (the digest row is still persisted first), and its weekly lint fetch does zero compile work (`batch=0` honored with clamped parsing, `index=skip`).
+
+### Upgrade Notes
+
+- Apply the two new migrations in order: `20260701023905_oe7_apply_agent_task_review.sql`, then `20260702_oe_hardening_batch.sql` (the hardening batch rewrites the OE-7 function). `20260702_compile_page_failure_counter.sql` adds the quarantine columns.
+- Deploy the updated `ingest-thought`, `open-brain-mcp`, `brain-digest`, `compile-pages`, and `queue-runner` functions together.
+- To use the closeout controller's live modes, copy `scripts/open-engine/project-closeout-registry.example.json` to `project-closeout-registry.json` (gitignored) and export `BRAIN_BANK_MCP_URL` / `BRAIN_BANK_MCP_KEY` in the environment.
+- If you customized the queue-runner skill or receipt tooling, note the receipt contract is now 8 sections (adds `Limitations:` and `Follow-up recommendation:`, capture heading `Brain Bank capture draft:`).
+
 ## [0.4.0] - 2026-07-06
 
 Brain Bank v0.4.0 publishes the Open Engine OE-5/OE-6 batch after a clean seven-day natural scheduled-runner watch. It adds the scheduled Queue Runner foundation and draft-safe intake controls while preserving a human-controlled execution model: scheduled claims are low-risk-only, each heartbeat handles at most one task, and `Standing` drafts are never executable until a human promotes them.
