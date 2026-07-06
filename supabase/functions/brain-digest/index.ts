@@ -936,8 +936,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (mode === "weekly") {
       try {
         // compile-pages-weekly-lint cron (Mondays 09:30 UTC) handles the heavy work.
-        // batch=0 makes this a cheap read-only lint results fetch.
-        const lintUrl = `${SUPABASE_URL}/functions/v1/compile-pages?mode=lint&batch=0`;
+        // batch=0 makes this a cheap lint results fetch with zero page compiles,
+        // and index=skip keeps the self-index LLM compile out of this fetch too.
+        const lintUrl =
+          `${SUPABASE_URL}/functions/v1/compile-pages?mode=lint&batch=0&index=skip&invoker=brain-digest`;
         const lintRes = await fetch(lintUrl, {
           headers: { "x-brain-key": MCP_ACCESS_KEY },
         });
@@ -1002,7 +1004,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
         ...(slackResult.ok ? {} : { slack_error: slackResult.error }),
         ...(notionResult ? { notion_push: notionResult } : {}),
       }),
-      { headers: { "Content-Type": "application/json" } }
+      // Delivery honesty: the digest is durably persisted to `digests` above,
+      // but "delivered" means Slack accepted the post. A failed post reports
+      // delivery_failed with a non-2xx status so cron/pg_net logs show it.
+      {
+        status: slackResult.ok ? 200 : 502,
+        headers: { "Content-Type": "application/json" },
+      }
     );
   } catch (err) {
     console.error("Digest error:", err);

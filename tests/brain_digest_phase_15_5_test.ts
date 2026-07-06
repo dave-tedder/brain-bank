@@ -6,10 +6,15 @@ const source = await Deno.readTextFile(
 
 Deno.test("digest caps actions and excludes Gmail deadlines", () => {
   assert(source.includes("const ACTION_ITEM_DIGEST_CAP = 40"));
-  assert(source.includes('.select("description, created_at", { count: "exact" })'));
+  assert(
+    source.includes(
+      '.select("id, description, created_at", { count: "exact" })',
+    ),
+  );
   assert(source.includes('.order("created_at", { ascending: false })'));
   assert(source.includes(".limit(ACTION_ITEM_DIGEST_CAP)"));
-  assert(source.includes("more open)"));
+  // The capped list reports the true total through the structured count line.
+  assert(source.includes("Open action item count: ${openActionTotal}"));
   assert(source.includes('.neq("metadata->>source", "gmail")'));
 });
 

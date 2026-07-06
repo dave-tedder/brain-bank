@@ -1247,7 +1247,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Compile stale pages: parallel pre-filter + bounded-concurrency compile
     // + wall-clock guard so we don't blow past the 150s Edge Runtime ceiling.
     // Prioritize: never-compiled first, then oldest last_compiled.
-    const maxCompilePerRun = parseInt(url.searchParams.get("batch") || "15");
+    // Min is 0, not 1: batch=0 is the documented "no compile work" request
+    // (brain-digest's weekly lint fetch uses it to read lint results without
+    // burning an LLM compile lane). Absent/invalid batch defaults to 15.
+    const batchParam = parseInt(url.searchParams.get("batch") || "15");
+    const maxCompilePerRun = Number.isNaN(batchParam)
+      ? 15
+      : Math.min(Math.max(batchParam, 0), 25);
     const requestedModel = url.searchParams.get("model");
     const requestedIntake = parseInt(url.searchParams.get("intake") || "0");
     const maintenanceModel = targetSlug ? requestedModel : null;
