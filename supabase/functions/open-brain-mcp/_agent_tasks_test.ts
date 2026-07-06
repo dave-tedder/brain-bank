@@ -7,6 +7,7 @@ import {
   assertResumeTransitionAllowed,
   assertReviewApplyAllowed,
   assertStatusHeartbeatAllowed,
+  assertWorkingExitAllowed,
   canAgentWriteTask,
   isAgentTaskRisk,
   isLedgerAutomationState,
@@ -140,6 +141,40 @@ Deno.test("task tool actions map to canonical receipts", () => {
     status: "Agent Working",
     receipt: "AGENT HUMAN ANSWERED",
   });
+  assertEquals(receiptForTaskTool("hold"), {
+    status: "Agent Needs Input",
+    receipt: "AGENT HUMAN HOLD",
+  });
+  assertEquals(receiptForTaskTool("fail"), {
+    status: "Agent Todo",
+    receipt: "AGENT FAILED",
+  });
+});
+
+Deno.test("hold and fail tools only allow Agent Working tasks out", () => {
+  assertWorkingExitAllowed(baseTask, "hold");
+  assertWorkingExitAllowed(baseTask, "fail");
+
+  for (
+    const status of [
+      "Standing",
+      "Agent Todo",
+      "Agent Needs Input",
+      "Agent Review",
+      "Agent Done",
+    ] as const
+  ) {
+    assertThrows(
+      () => assertWorkingExitAllowed({ ...baseTask, status }, "hold"),
+      Error,
+      "AGENT HUMAN HOLD requires Agent Working",
+    );
+    assertThrows(
+      () => assertWorkingExitAllowed({ ...baseTask, status }, "fail"),
+      Error,
+      "AGENT FAILED requires Agent Working",
+    );
+  }
 });
 
 Deno.test("ledger writes accept only canonical automation states", () => {

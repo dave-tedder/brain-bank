@@ -40,6 +40,7 @@ import {
   assertResumeTransitionAllowed,
   assertReviewApplyAllowed,
   assertStatusHeartbeatAllowed,
+  assertWorkingExitAllowed,
   compactObject,
   isAgentTaskRisk,
   isLedgerAutomationState,
@@ -625,7 +626,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, archived_at";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -677,6 +678,9 @@ async function moveAgentTaskViaTool(args: {
   ) {
     assertResumeTransitionAllowed(task, args.action);
     assertClaimAllowed(task);
+  }
+  if (args.action === "hold" || args.action === "fail") {
+    assertWorkingExitAllowed(task, args.action);
   }
 
   const { status, receipt } = receiptForTaskTool(args.action);
@@ -1674,6 +1678,9 @@ server.registerTool(
       include_done: z.boolean().optional().describe(
         "Set true to include Agent Done tasks when statuses is omitted.",
       ),
+      include_archived: z.boolean().optional().describe(
+        "Set true to include archived (retired smoke/history) tasks. Default excludes them.",
+      ),
       limit: z.number().int().min(1).max(50).optional(),
     },
   },
@@ -1684,6 +1691,7 @@ server.registerTool(
       risk,
       project_slug,
       include_done,
+      include_archived,
       limit,
     }: {
       statuses?: AgentTaskStatus[];
@@ -1691,6 +1699,7 @@ server.registerTool(
       risk?: "low" | "medium" | "high";
       project_slug?: string;
       include_done?: boolean;
+      include_archived?: boolean;
       limit?: number;
     },
   ) => {
@@ -1700,6 +1709,7 @@ server.registerTool(
       risk,
       project_slug,
       include_done,
+      include_archived,
       limit,
     }, "mcp");
     try {
@@ -1713,6 +1723,9 @@ server.registerTool(
         query = query.in("status", statuses);
       } else if (!include_done) {
         query = query.neq("status", "Agent Done");
+      }
+      if (!include_archived) {
+        query = query.is("archived_at", null);
       }
       if (agent_code) query = query.eq("agent_code", agent_code);
       if (risk) query = query.eq("risk", risk);
@@ -2522,6 +2535,112 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error answering agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "hold_agent_task",
+  {
+    title: "Hold Agent Task",
+    description:
+      "Move a claimed Agent Working task to Agent Needs Input with an AGENT HUMAN HOLD receipt. The scheduled Queue Runner's claim-and-hold contract uses this when a packet validates but the scheduled path has no executor.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      reason: z.string().min(1).describe(
+        "Honest hold reason: what was validated, what was NOT executed, and who should pick the task up.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, reason }: {
+      task_id: string;
+      agent_code: string;
+      reason: string;
+    },
+  ) => {
+    logToolInvocation("hold_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "hold",
+          reason,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error holding agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "fail_agent_task",
+  {
+    title: "Fail Agent Task",
+    description:
+      "Record an AGENT FAILED receipt on a claimed Agent Working task and return it to Agent Todo. Increments attempt_count and clears the claim so the task can be retried honestly.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      reason: z.string().min(1).describe(
+        "The failure reason to record on the task and event payload.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, reason }: {
+      task_id: string;
+      agent_code: string;
+      reason: string;
+    },
+  ) => {
+    logToolInvocation("fail_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "fail",
+          reason,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error failing agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "release_expired_agent_claims",
+  {
+    title: "Release Expired Agent Claims",
+    description:
+      "Run the expired-claim reaper: Agent Working tasks whose claim_expires_at has passed return to Agent Todo with an AGENT FAILED event and attempt_count increment. Returns the reaped rows. Safe to call when nothing is expired.",
+    inputSchema: {},
+  },
+  async () => {
+    logToolInvocation("release_expired_agent_claims", {}, "mcp");
+    try {
+      const { data, error } = await supabase.rpc(
+        "release_expired_agent_claims",
+        {},
+      );
+      if (error) throw error;
+      return textToolResponse({
+        reaped_count: data?.length ?? 0,
+        reaped: data ?? [],
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error releasing expired agent claims: ${(err as Error).message}`,
       );
     }
   },

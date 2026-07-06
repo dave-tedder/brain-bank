@@ -47,8 +47,11 @@ export type AgentTaskToolAction =
   | "request-review"
   | "resume"
   | "unblock"
-  | "answer";
+  | "answer"
+  | "hold"
+  | "fail";
 export type AgentTaskResumeAction = "resume" | "unblock" | "answer";
+export type AgentTaskWorkingExitAction = "hold" | "fail";
 
 export interface AgentTaskAccessRow {
   agent_code: string | null;
@@ -145,6 +148,16 @@ export function assertResumeTransitionAllowed(
   }
 }
 
+export function assertWorkingExitAllowed(
+  task: AgentTaskAccessRow,
+  action: AgentTaskWorkingExitAction,
+): void {
+  if (task.status !== "Agent Working") {
+    const receipt = action === "hold" ? "AGENT HUMAN HOLD" : "AGENT FAILED";
+    throw new Error(`${receipt} requires Agent Working.`);
+  }
+}
+
 export function receiptForTaskTool(
   action: AgentTaskToolAction,
 ): { status: AgentTaskStatus; receipt: AgentTaskReceipt } {
@@ -162,6 +175,10 @@ export function receiptForTaskTool(
       return { status: "Agent Working", receipt: "AGENT UNBLOCKED" };
     case "answer":
       return { status: "Agent Working", receipt: "AGENT HUMAN ANSWERED" };
+    case "hold":
+      return { status: "Agent Needs Input", receipt: "AGENT HUMAN HOLD" };
+    case "fail":
+      return { status: "Agent Todo", receipt: "AGENT FAILED" };
   }
 }
 
