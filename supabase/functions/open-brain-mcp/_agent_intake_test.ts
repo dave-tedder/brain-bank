@@ -4,6 +4,7 @@ import {
   assertNoActiveThoughtDraft,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
+  buildFollowUpTaskRecord,
   buildThoughtIntakeRecord,
 } from "./_agent_intake.ts";
 
@@ -313,5 +314,65 @@ Deno.test("thought intake rejects duplicate active source-thought drafts", () =>
   assertNoActiveThoughtDraft(
     [{ id: "99999999-9999-4999-8999-999999999999", status: "Agent Done" }],
     "77777777-7777-4777-8777-777777777777",
+  );
+});
+
+Deno.test("follow-up intake creates child Standing drafts with safe defaults", () => {
+  const record = buildFollowUpTaskRecord({
+    parent_task_id: "11111111-1111-4111-8111-111111111111",
+    agent_code: "local-codex",
+    project_slug: "brain-bank",
+    requested_by: "oe7-test",
+    desired_outcome:
+      "Browser-check live AI answer surfaces for four GEO terms.",
+    context:
+      "Parent task completed web-index checks but lacked live AI answer UI access.",
+  });
+
+  assertEquals(record.status, "Standing");
+  assertEquals(
+    record.parent_task_id,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  assertEquals(record.intake_source, "agent-follow-up");
+  assertEquals(record.explicit_approval, false);
+  assertEquals(record.agent_code, "local-codex");
+  assertEquals(record.project_slug, "brain-bank");
+  assertEquals(record.risk, "low");
+  assertEquals(record.priority, "medium");
+  assertEquals(record.linked_action_item_id, null);
+  assertEquals(record.source_thought_id, null);
+  assertEquals(Object.hasOwn(record, "claimed_by"), false);
+  assertEquals(Object.hasOwn(record, "claim_expires_at"), false);
+  assertEquals(record.sources, [
+    {
+      kind: "agent_task",
+      id: "11111111-1111-4111-8111-111111111111",
+      relationship: "parent",
+    },
+  ]);
+});
+
+Deno.test("follow-up intake rejects missing parent task or packet fields", () => {
+  assertThrows(
+    () =>
+      buildFollowUpTaskRecord({
+        parent_task_id: " ",
+        desired_outcome: "Do the child work.",
+        context: "Parent found follow-up work.",
+      }),
+    Error,
+    "parent_task_id is required",
+  );
+
+  assertThrows(
+    () =>
+      buildFollowUpTaskRecord({
+        parent_task_id: "11111111-1111-4111-8111-111111111111",
+        desired_outcome: " ",
+        context: "Parent found follow-up work.",
+      }),
+    Error,
+    "desired_outcome is required",
   );
 });

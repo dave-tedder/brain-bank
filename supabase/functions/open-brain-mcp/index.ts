@@ -24,11 +24,13 @@ import {
   assertNoActiveThoughtDraft,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
+  buildFollowUpTaskRecord,
   buildThoughtIntakeRecord,
 } from "./_agent_intake.ts";
 import {
   AGENT_TASK_STATUSES,
   type AgentTaskAccessRow,
+  type AgentTaskReviewResolution,
   type AgentTaskRisk,
   type AgentTaskStatus,
   type AgentTaskToolAction,
@@ -36,6 +38,7 @@ import {
   assertClaimAllowed,
   assertIntakePromotionAllowed,
   assertResumeTransitionAllowed,
+  assertReviewApplyAllowed,
   assertStatusHeartbeatAllowed,
   compactObject,
   isAgentTaskRisk,
@@ -2038,6 +2041,74 @@ server.registerTool(
 );
 
 server.registerTool(
+  "create_agent_task_follow_up",
+  {
+    title: "Create Agent Task Follow-Up",
+    description:
+      "Create a child Standing draft for follow-up work discovered during review/apply. It does not promote, claim, write events, resolve action items, or grant explicit approval.",
+    inputSchema: {
+      parent_task_id: z.string().uuid(),
+      desired_outcome: z.string().min(1),
+      context: z.string().min(1),
+      agent_code: z.string().min(1).optional(),
+      project_slug: z.string().min(1).optional(),
+      requested_by: z.string().min(1).optional(),
+      priority: z.enum(["low", "medium", "high"]).optional(),
+      risk: z.enum(["low", "medium", "high"]).optional(),
+    },
+  },
+  async (
+    args: {
+      parent_task_id: string;
+      desired_outcome: string;
+      context: string;
+      agent_code?: string;
+      project_slug?: string;
+      requested_by?: string;
+      priority?: "low" | "medium" | "high";
+      risk?: AgentTaskRisk;
+    },
+  ) => {
+    logToolInvocation("create_agent_task_follow_up", {
+      parent_task_id: args.parent_task_id,
+      agent_code: args.agent_code,
+      project_slug: args.project_slug,
+      priority: args.priority,
+      risk: args.risk,
+    }, "mcp");
+    try {
+      const parentTask = await loadAgentTaskForTool(args.parent_task_id);
+      if (!parentTask) {
+        throw new Error(`Parent task not found: ${args.parent_task_id}`);
+      }
+
+      const record = buildFollowUpTaskRecord(args);
+      const { data, error } = await supabase
+        .from("agent_tasks")
+        .insert(record)
+        .select(AGENT_TASK_SELECT)
+        .single();
+      if (error) throw error;
+
+      return textToolResponse({
+        receipt: "FOLLOW_UP_DRAFT_CREATED",
+        parent_task_id: args.parent_task_id,
+        claimable_by_runner: false,
+        promotion_required: true,
+        explicit_approval_granted: false,
+        audit_event_written: false,
+        parent_status_changed: false,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error creating agent task follow-up: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
   "claim_next_agent_task",
   {
     title: "Claim Next Agent Task",
@@ -2243,6 +2314,97 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error requesting agent review: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "apply_agent_task_review",
+  {
+    title: "Apply Agent Task Review",
+    description:
+      "Apply reviewed task work through the OE-7 apply gate. Moves Agent Review to Agent Done with AGENT APPLIED, and may resolve a linked action item only for accepted review.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      applied_by: z.string().min(1).optional(),
+      resolution: z.enum(["accepted", "accepted_with_follow_up"]),
+      note: z.string().min(1).optional(),
+      resolve_linked_action_item: z.boolean().optional(),
+      child_task_ids: z.array(z.string().uuid()).optional(),
+      closeout_evidence: z.record(z.unknown()).optional(),
+    },
+  },
+  async (
+    {
+      task_id,
+      applied_by,
+      resolution,
+      note,
+      resolve_linked_action_item,
+      child_task_ids,
+      closeout_evidence,
+    }: {
+      task_id: string;
+      applied_by?: string;
+      resolution: AgentTaskReviewResolution;
+      note?: string;
+      resolve_linked_action_item?: boolean;
+      child_task_ids?: string[];
+      closeout_evidence?: Record<string, unknown>;
+    },
+  ) => {
+    logToolInvocation("apply_agent_task_review", {
+      task_id,
+      applied_by,
+      resolution,
+      resolve_linked_action_item,
+      child_task_ids,
+    }, "mcp");
+    try {
+      const task = await loadAgentTaskForTool(task_id);
+      if (!task) throw new Error(`Task not found: ${task_id}`);
+      assertReviewApplyAllowed(task);
+
+      const childTaskIds = child_task_ids ?? [];
+      if (
+        resolution === "accepted_with_follow_up" && childTaskIds.length === 0
+      ) {
+        throw new Error(
+          "accepted_with_follow_up requires at least one child task.",
+        );
+      }
+      if ((resolve_linked_action_item ?? false) && resolution !== "accepted") {
+        throw new Error(
+          "Linked action item can only be resolved when review resolution is accepted.",
+        );
+      }
+
+      const { data, error } = await supabase.rpc(
+        "apply_agent_task_review",
+        {
+          p_task_id: task_id,
+          p_applied_by: applied_by ?? null,
+          p_resolution: resolution,
+          p_note: note ?? null,
+          p_resolve_linked_action_item: resolve_linked_action_item ?? false,
+          p_child_task_ids: childTaskIds,
+          p_closeout_evidence: closeout_evidence ?? {},
+        },
+      );
+      if (error) throw error;
+
+      return textToolResponse({
+        receipt: "AGENT APPLIED",
+        resolution,
+        linked_action_item_resolution_requested: resolve_linked_action_item ??
+          false,
+        child_task_ids: childTaskIds,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error applying agent task review: ${(err as Error).message}`,
       );
     }
   },

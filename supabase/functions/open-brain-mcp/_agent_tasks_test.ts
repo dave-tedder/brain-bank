@@ -5,10 +5,12 @@ import {
   assertClaimAllowed,
   assertIntakePromotionAllowed,
   assertResumeTransitionAllowed,
+  assertReviewApplyAllowed,
   assertStatusHeartbeatAllowed,
   canAgentWriteTask,
   isAgentTaskRisk,
   isLedgerAutomationState,
+  isReviewResolution,
   receiptForTaskTool,
 } from "./_agent_tasks.ts";
 
@@ -80,6 +82,33 @@ Deno.test("intake promotion guard only allows Standing drafts", () => {
       "Only Standing intake drafts",
     );
   }
+});
+
+Deno.test("review apply guard only allows Agent Review tasks", () => {
+  assertReviewApplyAllowed({ ...baseTask, status: "Agent Review" });
+
+  for (
+    const status of [
+      "Standing",
+      "Agent Todo",
+      "Agent Working",
+      "Agent Needs Input",
+      "Agent Done",
+    ] as const
+  ) {
+    assertThrows(
+      () => assertReviewApplyAllowed({ ...baseTask, status }),
+      Error,
+      "AGENT APPLIED requires Agent Review",
+    );
+  }
+});
+
+Deno.test("review resolution accepts only canonical OE-7 values", () => {
+  assertEquals(isReviewResolution("accepted"), true);
+  assertEquals(isReviewResolution("accepted_with_follow_up"), true);
+  assertEquals(isReviewResolution("partial-follow-up"), false);
+  assertEquals(isReviewResolution("rejected-needs-work"), false);
 });
 
 Deno.test("task tool actions map to canonical receipts", () => {
