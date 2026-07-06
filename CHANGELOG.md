@@ -8,11 +8,24 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-06
+
+Brain Bank v0.4.0 publishes the Open Engine OE-5/OE-6 batch after a clean seven-day natural scheduled-runner watch. It adds the scheduled Queue Runner foundation and draft-safe intake controls while preserving a human-controlled execution model: scheduled claims are low-risk-only, each heartbeat handles at most one task, and `Standing` drafts are never executable until a human promotes them.
+
 ### Added
 
 - **Open Engine OE-5 scheduled Queue Runner foundation.** Added the low-risk-only `queue-runner` Edge Function, guarded `claim_next_agent_task(max_risk)` support, legacy claim-overload cleanup, and a daily pg_cron schedule template that calls the runner through the vault-backed `public.call_edge_function(...)` wrapper. The public default runtime is neutral (`local-codex`), and operators can override it with `agent_code`.
 - **Open Engine OE-6 draft intake and promotion controls.** Added MCP and dashboard paths that create `Standing` intake drafts only, keep `explicit_approval=false`, and preserve the human requester. Standing drafts get a dedicated human promotion action backed by `promote_agent_task_intake`, moving them to `Agent Todo` without creating receipt events or automatic executable work.
 - **Open Engine OE-6 action-item, thought, and handoff intake helpers.** Operators can create conservative `Standing` drafts from pasted handoff text, existing action items, and captured thoughts. Active duplicate guards prevent multiple open drafts for the same linked action item or source thought.
+- **CI now runs on the `personal-staging` deploy branch.** Pushes to `personal-staging` trigger the same engine + skill + dashboard workflow as `main` and `dev`, so deploy-branch regressions surface before promotion.
+
+### Upgrade Notes
+
+- Apply the new migrations before enabling the scheduled runner.
+- Deploy the updated MCP and `queue-runner` functions together.
+- Configure a local runtime code, schedule, secret storage, and notification destination for your environment.
+- Keep the first schedule daily and review clean natural-run evidence before increasing frequency.
+- Treat `Standing` drafts as review packets. Promote them manually only after a human has checked the task.
 
 ## [0.3.0] - 2026-06-30
 
