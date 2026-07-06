@@ -1,0 +1,32 @@
+{
+  "_note": "Synthetic APPLYABLE fixture: one Agent Review / low-risk task with a complete 8-section AGENT DONE receipt and a routable project_slug (see fixtures/test-registry.json). Run from the repo root with --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE.",
+  "generated_at": "2026-07-01T12:00:00.000Z",
+  "tasks": [
+    {
+      "id": "00000000-0000-4000-a000-0000000000a1",
+      "title": "[agent instructions][local-codex][task] Synthetic doc-link audit",
+      "status": "Agent Review",
+      "risk": "low",
+      "project_slug": "brain-bank",
+      "explicit_approval": false,
+      "claimed_by": "local-codex",
+      "linked_action_item_id": null,
+      "review_reason": null,
+      "updated_at": "2026-07-01T11:59:00.000000+00:00",
+      "events": [
+        {
+          "task_id": "00000000-0000-4000-a000-0000000000a1",
+          "event_type": "AGENT DONE",
+          "agent_code": "local-codex",
+          "payload": {
+            "reason": "Work summary:\nSynthetic fixture receipt: audited README links and confirmed all internal anchors resolve. No real work occurred.\n\nVerification:\nFixture-only; classification behavior is the thing under test, not the claimed work.\n\nTouched files or records:\nNone. Synthetic fixture.\n\nLimitations:\nThis receipt exists only to exercise the APPLYABLE path.\n\nTracker draft:\n- [x] Synthetic fixture tracker line. Never write this anywhere real. [Risk: low]\n\nSession-log draft:\nSynthetic fixture session-log line. Never write this anywhere real.\n\nBrain Bank capture draft:\nSynthetic fixture capture line. Never capture this.\n\nFollow-up recommendation:\nNone.",
+            "status": "Agent Review",
+            "from_status": "Agent Working"
+          },
+          "created_at": "2026-07-01T11:58:00.000000+00:00"
+        }
+      ]
+    }
+  ],
+  "actionItems": []
+}

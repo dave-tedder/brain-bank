@@ -3,9 +3,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   applyCatchupPromptFallback,
   buildCompilePromptDiagnostics,
+  capBacklinkSlugs,
   type CompileSelectionMode,
   type CompilePromptDiagnostics,
+  OMITTED_SECTION_MARKER,
+  type PageTruncationResult,
   selectCompileThoughts,
+  truncatePageContentForPrompt,
 } from "./_intake.ts";
 import { applyEdits, parseEditsXml } from "./_section_merge.ts";
 import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
@@ -40,6 +44,14 @@ const SOFT_COMPILE_PROMPT_CHAR_LIMIT = 24_000;
 const FALLBACK_CATCHUP_THOUGHT_LIMIT = 1;
 const FALLBACK_CATCHUP_SOURCE_CHAR_LIMIT = 4_000;
 const NO_H2_CATCHUP_THOUGHT_LIMIT = 1;
+// Edit-mode page-side truncation (CAP-1): when the assembled prompt is still
+// over the soft limit after the thought-slice fallback, shrink the page VIEW
+// (keep all H2 headers + newest section bodies) and cap the backlink list.
+// 12K page view + ~2.6K system prompt + <=4K fallback thoughts + ~1.6K capped
+// backlinks lands well under the soft limit with margin for supplemental
+// context. The stored page body is never modified by this.
+const EDIT_PROMPT_PAGE_VIEW_CHAR_LIMIT = 12_000;
+const EDIT_PROMPT_BACKLINK_SLUG_CAP = 40;
 const COMPILE_PROMPT_CHAR_LIMIT = 120_000;
 const STEADY_THOUGHT_LIMIT = 50;
 const CATCHUP_RECENCY_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
@@ -51,16 +63,37 @@ function shouldUseCatchupLimit(lastCompiled: string | null): boolean {
   return Date.now() - compiledAt > CATCHUP_RECENCY_WINDOW_MS;
 }
 
-// Comma-separated topic/project tags to suppress from auto-page creation.
-// Use for high-volume mechanical-capture sources (fitness sync, calendar sync)
-// whose tags would otherwise spam the wiki without producing useful pages.
-// Existing pages with these slugs are not deleted; this only blocks NEW spawns.
+// Comma-separated topic/project tags to suppress from auto-page creation AND
+// from scheduled compile runs (CAP-1: mechanical trend captures should not
+// burn a daily LLM call on an excluded page). Use for high-volume
+// mechanical-capture sources (fitness sync, calendar sync) whose tags would
+// otherwise spam the wiki without producing useful pages. Existing pages with
+// these tags are not deleted; they freeze at their current content. A targeted
+// ?slug= run bypasses the exclusion for a deliberate manual refresh.
 const PAGE_AUTO_CREATE_EXCLUDE_TAGS = new Set(
   (Deno.env.get("PAGE_AUTO_CREATE_EXCLUDE_TAGS") || "")
     .split(",")
     .map((t) => t.trim().toLowerCase())
     .filter(Boolean)
 );
+
+function isExcludedFromScheduledCompile(page: {
+  page_type: string;
+  title: string;
+  slug: string;
+}): boolean {
+  // Topic pages only. Project pages are curated rows in the projects table —
+  // a curated project page must keep compiling even when its slug matches an
+  // exclude tag; the exclusion targets mechanical topic-tag feeds, not
+  // curated projects.
+  if (page.page_type !== "topic") return false;
+  // Page titles can carry spaces ("trend analysis") while exclude entries are
+  // tag-shaped ("trend-analysis"); the slug tail is the slugified title, so
+  // match both spellings.
+  const slugTail = page.slug.replace(/^topic\//, "");
+  return PAGE_AUTO_CREATE_EXCLUDE_TAGS.has(page.title.toLowerCase()) ||
+    PAGE_AUTO_CREATE_EXCLUDE_TAGS.has(slugTail);
+}
 
 type IndexCompileMode = "auto" | "force" | "skip";
 
@@ -189,6 +222,50 @@ async function pageHasNewThoughts(
   const { count, error } = await q;
   if (error) return true; // fail open
   return (count ?? 0) > 0;
+}
+
+// --- Per-Page Failure Escalation (CAP-1) ---
+
+// Consecutive compile failures before a page is held out of scheduled runs.
+// Quarantined pages still appear in the run's errored list, which the
+// brain-digest degraded-run warning (E6) reads, so the operator keeps seeing
+// the escalation without a brain-digest change. A targeted ?slug= run
+// bypasses the quarantine; any successful compile resets the counter. Both
+// writes are best-effort: a counter failure must never fail the compile
+// itself.
+const COMPILE_FAILURE_QUARANTINE_THRESHOLD = 3;
+
+async function recordCompileFailure(
+  page: { id: string; slug: string; compile_failures?: number | null },
+  message: string,
+): Promise<void> {
+  const { error } = await supabase
+    .from("compiled_pages")
+    .update({
+      compile_failures: (page.compile_failures ?? 0) + 1,
+      last_compile_error: message.slice(0, 500),
+    })
+    .eq("id", page.id);
+  if (error) {
+    console.error(
+      `[compile-pages] failure-counter update failed for ${page.slug}: ${error.message}`,
+    );
+  }
+}
+
+async function resetCompileFailures(
+  page: { id: string; slug: string; compile_failures?: number | null },
+): Promise<void> {
+  if ((page.compile_failures ?? 0) === 0) return;
+  const { error } = await supabase
+    .from("compiled_pages")
+    .update({ compile_failures: 0, last_compile_error: null })
+    .eq("id", page.id);
+  if (error) {
+    console.error(
+      `[compile-pages] failure-counter reset failed for ${page.slug}: ${error.message}`,
+    );
+  }
 }
 
 // --- Slug Helpers ---
@@ -338,6 +415,7 @@ async function compilePage(
     source_entity_id: string | null;
     last_compiled: string | null;
     source_thought_ids?: string[];
+    backlinks?: string[];
   },
   allPageSlugs: string[],
   compileModel: string = DEFAULT_COMPILE_MODEL,
@@ -648,6 +726,62 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       });
     }
 
+    // Edit-mode page-side truncation (CAP-1). The fallback above only shrinks
+    // the thought slice; when the page body + backlink list keep the prompt
+    // over the soft limit anyway, shrink the page VIEW (all H2 headers stay
+    // addressable, newest bodies kept) and cap the backlink list. Applies to
+    // catchup, steady, and targeted runs alike. applyEdits below still merges
+    // into the full stored body.
+    if (
+      useEditMode &&
+      promptDiagnostics.prompt_chars > SOFT_COMPILE_PROMPT_CHAR_LIMIT
+    ) {
+      const cappedBacklinks = capBacklinkSlugs(
+        otherSlugs,
+        page.backlinks ?? [],
+        EDIT_PROMPT_BACKLINK_SLUG_CAP,
+      );
+      const cappedBacklinkList = cappedBacklinks.slugs.length > 0
+        ? `\n\nExisting pages that could be cross-referenced (use these slugs for backlinks):\n${
+          cappedBacklinks.slugs.join("\n")
+        }`
+        : "";
+      const pageTruncation: PageTruncationResult =
+        truncatePageContentForPrompt(
+          page.content,
+          EDIT_PROMPT_PAGE_VIEW_CHAR_LIMIT,
+        );
+      if (pageTruncation.truncationApplied || cappedBacklinks.capped) {
+        systemPrompt +=
+          `\n\nNote: some section bodies in the current page are replaced with "${OMITTED_SECTION_MARKER}" to fit the prompt budget. Their H2 headers are real and addressable, but never emit "update" or "prepend" for an omitted section; use "append" on it, or target a fully shown section.`;
+        userContent =
+          `Current page content:\n\n${pageTruncation.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${cappedBacklinkList}`;
+        promptDiagnostics = buildCompilePromptDiagnostics({
+          isCatchup: selectionIsCatchup,
+          thoughts: newThoughts,
+          pageContent: page.content ?? "",
+          userContent,
+          systemPrompt,
+          backlinkList: cappedBacklinkList,
+          selectionMode,
+          thoughtLimit: activeThoughtLimit,
+          sourceCharLimit: activeSourceCharLimit,
+          fallbackApplied: promptDiagnostics.fallback_applied,
+          fallbackReason: promptDiagnostics.fallback_reason,
+          initialThoughtCount: promptDiagnostics.initial_thought_count,
+          initialThoughtChars: promptDiagnostics.initial_thought_chars,
+          initialPromptChars: promptDiagnostics.initial_prompt_chars ??
+            promptDiagnostics.prompt_chars,
+          isNewPage,
+          hasH2,
+          useEditMode,
+          pageTruncation,
+          backlinksCapped: cappedBacklinks.capped,
+          backlinkSlugsShown: cappedBacklinks.slugs.length,
+        });
+      }
+    }
+
     if (userContent.length + systemPrompt.length > COMPILE_PROMPT_CHAR_LIMIT) {
       return {
         updated: false,
@@ -754,7 +888,8 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
     }
     return {
       updated: true,
-      ...(promptDiagnostics?.fallback_applied
+      ...(promptDiagnostics?.fallback_applied ||
+          promptDiagnostics?.page_truncation_applied
         ? { diagnostics: promptDiagnostics }
         : {}),
     };
@@ -1065,7 +1200,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const { data: pages, error: pagesErr } = await supabase
       .from("compiled_pages")
       .select(
-        "id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids",
+        "id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids, compile_failures",
       )
       .order("slug", { ascending: true });
 
@@ -1101,7 +1236,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const { data: refreshed } = await supabase
         .from("compiled_pages")
         .select(
-          "id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids",
+          "id, slug, title, page_type, content, source_entity_id, last_compiled, backlinks, source_thought_ids, compile_failures",
         )
         .order("slug", { ascending: true });
       allPages = refreshed || [];
@@ -1112,7 +1247,13 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Compile stale pages: parallel pre-filter + bounded-concurrency compile
     // + wall-clock guard so we don't blow past the 150s Edge Runtime ceiling.
     // Prioritize: never-compiled first, then oldest last_compiled.
-    const maxCompilePerRun = parseInt(url.searchParams.get("batch") || "15");
+    // Min is 0, not 1: batch=0 is the documented "no compile work" request
+    // (brain-digest's weekly lint fetch uses it to read lint results without
+    // burning an LLM compile lane). Absent/invalid batch defaults to 15.
+    const batchParam = parseInt(url.searchParams.get("batch") || "15");
+    const maxCompilePerRun = Number.isNaN(batchParam)
+      ? 15
+      : Math.min(Math.max(batchParam, 0), 25);
     const requestedModel = url.searchParams.get("model");
     const requestedIntake = parseInt(url.searchParams.get("intake") || "0");
     const maintenanceModel = targetSlug ? requestedModel : null;
@@ -1153,6 +1294,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       diagnostics: CompilePromptDiagnostics;
     }> = [];
     let budgetExhausted = false;
+    let excludedPages = 0;
     const compiledSlugs: string[] = [];
 
     if (mode !== "index") {
@@ -1180,8 +1322,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const candidatePool = sortedPages.filter(
         (page) =>
           page.page_type !== "index" &&
-          (!targetSlug || page.slug === targetSlug),
+          (!targetSlug || page.slug === targetSlug) &&
+          // Excluded mechanical-capture tags never enter scheduled runs;
+          // a targeted run bypasses for a deliberate manual refresh.
+          (Boolean(targetSlug) || !isExcludedFromScheduledCompile(page)),
       );
+      excludedPages = targetSlug ? 0 : sortedPages.filter(
+        (page) =>
+          page.page_type !== "index" && isExcludedFromScheduledCompile(page),
+      ).length;
       const probeResults = await runWithConcurrency(
         candidatePool,
         PROBE_CONCURRENCY,
@@ -1189,10 +1338,34 @@ Deno.serve(async (req: Request): Promise<Response> => {
       );
       const candidatePages = candidatePool.filter((_, i) => probeResults[i]);
 
+      // Quarantine (CAP-1): pages at/over the consecutive-failure threshold
+      // are held out of scheduled runs but reported through errored — the
+      // brain-digest degraded-run warning reads run error counts, so the
+      // escalation reaches the digest with no brain-digest change.
+      // Targeted runs bypass the quarantine so a manual ?slug= compile can
+      // retry the page and reset the counter on success.
+      const quarantinedPages = targetSlug ? [] : candidatePages.filter(
+        (p) =>
+          (p.compile_failures ?? 0) >= COMPILE_FAILURE_QUARANTINE_THRESHOLD,
+      );
+      const eligiblePages = targetSlug ? candidatePages : candidatePages
+        .filter(
+          (p) =>
+            (p.compile_failures ?? 0) < COMPILE_FAILURE_QUARANTINE_THRESHOLD,
+        );
+      for (const page of quarantinedPages) {
+        errors++;
+        errored.push({
+          slug: page.slug,
+          error:
+            `skipped: ${page.compile_failures} consecutive compile failures; quarantined from scheduled runs (run a targeted ?slug=${page.slug} compile to retry and reset)`,
+        });
+      }
+
       // Apply per-run cap. Anything past the cap counts as "skipped" — same
       // semantic as the original loop's batch limit.
-      const candidatesToCompile = candidatePages.slice(0, maxCompilePerRun);
-      skipped = candidatePages.length - candidatesToCompile.length;
+      const candidatesToCompile = eligiblePages.slice(0, maxCompilePerRun);
+      skipped = eligiblePages.length - candidatesToCompile.length;
 
       // Bounded-parallel compile. Keep synthesis concurrency below the common
       // timed-out catch-up cluster size so one heavy slug group cannot consume
@@ -1215,12 +1388,16 @@ Deno.serve(async (req: Request): Promise<Response> => {
           if (result.updated) {
             compiled++;
             compiledSlugs.push(page.slug);
-            if (result.diagnostics?.fallback_applied) {
+            if (
+              result.diagnostics?.fallback_applied ||
+              result.diagnostics?.page_truncation_applied
+            ) {
               compiledDiagnostics.push({
                 slug: page.slug,
                 diagnostics: result.diagnostics,
               });
             }
+            await resetCompileFailures(page);
           } else if (result.error) {
             console.error(`Compile error for ${page.slug}: ${result.error}`);
             errors++;
@@ -1231,6 +1408,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
                 ? { diagnostics: result.diagnostics }
                 : {}),
             });
+            await recordCompileFailure(page, result.error);
           }
           // If not updated and no error, page had no new thoughts (rare
           // after the pre-filter, but possible if a thought is deleted
@@ -1319,6 +1497,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
       compiled,
       skipped,
       errors,
+      excluded_pages: excludedPages,
       compiled_slugs: compiledSlugs,
       errored,
       index_compiled: indexCompiled,

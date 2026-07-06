@@ -1,0 +1,31 @@
+{
+  "_note": "Synthetic HELD fixture: a Standing, medium-risk task with no AGENT DONE event. Expected hold reasons include STATUS_NOT_AGENT_REVIEW, RISK_NOT_LOW, and AGENT_DONE_EVENT_COUNT — the controller only ever closes out reviewed low-risk work. Pair with fixtures/test-registry.json.",
+  "generated_at": "2026-07-01T12:00:00.000Z",
+  "tasks": [
+    {
+      "id": "00000000-0000-4000-a000-0000000000c3",
+      "title": "[agent instructions][local-codex][task] Synthetic standing draft",
+      "status": "Standing",
+      "risk": "medium",
+      "project_slug": "brain-bank",
+      "explicit_approval": false,
+      "claimed_by": null,
+      "linked_action_item_id": null,
+      "review_reason": null,
+      "updated_at": "2026-07-01T11:59:00.000000+00:00",
+      "events": [
+        {
+          "task_id": "00000000-0000-4000-a000-0000000000c3",
+          "event_type": "AGENT STATUS",
+          "agent_code": "local-codex",
+          "payload": {
+            "reason": "Synthetic status heartbeat; not a completion receipt.",
+            "status": "Standing"
+          },
+          "created_at": "2026-07-01T11:58:00.000000+00:00"
+        }
+      ]
+    }
+  ],
+  "actionItems": []
+}

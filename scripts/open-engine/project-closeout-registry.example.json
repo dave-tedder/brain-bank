@@ -1,0 +1,14 @@
+{
+  "brain-bank": {
+    "workspace_path": "<local-brain-bank-checkout>",
+    "tracker_path": "<local-brain-bank-checkout>/PROJECT-TRACKER.md",
+    "session_log_path": "<local-brain-bank-checkout>/SESSION-LOG.md",
+    "capture_tag": "brain-bank"
+  },
+  "example-website": {
+    "workspace_path": "<local-example-website-checkout>",
+    "tracker_path": "<local-example-website-checkout>/PROJECT-TRACKER.md",
+    "session_log_path": "<local-example-website-checkout>/SESSION-LOG.md",
+    "capture_tag": "example-website"
+  }
+}

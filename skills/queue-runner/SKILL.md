@@ -44,14 +44,15 @@ Follow this order exactly:
 1. Identify the runtime `agent_code`.
 2. Read the ledger.
 3. Run the standing context preflight above.
-4. Check human-hold and blocked tasks before new work.
-5. Resume exactly one ready hold or block if possible.
-6. Otherwise claim the oldest eligible `Agent Todo` task for this `agent_code`.
-7. Re-read the task after claim or resume.
-8. Do only the scoped work in the task packet.
-9. Post one receipt.
-10. Update the ledger.
-11. Stop after one task.
+4. Release expired claims with `release_expired_agent_claims` and note the reaped count.
+5. Check human-hold and blocked tasks before new work.
+6. Resume exactly one ready hold or block if possible.
+7. Otherwise claim the oldest eligible `Agent Todo` task for this `agent_code`.
+8. Re-read the task after claim or resume.
+9. Do only the scoped work in the task packet.
+10. Post one receipt.
+11. Update the ledger.
+12. Stop after one task.
 
 No second claim in the same heartbeat. No "while I am here" follow-up work. If the completed task reveals more work, write an `AGENT FOLLOW-UP` receipt or ask the parent session to create a child task.
 
@@ -84,9 +85,13 @@ When a refusal gate triggers on a claimed task, use `block_agent_task` with a sp
 Use exactly one task receipt for the heartbeat result:
 
 - `AGENT STATUS` for a progress heartbeat while still working.
-- `AGENT DONE` through `complete_agent_task` or `request_agent_review` when the scoped task is ready for review. This moves the task to `Agent Review`, not final done.
+- `AGENT DONE` through `complete_agent_task` or `request_agent_review` only when the task packet's acceptance criteria are met and the scoped task is ready for review. This moves the task to `Agent Review`, not final done.
+- `AGENT HUMAN HOLD` through `hold_agent_task` when the packet validates but this heartbeat has no executor for the work. The task moves to `Agent Needs Input` for a human or local runtime.
 - `AGENT BLOCKED` through `block_agent_task` when work cannot safely continue.
+- `AGENT FAILED` through `fail_agent_task` when a post-claim step fails. The task returns to `Agent Todo` with `attempt_count` incremented and the claim cleared.
 - `AGENT FOLLOW-UP` only when recording a follow-up is the scoped output and the tool path supports it.
+
+If a required source, browser surface, credential, tool, file, approval, or verification surface is missing, use `block_agent_task` with the missing requirement. Honest partial work belongs in the blocker or handoff text, not in an `AGENT DONE` receipt.
 
 Receipt notes must include:
 
@@ -95,7 +100,24 @@ Receipt notes must include:
 - Files or records touched.
 - Remaining blocker or review request, if any.
 
-Keep receipts factual. Do not claim tracker, session-log, commit, push, or project capture work was done by a worker if the parent session still needs to do it.
+Every `AGENT DONE` receipt (and every hold receipt draft the scheduled runner posts) uses the canonical 8-section OE-8 contract, in this order:
+
+```text
+Work summary:
+Verification:
+Touched files or records:
+Limitations:
+Tracker draft:
+Session-log draft:
+Brain Bank capture draft:
+Follow-up recommendation:
+```
+
+The OE-8 closeout controller consumes these headings; a receipt missing a section is held out of auto-closeout, not guessed at. Keep receipts factual. Do not claim tracker, session-log, commit, push, or project capture work was done by a worker if the parent session still needs to do it.
+
+## Scheduled Path: Claim-and-Hold
+
+The scheduled `queue-runner` Edge Function follows this same heartbeat with one hard difference: it has no executor, so it never writes `AGENT DONE`. Its claim-and-hold contract is: claim through the guarded MCP path, validate the packet, then post `AGENT HUMAN HOLD` with an honest 8-section hold receipt draft. Post-claim failures write `AGENT FAILED` on the claimed task instead of stranding it in `Agent Working`. The scheduled path reports held/blocked work in its summary; it never resumes held work itself.
 
 ## Ledger Update
 
@@ -123,6 +145,8 @@ The parent session owns:
 - Public/private classification and port decisions.
 
 Worker subagents may do independent read-only audits or scoped task work when a task grants that authority. Their output is a receipt, not canonical project state.
+
+A standalone fresh chat that manually claims a board task is the parent session for that task unless the task packet explicitly says `worker_only=true` in `sources` or `context`. Parent sessions are responsible for tracker/session-log/project-capture closeout when the task touches a project with those records. Scheduled runners and worker subagents leave review evidence and closeout drafts only.
 
 ## Required Smoke Tests
 

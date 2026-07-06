@@ -10,6 +10,7 @@ import {
   coerceMetadata,
   isOperationCommandCapture,
   loadKnownSlugs,
+  normalizeTopic,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
@@ -24,11 +25,13 @@ import {
   assertNoActiveThoughtDraft,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
+  buildFollowUpTaskRecord,
   buildThoughtIntakeRecord,
 } from "./_agent_intake.ts";
 import {
   AGENT_TASK_STATUSES,
   type AgentTaskAccessRow,
+  type AgentTaskReviewResolution,
   type AgentTaskRisk,
   type AgentTaskStatus,
   type AgentTaskToolAction,
@@ -36,7 +39,9 @@ import {
   assertClaimAllowed,
   assertIntakePromotionAllowed,
   assertResumeTransitionAllowed,
+  assertReviewApplyAllowed,
   assertStatusHeartbeatAllowed,
+  assertWorkingExitAllowed,
   compactObject,
   isAgentTaskRisk,
   isLedgerAutomationState,
@@ -293,6 +298,11 @@ function quoteOverlap(quote: string, description: string): number {
 
 const QUOTE_OVERLAP_THRESHOLD = 0.25;
 const LOG_TRUNC = 200;
+// Per-call ceiling on the LAYER 2 auto-resolve LLM call. A small
+// classification prompt normally answers in seconds; if it hangs, aborting
+// and skipping auto-resolve (fail-safe: no resolution) beats stalling the
+// capture path toward the Edge Runtime wall.
+const AUTO_RESOLVE_LLM_TIMEOUT_MS = 30_000;
 
 async function extractAndStoreActionItems(
   thoughtId: string,
@@ -393,15 +403,12 @@ async function checkAutoResolve(
     src_people: string[];
   };
 
-  const { data: enrichedRaw, error } = await supabase.rpc(
-    "find_candidate_action_items",
-    {
-      p_project: newProject,
-      p_topics: newTopics,
-      p_people: newPeople,
-      p_exclude_source_ids: excludeSourceThoughtIds,
-    },
-  );
+  const { data: enrichedRaw, error } = await supabase.rpc("find_candidate_action_items", {
+    p_project: newProject,
+    p_topics: newTopics,
+    p_people: newPeople,
+    p_exclude_source_ids: excludeSourceThoughtIds,
+  });
 
   if (error || !enrichedRaw || (enrichedRaw as EnrichedItem[]).length === 0) {
     return [];
@@ -462,11 +469,22 @@ async function checkAutoResolve(
     newPeople.length > 0 ? `people=${newPeople.join("/")}` : null,
   ].filter(Boolean).join(", ");
 
-  const { data } = await callOpenRouter({
+  // Bounded LLM call: abort past AUTO_RESOLVE_LLM_TIMEOUT_MS and treat any
+  // failure (timeout, budget, 5xx) as "no resolutions" — auto-resolve is an
+  // enhancement, never worth failing or stalling the capture for.
+  const abortController = new AbortController();
+  const abortTimer = setTimeout(
+    () => abortController.abort(),
+    AUTO_RESOLVE_LLM_TIMEOUT_MS,
+  );
+  let data: Awaited<ReturnType<typeof callOpenRouter>>["data"];
+  try {
+    ({ data } = await callOpenRouter({
     function_slug: FUNCTION_SLUG,
     call_site: "checkAutoResolve",
     model: "anthropic/claude-sonnet-4.6",
     response_format: { type: "json_object" },
+    signal: abortController.signal,
     messages: [
       {
         role: "system",
@@ -493,7 +511,17 @@ For each match you return, the "reason" field must quote the specific phrase in 
         }\n\nNew note:\n${newThoughtContent}\n\nOpen action items (numbered, with source context):\n${itemList}`,
       },
     ],
-  });
+    }));
+  } catch (e) {
+    console.error(
+      `checkAutoResolve: LAYER 2 LLM call failed (${
+        e instanceof Error ? e.name : "unknown"
+      }): ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return [];
+  } finally {
+    clearTimeout(abortTimer);
+  }
   const d = data as { choices: Array<{ message: { content: string } }> };
   type Claim = { num: number; reason: string };
   let claims: Claim[] = [];
@@ -558,20 +586,16 @@ For each match you return, the "reason" field must quote the specific phrase in 
       );
       continue;
     }
-    const stillOwed = stillOwedAdjacencyVeto(
-      newThoughtContent,
-      item.description,
-      stem,
-    );
+    const stillOwed = stillOwedAdjacencyVeto(newThoughtContent, item.description, stem);
     if (stillOwed.vetoed) {
       console.log(
         `checkAutoResolve: LAYER 3.5 still-owed veto dropped item ${item.id} ` +
           `(marker=${stillOwed.marker}, subject=${stillOwed.subject}, dist=${stillOwed.distance}, ` +
-          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`,
+          `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`
       );
       continue;
     }
-    await supabase
+    const { error: updateError } = await supabase
       .from("action_items")
       .update({
         status: "resolved",
@@ -579,6 +603,12 @@ For each match you return, the "reason" field must quote the specific phrase in 
         resolved_at: now,
       })
       .eq("id", item.id);
+    if (updateError) {
+      console.error(
+        `checkAutoResolve: resolve UPDATE failed for item ${item.id}: ${updateError.message}`,
+      );
+      continue;
+    }
     resolvedDescriptions.push(item.description);
   }
   return resolvedDescriptions;
@@ -590,13 +620,31 @@ async function postCaptureHook(
   metadata: Record<string, unknown>,
   excludeSourceThoughtIds: string[] = [],
 ): Promise<string[]> {
-  await extractAndStoreActionItems(thoughtId, metadata, content);
-  return await checkAutoResolve(
-    content,
-    thoughtId,
-    metadata,
-    excludeSourceThoughtIds,
-  );
+  // Post-insert work must never throw: the thought is already stored, so a
+  // failure here (action-item insert, auto-resolve LLM) degrades to a logged
+  // skip — it must not surface as a failed capture to the caller.
+  try {
+    await extractAndStoreActionItems(thoughtId, metadata, content);
+  } catch (err) {
+    console.error(
+      `postCaptureHook: extractAndStoreActionItems failed for thought ${thoughtId}:`,
+      err,
+    );
+  }
+  try {
+    return await checkAutoResolve(
+      content,
+      thoughtId,
+      metadata,
+      excludeSourceThoughtIds,
+    );
+  } catch (err) {
+    console.error(
+      `postCaptureHook: checkAutoResolve failed for thought ${thoughtId}:`,
+      err,
+    );
+    return [];
+  }
 }
 
 // --- REST API helpers (for ChatGPT custom GPT Actions) ---
@@ -622,7 +670,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, archived_at";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -674,6 +722,9 @@ async function moveAgentTaskViaTool(args: {
   ) {
     assertResumeTransitionAllowed(task, args.action);
     assertClaimAllowed(task);
+  }
+  if (args.action === "hold" || args.action === "fail") {
+    assertWorkingExitAllowed(task, args.action);
   }
 
   const { status, receipt } = receiptForTaskTool(args.action);
@@ -846,10 +897,12 @@ async function handleRestCapture(req: Request): Promise<Response> {
     // integrations (calendar sync, notion sync, fitness sync) tag captures
     // authoritatively instead of relying solely on metadata-extraction LLM
     // re-deriving topics from prose.
+    // Explicit tags run through the same normalizeTopic as auto-extracted topics so
+    // `open_engine` and `open-engine` land on ONE wiki identity, not two.
     const explicitTags = Array.isArray(body?.tags)
       ? (body.tags as unknown[])
         .filter((t): t is string => typeof t === "string")
-        .map((t) => t.toLowerCase().trim())
+        .map((t) => normalizeTopic(t))
         .filter(Boolean)
       : [];
     const source = typeof body?.source === "string" && body.source.length > 0
@@ -910,12 +963,7 @@ async function handleRestCapture(req: Request): Promise<Response> {
     }
 
     // Post-capture: track action items and auto-resolve (self-exclusion prevents resolving own items)
-    const resolved = await postCaptureHook(
-      inserted.id,
-      content,
-      finalMetadata,
-      [inserted.id],
-    );
+    const resolved = await postCaptureHook(inserted.id, content, finalMetadata, [inserted.id]);
 
     return jsonResponse({
       status: "captured",
@@ -1671,6 +1719,9 @@ server.registerTool(
       include_done: z.boolean().optional().describe(
         "Set true to include Agent Done tasks when statuses is omitted.",
       ),
+      include_archived: z.boolean().optional().describe(
+        "Set true to include archived (retired smoke/history) tasks. Default excludes them.",
+      ),
       limit: z.number().int().min(1).max(50).optional(),
     },
   },
@@ -1681,6 +1732,7 @@ server.registerTool(
       risk,
       project_slug,
       include_done,
+      include_archived,
       limit,
     }: {
       statuses?: AgentTaskStatus[];
@@ -1688,6 +1740,7 @@ server.registerTool(
       risk?: "low" | "medium" | "high";
       project_slug?: string;
       include_done?: boolean;
+      include_archived?: boolean;
       limit?: number;
     },
   ) => {
@@ -1697,6 +1750,7 @@ server.registerTool(
       risk,
       project_slug,
       include_done,
+      include_archived,
       limit,
     }, "mcp");
     try {
@@ -1710,6 +1764,9 @@ server.registerTool(
         query = query.in("status", statuses);
       } else if (!include_done) {
         query = query.neq("status", "Agent Done");
+      }
+      if (!include_archived) {
+        query = query.is("archived_at", null);
       }
       if (agent_code) query = query.eq("agent_code", agent_code);
       if (risk) query = query.eq("risk", risk);
@@ -2038,6 +2095,74 @@ server.registerTool(
 );
 
 server.registerTool(
+  "create_agent_task_follow_up",
+  {
+    title: "Create Agent Task Follow-Up",
+    description:
+      "Create a child Standing draft for follow-up work discovered during review/apply. It does not promote, claim, write events, resolve action items, or grant explicit approval.",
+    inputSchema: {
+      parent_task_id: z.string().uuid(),
+      desired_outcome: z.string().min(1),
+      context: z.string().min(1),
+      agent_code: z.string().min(1).optional(),
+      project_slug: z.string().min(1).optional(),
+      requested_by: z.string().min(1).optional(),
+      priority: z.enum(["low", "medium", "high"]).optional(),
+      risk: z.enum(["low", "medium", "high"]).optional(),
+    },
+  },
+  async (
+    args: {
+      parent_task_id: string;
+      desired_outcome: string;
+      context: string;
+      agent_code?: string;
+      project_slug?: string;
+      requested_by?: string;
+      priority?: "low" | "medium" | "high";
+      risk?: AgentTaskRisk;
+    },
+  ) => {
+    logToolInvocation("create_agent_task_follow_up", {
+      parent_task_id: args.parent_task_id,
+      agent_code: args.agent_code,
+      project_slug: args.project_slug,
+      priority: args.priority,
+      risk: args.risk,
+    }, "mcp");
+    try {
+      const parentTask = await loadAgentTaskForTool(args.parent_task_id);
+      if (!parentTask) {
+        throw new Error(`Parent task not found: ${args.parent_task_id}`);
+      }
+
+      const record = buildFollowUpTaskRecord(args);
+      const { data, error } = await supabase
+        .from("agent_tasks")
+        .insert(record)
+        .select(AGENT_TASK_SELECT)
+        .single();
+      if (error) throw error;
+
+      return textToolResponse({
+        receipt: "FOLLOW_UP_DRAFT_CREATED",
+        parent_task_id: args.parent_task_id,
+        claimable_by_runner: false,
+        promotion_required: true,
+        explicit_approval_granted: false,
+        audit_event_written: false,
+        parent_status_changed: false,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error creating agent task follow-up: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
   "claim_next_agent_task",
   {
     title: "Claim Next Agent Task",
@@ -2249,6 +2374,97 @@ server.registerTool(
 );
 
 server.registerTool(
+  "apply_agent_task_review",
+  {
+    title: "Apply Agent Task Review",
+    description:
+      "Apply reviewed task work through the OE-7 apply gate. Moves Agent Review to Agent Done with AGENT APPLIED, and may resolve a linked action item only for accepted review.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      applied_by: z.string().min(1).optional(),
+      resolution: z.enum(["accepted", "accepted_with_follow_up"]),
+      note: z.string().min(1).optional(),
+      resolve_linked_action_item: z.boolean().optional(),
+      child_task_ids: z.array(z.string().uuid()).optional(),
+      closeout_evidence: z.record(z.unknown()).optional(),
+    },
+  },
+  async (
+    {
+      task_id,
+      applied_by,
+      resolution,
+      note,
+      resolve_linked_action_item,
+      child_task_ids,
+      closeout_evidence,
+    }: {
+      task_id: string;
+      applied_by?: string;
+      resolution: AgentTaskReviewResolution;
+      note?: string;
+      resolve_linked_action_item?: boolean;
+      child_task_ids?: string[];
+      closeout_evidence?: Record<string, unknown>;
+    },
+  ) => {
+    logToolInvocation("apply_agent_task_review", {
+      task_id,
+      applied_by,
+      resolution,
+      resolve_linked_action_item,
+      child_task_ids,
+    }, "mcp");
+    try {
+      const task = await loadAgentTaskForTool(task_id);
+      if (!task) throw new Error(`Task not found: ${task_id}`);
+      assertReviewApplyAllowed(task);
+
+      const childTaskIds = child_task_ids ?? [];
+      if (
+        resolution === "accepted_with_follow_up" && childTaskIds.length === 0
+      ) {
+        throw new Error(
+          "accepted_with_follow_up requires at least one child task.",
+        );
+      }
+      if ((resolve_linked_action_item ?? false) && resolution !== "accepted") {
+        throw new Error(
+          "Linked action item can only be resolved when review resolution is accepted.",
+        );
+      }
+
+      const { data, error } = await supabase.rpc(
+        "apply_agent_task_review",
+        {
+          p_task_id: task_id,
+          p_applied_by: applied_by ?? null,
+          p_resolution: resolution,
+          p_note: note ?? null,
+          p_resolve_linked_action_item: resolve_linked_action_item ?? false,
+          p_child_task_ids: childTaskIds,
+          p_closeout_evidence: closeout_evidence ?? {},
+        },
+      );
+      if (error) throw error;
+
+      return textToolResponse({
+        receipt: "AGENT APPLIED",
+        resolution,
+        linked_action_item_resolution_requested: resolve_linked_action_item ??
+          false,
+        child_task_ids: childTaskIds,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error applying agent task review: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
   "resume_agent_task",
   {
     title: "Resume Agent Task",
@@ -2366,6 +2582,112 @@ server.registerTool(
 );
 
 server.registerTool(
+  "hold_agent_task",
+  {
+    title: "Hold Agent Task",
+    description:
+      "Move a claimed Agent Working task to Agent Needs Input with an AGENT HUMAN HOLD receipt. The scheduled Queue Runner's claim-and-hold contract uses this when a packet validates but the scheduled path has no executor.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      reason: z.string().min(1).describe(
+        "Honest hold reason: what was validated, what was NOT executed, and who should pick the task up.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, reason }: {
+      task_id: string;
+      agent_code: string;
+      reason: string;
+    },
+  ) => {
+    logToolInvocation("hold_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "hold",
+          reason,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error holding agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "fail_agent_task",
+  {
+    title: "Fail Agent Task",
+    description:
+      "Record an AGENT FAILED receipt on a claimed Agent Working task and return it to Agent Todo. Increments attempt_count and clears the claim so the task can be retried honestly.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      reason: z.string().min(1).describe(
+        "The failure reason to record on the task and event payload.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, reason }: {
+      task_id: string;
+      agent_code: string;
+      reason: string;
+    },
+  ) => {
+    logToolInvocation("fail_agent_task", { task_id, agent_code }, "mcp");
+    try {
+      return textToolResponse(
+        await moveAgentTaskViaTool({
+          taskId: task_id,
+          agentCode: agent_code,
+          action: "fail",
+          reason,
+        }),
+      );
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error failing agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "release_expired_agent_claims",
+  {
+    title: "Release Expired Agent Claims",
+    description:
+      "Run the expired-claim reaper: Agent Working tasks whose claim_expires_at has passed return to Agent Todo with an AGENT FAILED event and attempt_count increment. Returns the reaped rows. Safe to call when nothing is expired.",
+    inputSchema: {},
+  },
+  async () => {
+    logToolInvocation("release_expired_agent_claims", {}, "mcp");
+    try {
+      const { data, error } = await supabase.rpc(
+        "release_expired_agent_claims",
+        {},
+      );
+      if (error) throw error;
+      return textToolResponse({
+        reaped_count: data?.length ?? 0,
+        reaped: data ?? [],
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error releasing expired agent claims: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
   "read_agent_ledger",
   {
     title: "Read Agent Ledger",
@@ -2472,7 +2794,7 @@ server.registerTool(
     inputSchema: {
       content: z.string().describe("The thought to capture"),
       tags: z.array(z.string()).optional().describe(
-        "Optional explicit topic tags to attach (merged with the auto-extracted topics). Use underscores, not hyphens, for multi-word slugs.",
+        "Optional explicit topic tags to attach (merged with the auto-extracted topics). Tags are normalized to hyphenated lowercase slugs (spaces/underscores/punctuation become hyphens), matching the auto-extracted topic format.",
       ),
     },
   },
@@ -2489,11 +2811,13 @@ server.registerTool(
         };
       }
       // Optional caller-supplied tags merge into the auto-extracted topics —
-      // mirrors the explicitTags logic in handleRestCapture.
+      // mirrors the explicitTags logic in handleRestCapture. Explicit tags run
+      // through the same normalizeTopic as auto-extracted topics so
+      // `open_engine` and `open-engine` land on ONE wiki identity, not two.
       const explicitTags = Array.isArray(tags)
         ? tags
           .filter((t): t is string => typeof t === "string")
-          .map((t) => t.toLowerCase().trim())
+          .map((t) => normalizeTopic(t))
           .filter(Boolean)
         : [];
       const [embedding, rawMetadata] = await Promise.all([

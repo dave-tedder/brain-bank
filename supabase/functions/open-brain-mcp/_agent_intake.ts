@@ -7,6 +7,7 @@ export const AGENT_TASK_INTAKE_SOURCES = [
   "handoff-doc",
   "slack-intake",
   "action-item-promotion",
+  "agent-follow-up",
 ] as const;
 
 export type AgentTaskIntakeSource = (typeof AGENT_TASK_INTAKE_SOURCES)[number];
@@ -28,6 +29,7 @@ export interface AgentTaskIntakeInput {
   title?: string | null;
   source_thought_id?: string | null;
   linked_action_item_id?: string | null;
+  parent_task_id?: string | null;
 }
 
 export interface AgentTaskIntakeRecord {
@@ -50,6 +52,7 @@ export interface AgentTaskIntakeRecord {
   explicit_approval: false;
   source_thought_id: string | null;
   linked_action_item_id: string | null;
+  parent_task_id: string | null;
 }
 
 export interface ActionItemPromotionRow {
@@ -78,6 +81,17 @@ export interface ThoughtIntakeInput {
   agent_code?: string | null;
   project_slug?: string | null;
   requested_by?: string | null;
+}
+
+export interface FollowUpTaskInput {
+  parent_task_id: string;
+  desired_outcome: string;
+  context: string;
+  agent_code?: string | null;
+  project_slug?: string | null;
+  requested_by?: string | null;
+  priority?: "low" | "medium" | "high";
+  risk?: AgentTaskRisk;
 }
 
 export interface LinkedActionItemDraftRow {
@@ -164,6 +178,7 @@ export function buildAgentTaskIntakeRecord(
     explicit_approval: false,
     source_thought_id: input.source_thought_id?.trim() || null,
     linked_action_item_id: input.linked_action_item_id?.trim() || null,
+    parent_task_id: input.parent_task_id?.trim() || null,
   };
 }
 
@@ -308,5 +323,44 @@ export function buildThoughtIntakeRecord(
       titleAgentCode(input.agent_code ?? null)
     }][thought] Review source thought ${thoughtId}`,
     source_thought_id: thoughtId,
+  });
+}
+
+export function buildFollowUpTaskRecord(
+  input: FollowUpTaskInput,
+): AgentTaskIntakeRecord {
+  const parentTaskId = cleanText(input.parent_task_id, "parent_task_id");
+  const desiredOutcome = cleanText(input.desired_outcome, "desired_outcome");
+  const context = cleanText(input.context, "context");
+
+  return buildAgentTaskIntakeRecord({
+    desired_outcome: desiredOutcome,
+    context:
+      `Manual follow-up draft for parent agent_tasks.id ${parentTaskId}.\n\n${context}`,
+    sources: [
+      {
+        kind: "agent_task",
+        id: parentTaskId,
+        relationship: "parent",
+      },
+    ],
+    do_steps:
+      "Review the parent task result, confirm this child work is still needed, expand this draft into a complete task packet if needed, then use the normal human promotion path when ready.",
+    acceptance_criteria:
+      "The child Standing draft is reviewed by a human and remains unclaimable until explicitly promoted later.",
+    output_handoff:
+      "Leave notes on the parent task, what follow-up remains, what evidence was checked, and whether this child draft should be promoted, rewritten, or left Standing.",
+    boundaries:
+      "Manual follow-up draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, resolve linked action items, or mark project records complete from this draft step.",
+    intake_source: "agent-follow-up",
+    agent_code: input.agent_code,
+    project_slug: input.project_slug,
+    priority: input.priority ?? "medium",
+    risk: input.risk ?? "low",
+    requested_by: input.requested_by,
+    title: `[agent instructions][${
+      titleAgentCode(input.agent_code ?? null)
+    }][follow-up] ${desiredOutcome}`,
+    parent_task_id: parentTaskId,
   });
 }

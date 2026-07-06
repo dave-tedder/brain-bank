@@ -37,6 +37,9 @@ export type AgentTaskReceipt = (typeof AGENT_TASK_RECEIPTS)[number];
 export type AgentLedgerAutomationState =
   (typeof AGENT_LEDGER_AUTOMATION_STATES)[number];
 export type AgentTaskRisk = "low" | "medium" | "high";
+export type AgentTaskReviewResolution =
+  | "accepted"
+  | "accepted_with_follow_up";
 export type AgentTaskToolAction =
   | "update"
   | "complete"
@@ -44,8 +47,11 @@ export type AgentTaskToolAction =
   | "request-review"
   | "resume"
   | "unblock"
-  | "answer";
+  | "answer"
+  | "hold"
+  | "fail";
 export type AgentTaskResumeAction = "resume" | "unblock" | "answer";
+export type AgentTaskWorkingExitAction = "hold" | "fail";
 
 export interface AgentTaskAccessRow {
   agent_code: string | null;
@@ -67,6 +73,12 @@ export function isLedgerAutomationState(
 
 export function isAgentTaskRisk(value: string): value is AgentTaskRisk {
   return value === "low" || value === "medium" || value === "high";
+}
+
+export function isReviewResolution(
+  value: string,
+): value is AgentTaskReviewResolution {
+  return value === "accepted" || value === "accepted_with_follow_up";
 }
 
 export function canAgentWriteTask(
@@ -109,6 +121,12 @@ export function assertIntakePromotionAllowed(task: AgentTaskAccessRow): void {
   }
 }
 
+export function assertReviewApplyAllowed(task: AgentTaskAccessRow): void {
+  if (task.status !== "Agent Review") {
+    throw new Error("AGENT APPLIED requires Agent Review.");
+  }
+}
+
 export function assertResumeTransitionAllowed(
   task: AgentTaskAccessRow,
   action: AgentTaskResumeAction,
@@ -130,6 +148,16 @@ export function assertResumeTransitionAllowed(
   }
 }
 
+export function assertWorkingExitAllowed(
+  task: AgentTaskAccessRow,
+  action: AgentTaskWorkingExitAction,
+): void {
+  if (task.status !== "Agent Working") {
+    const receipt = action === "hold" ? "AGENT HUMAN HOLD" : "AGENT FAILED";
+    throw new Error(`${receipt} requires Agent Working.`);
+  }
+}
+
 export function receiptForTaskTool(
   action: AgentTaskToolAction,
 ): { status: AgentTaskStatus; receipt: AgentTaskReceipt } {
@@ -147,6 +175,10 @@ export function receiptForTaskTool(
       return { status: "Agent Working", receipt: "AGENT UNBLOCKED" };
     case "answer":
       return { status: "Agent Working", receipt: "AGENT HUMAN ANSWERED" };
+    case "hold":
+      return { status: "Agent Needs Input", receipt: "AGENT HUMAN HOLD" };
+    case "fail":
+      return { status: "Agent Todo", receipt: "AGENT FAILED" };
   }
 }
 
