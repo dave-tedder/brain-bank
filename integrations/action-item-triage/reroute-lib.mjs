@@ -67,13 +67,21 @@ export function proposeReroutes(rows, routeMap) {
   return { proposals, unmatched, skipped };
 }
 
+// Markdown table cell: escape backslashes before pipes (escaping pipes alone
+// lets a trailing backslash re-arm them), flatten newlines, bound length.
+function mdCell(raw) {
+  return String(raw)
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\r?\n/g, ' ')
+    .slice(0, 90);
+}
+
 export function renderReport({ proposals, unmatched, skipped }, stamp) {
   const lines = [];
   lines.push(`# Unknown-project reroute report — ${stamp}`);
   lines.push('');
-  lines.push(
-    'Read-only dry run (Session 272, tracker item "Unknown-project review report").',
-  );
+  lines.push('Read-only dry run.');
   lines.push(
     'Proposes `thoughts.metadata.project` values for open action items whose source',
   );
@@ -81,9 +89,9 @@ export function renderReport({ proposals, unmatched, skipped }, stamp) {
     'thought has a null/unknown project, using the `projects.route_phrases` route map',
   );
   lines.push(
-    '(unique-match only). NO writes were performed. Apply requires Dave approving the',
+    '(unique-match only). NO writes were performed. Apply requires the operator',
   );
-  lines.push('exact thought IDs below.');
+  lines.push('approving the exact thought IDs below.');
   lines.push('');
   lines.push(
     `Counts: ${proposals.length} proposed reroutes, ${unmatched.length} unmatched (stay unrouted), ${skipped.length} already routed (out of scope).`,
@@ -95,7 +103,7 @@ export function renderReport({ proposals, unmatched, skipped }, stamp) {
   lines.push('| --- | --- | --- | --- | --- |');
   for (const p of proposals) {
     lines.push(
-      `| ${p.action_item_id} | ${p.thought_id} | ${String(p.created_at).slice(0, 10)} | ${p.proposed_project} | ${String(p.description).replace(/\|/g, '\\|').slice(0, 90)} |`,
+      `| ${p.action_item_id} | ${p.thought_id} | ${String(p.created_at).slice(0, 10)} | ${p.proposed_project} | ${mdCell(p.description)} |`,
     );
   }
   lines.push('');
@@ -105,7 +113,7 @@ export function renderReport({ proposals, unmatched, skipped }, stamp) {
   lines.push('| --- | --- | --- | --- |');
   for (const u of unmatched) {
     lines.push(
-      `| ${u.action_item_id} | ${u.thought_id} | ${String(u.created_at).slice(0, 10)} | ${String(u.description).replace(/\|/g, '\\|').slice(0, 90)} |`,
+      `| ${u.action_item_id} | ${u.thought_id} | ${String(u.created_at).slice(0, 10)} | ${mdCell(u.description)} |`,
     );
   }
   lines.push('');
