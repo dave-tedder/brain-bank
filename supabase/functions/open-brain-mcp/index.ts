@@ -16,6 +16,7 @@ import {
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
+import { timingSafeEqualStr } from "../_shared/access-key.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
@@ -678,6 +679,16 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, x-brain-key",
 };
+
+// Free-text going into a PostgREST .or() filter string is part of the filter
+// DSL, so reserved characters (comma, parens, quotes, backslash) break the
+// filter or splice extra clauses. All these routes sit behind auth, so this
+// closes query breakage more than a privilege boundary. Reserved chars are
+// replaced with spaces (fuzzy ilike keeps matching).
+function escapeOrPattern(raw: string): string {
+  return String(raw ?? "").replace(/[,()"\\]/g, " ").replace(/\s+/g, " ")
+    .trim();
+}
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -1370,7 +1381,7 @@ server.registerTool(
     description:
       "Fetch a single raw thought by its UUID. **Use this when drilling from a wiki page's 'Sources' section to inspect the original capture** — the get_compiled_page output lists the source thought IDs and this tool reads them back. Returns the full content + metadata + capture date + source. After Phase 13, also includes a brief 'Relationships' section listing typed edges (supports / contradicts / supersedes / etc.) to other thoughts; use `get_thought_edges` for full edge inspection.",
     inputSchema: {
-      id: z.string().describe(
+      id: z.string().uuid().describe(
         "Thought UUID. Get these from the 'Sources' section of a get_compiled_page response.",
       ),
     },
@@ -1513,7 +1524,7 @@ server.registerTool(
     description:
       "Inspect the typed semantic edges for a single thought. Returns each edge's relation, direction, confidence, and a short preview of the counterpart thought. Use this when the **'Relationships'** summary in `get_thought_by_id` flags an interesting edge and you want details. Optional filters: `relation` (one of supports/contradicts/evolved_into/supersedes/depends_on/related_to), `min_confidence`, `limit`. Edges are an enrichment signal — fall back to `search_thoughts` or `get_compiled_page` for primary retrieval.",
     inputSchema: {
-      id: z.string().describe(
+      id: z.string().uuid().describe(
         "Thought UUID. Get these from get_thought_by_id, get_compiled_page Sources, or list_thoughts.",
       ),
       relation: z.enum([
@@ -3105,7 +3116,7 @@ server.registerTool(
     description:
       `Get full context on a client: profile and related brain thoughts. Use before a ${loadProfile().domain.singular_noun} or when a client reaches out.`,
     inputSchema: {
-      client_id: z.string().optional().describe("Client UUID (if known)"),
+      client_id: z.string().uuid().optional().describe("Client UUID (if known)"),
       name: z.string().optional().describe(
         "Client name (used if client_id not provided)",
       ),
@@ -3289,7 +3300,7 @@ server.registerTool(
       subject: z.string().optional().describe(
         "What the content shows, e.g. 'in-progress work'",
       ),
-      client_id: z.string().optional().describe(
+      client_id: z.string().uuid().optional().describe(
         "Client UUID if content features a specific client's work",
       ),
       stage: z
@@ -3363,7 +3374,7 @@ server.registerTool(
     description:
       "Move content through the pipeline or add performance data. Use to advance stage, set publish date, or record metrics.",
     inputSchema: {
-      content_id: z.string().describe("Content item UUID"),
+      content_id: z.string().uuid().describe("Content item UUID"),
       stage: z
         .enum(["captured", "edited", "scheduled", "published", "archived"])
         .optional()
@@ -3964,7 +3975,9 @@ server.registerTool(
       const { data: contentBySubject } = await supabase
         .from("content_items")
         .select("*")
-        .or(`title.ilike.%${query}%,subject.ilike.%${query}%`)
+        .or(
+          `title.ilike.%${escapeOrPattern(query)}%,subject.ilike.%${escapeOrPattern(query)}%`,
+        )
         .order("created_at", { ascending: false })
         .limit(10);
 
@@ -3991,7 +4004,7 @@ server.registerTool(
         .from("business_events")
         .select("*")
         .or(
-          `title.ilike.%${query}%,location.ilike.%${query}%,notes.ilike.%${query}%`,
+          `title.ilike.%${escapeOrPattern(query)}%,location.ilike.%${escapeOrPattern(query)}%,notes.ilike.%${escapeOrPattern(query)}%`,
         )
         .order("date_start", { ascending: false })
         .limit(10);
@@ -4351,7 +4364,9 @@ server.registerTool(
       let q = supabase
         .from("compiled_pages")
         .select("slug, title, page_type, last_compiled, content")
-        .or(`title.ilike.%${query}%,content.ilike.%${query}%`)
+        .or(
+          `title.ilike.%${escapeOrPattern(query)}%,content.ilike.%${escapeOrPattern(query)}%`,
+        )
         .order("last_compiled", { ascending: false, nullsFirst: false })
         .limit(limit);
       if (page_type) q = q.eq("page_type", page_type);
@@ -4510,7 +4525,11 @@ async function handleRestPages(url: URL): Promise<Response> {
       .order("title", { ascending: true })
       .limit(limit);
     if (type) q = q.eq("page_type", type);
-    if (query) q = q.or(`title.ilike.%${query}%,content.ilike.%${query}%`);
+    if (query) {
+      q = q.or(
+        `title.ilike.%${escapeOrPattern(query)}%,content.ilike.%${escapeOrPattern(query)}%`,
+      );
+    }
 
     const { data, error } = await q;
     if (error) return jsonResponse({ error: error.message }, 500);
@@ -4526,7 +4545,8 @@ const app = new Hono();
 
 app.all("*", async (c) => {
   const provided = c.req.header("x-brain-key");
-  if (!provided || provided !== MCP_ACCESS_KEY) {
+  // Constant-time compare — no early exit on the first mismatched byte.
+  if (!provided || !timingSafeEqualStr(provided, MCP_ACCESS_KEY)) {
     return c.json({ error: "Invalid or missing access key" }, 401);
   }
   const transport = new StreamableHTTPTransport();
@@ -4557,7 +4577,8 @@ Deno.serve(async (req: Request) => {
       ? authHeader.slice(7)
       : null;
     const provided = req.headers.get("x-brain-key") || bearerKey;
-    if (!provided || provided !== MCP_ACCESS_KEY) {
+    // Constant-time compare — no early exit on the first mismatched byte.
+    if (!provided || !timingSafeEqualStr(provided, MCP_ACCESS_KEY)) {
       return jsonResponse({ error: "Invalid or missing access key" }, 401);
     }
     if (req.method === "GET" && path === "/search") {
