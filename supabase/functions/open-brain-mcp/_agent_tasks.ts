@@ -121,6 +121,40 @@ export function assertIntakePromotionAllowed(task: AgentTaskAccessRow): void {
   }
 }
 
+// Promotion (Standing -> Agent Todo) is a human-only decision (OE-6). All MCP
+// callers share one key, so identity is self-reported — this guard is the
+// tool-layer chokepoint an autonomous runtime cannot pass while being honest:
+// anonymous calls, registered agent codes, and runner self-identifications are
+// refused; only a named human attribution goes through.
+const RUNNER_CALLER_PATTERN =
+  /^(queue[-_ ]?runner|scheduled([-_ ]runner)?|runner|automation|cron([-_ ]job)?|bot|agent)$/i;
+
+export function assertPromotionCallerAllowed(
+  promotedBy: string | null | undefined,
+  registeredAgentCodes: string[],
+): void {
+  const value = typeof promotedBy === "string" ? promotedBy.trim() : "";
+  if (!value) {
+    throw new Error(
+      "Promotion requires promoted_by naming the human operator who approved it. Anonymous callers cannot promote intake drafts.",
+    );
+  }
+  const normalized = value.toLowerCase();
+  const codes = registeredAgentCodes
+    .map((code) => (code ?? "").trim().toLowerCase())
+    .filter(Boolean);
+  if (codes.includes(normalized)) {
+    throw new Error(
+      `promoted_by matches registered agent code '${value}'. Agent runtimes cannot promote intake drafts; promotion is a human decision.`,
+    );
+  }
+  if (RUNNER_CALLER_PATTERN.test(value)) {
+    throw new Error(
+      `promoted_by '${value}' identifies an automated runtime. Automated runtimes cannot promote intake drafts; promotion is a human decision.`,
+    );
+  }
+}
+
 export function assertReviewApplyAllowed(task: AgentTaskAccessRow): void {
   if (task.status !== "Agent Review") {
     throw new Error("AGENT APPLIED requires Agent Review.");

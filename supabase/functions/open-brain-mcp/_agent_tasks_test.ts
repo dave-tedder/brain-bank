@@ -4,6 +4,7 @@ import {
   assertAgentCanWriteTask,
   assertClaimAllowed,
   assertIntakePromotionAllowed,
+  assertPromotionCallerAllowed,
   assertResumeTransitionAllowed,
   assertReviewApplyAllowed,
   assertStatusHeartbeatAllowed,
@@ -83,6 +84,56 @@ Deno.test("intake promotion guard only allows Standing drafts", () => {
       "Only Standing intake drafts",
     );
   }
+});
+
+Deno.test("promotion caller guard requires a named human operator", () => {
+  for (const value of [undefined, null, "", "   "]) {
+    assertThrows(
+      () => assertPromotionCallerAllowed(value, ["local-codex"]),
+      Error,
+      "requires promoted_by",
+    );
+  }
+});
+
+Deno.test("promotion caller guard rejects registered agent codes", () => {
+  const codes = ["local-codex", "local-claude-code"];
+  for (const value of ["local-codex", "LOCAL-CODEX", " local-claude-code "]) {
+    assertThrows(
+      () => assertPromotionCallerAllowed(value, codes),
+      Error,
+      "registered agent code",
+    );
+  }
+});
+
+Deno.test("promotion caller guard rejects runner self-identification", () => {
+  for (
+    const value of [
+      "queue-runner",
+      "Queue Runner",
+      "queue_runner",
+      "scheduled-runner",
+      "automation",
+      "cron",
+      "bot",
+      "agent",
+    ]
+  ) {
+    assertThrows(
+      () => assertPromotionCallerAllowed(value, []),
+      Error,
+      "cannot promote",
+    );
+  }
+});
+
+Deno.test("promotion caller guard passes human attributions", () => {
+  const codes = ["local-codex", "local-claude-code"];
+  assertPromotionCallerAllowed("Jane", codes);
+  assertPromotionCallerAllowed("Jane Doe (Session 12, Claude Code)", codes);
+  assertPromotionCallerAllowed("Jane via Codex parent session", codes);
+  assertPromotionCallerAllowed("Jane", []);
 });
 
 Deno.test("review apply guard only allows Agent Review tasks", () => {
