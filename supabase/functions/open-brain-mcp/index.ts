@@ -1048,12 +1048,19 @@ async function handleRestClient(req: Request): Promise<Response> {
         }, 413);
       }
     }
+    // Trim: untrimmed names (e.g. trailing spaces from synced source titles)
+    // bypass the ilike dedup below and spawn duplicate client rows + stub
+    // wiki pages.
+    const cleanName = name.trim();
+    if (!cleanName) {
+      return jsonResponse({ error: "name field required" }, 400);
+    }
 
     // Check if client with same name already exists (case-insensitive)
     const { data: existing } = await supabase
       .from("clients")
       .select("id, name, email, phone")
-      .ilike("name", name)
+      .ilike("name", cleanName)
       .limit(1);
 
     if (existing && existing.length > 0) {
@@ -1074,7 +1081,7 @@ async function handleRestClient(req: Request): Promise<Response> {
 
     // Insert new client
     const record: Record<string, unknown> = {
-      name,
+      name: cleanName,
       first_contact: first_contact || new Date().toISOString(),
       last_contact: last_contact || new Date().toISOString(),
     };
@@ -3044,11 +3051,23 @@ server.registerTool(
       notes,
     }, "mcp");
     try {
+      // Trim: untrimmed names bypass the ilike dedup below and spawn
+      // duplicate client rows + stub wiki pages.
+      const cleanName = name.trim();
+      if (!cleanName) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Client name required.",
+          }],
+          isError: true,
+        };
+      }
       // Check if client with same name already exists
       const { data: existing } = await supabase
         .from("clients")
         .select("id, name")
-        .ilike("name", name)
+        .ilike("name", cleanName)
         .limit(1);
       if (existing && existing.length > 0) {
         return {
@@ -3063,7 +3082,7 @@ server.registerTool(
         };
       }
       const record: Record<string, unknown> = {
-        name,
+        name: cleanName,
         first_contact: new Date().toISOString(),
         last_contact: new Date().toISOString(),
       };
