@@ -1,0 +1,32 @@
+{
+  "_note": "Synthetic APPLYABLE fixture for the inline-heading grammar: several headings carry their content inline after the colon ('Touched files or records: none. ...') instead of on the following lines. The pre-fix parser required end-of-line after the colon and misclassified this shape as RECEIPT_MISSING_SECTION. Run from the repo root with --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE.",
+  "generated_at": "2026-07-06T12:00:00.000Z",
+  "tasks": [
+    {
+      "id": "00000000-0000-4000-a000-0000000000a7",
+      "title": "[agent instructions][local-codex][task] Synthetic inline-heading receipt",
+      "status": "Agent Review",
+      "risk": "low",
+      "project_slug": "brain-bank",
+      "explicit_approval": false,
+      "claimed_by": "local-codex",
+      "linked_action_item_id": null,
+      "review_reason": null,
+      "updated_at": "2026-07-06T11:59:00.000000+00:00",
+      "events": [
+        {
+          "task_id": "00000000-0000-4000-a000-0000000000a7",
+          "event_type": "AGENT DONE",
+          "agent_code": "local-codex",
+          "payload": {
+            "reason": "Work summary: synthetic fixture receipt written with inline heading content throughout. Searched the docs tree for stale anchors and found none. No real work occurred.\n\nVerification: fixture-only; the inline-heading grammar is the thing under test, not the claimed work. A mid-sentence mention of Verification: inside prose must still not open a section.\n\nTouched files or records: none. Read-only synthetic checks; nothing was created, updated, or deleted.\n\nLimitations: search coverage only; this receipt exists to exercise the inline-content parse path.\n\nTracker draft:\n- [x] Synthetic inline-heading fixture tracker line. Never write this anywhere real. [Risk: low]\n\nSession-log draft:\nSynthetic inline-heading fixture session-log line. Never write this anywhere real.\n\nBrain Bank capture draft: synthetic inline capture line. Never capture this.\n\nFollow-up recommendation: none.",
+            "status": "Agent Review",
+            "from_status": "Agent Working"
+          },
+          "created_at": "2026-07-06T11:58:00.000000+00:00"
+        }
+      ]
+    }
+  ],
+  "actionItems": []
+}

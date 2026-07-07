@@ -313,8 +313,11 @@ function receiptFromEvent(event) {
 
 function parseReceipt(text) {
   const sections = {};
+  // A heading may carry its content inline after the colon ("Limitations: none
+  // beyond ...") — real receipts write both forms. The line-start anchor is
+  // load-bearing: mid-sentence "Verification:" in prose must not open a section.
   const headingPattern = new RegExp(
-    `^(${REQUIRED_RECEIPT_SECTIONS.map(escapeRegExp).join("|")}):\\s*$`,
+    `^(${REQUIRED_RECEIPT_SECTIONS.map(escapeRegExp).join("|")}):\\s*(.*)$`,
     "i",
   );
   let current = null;
@@ -323,7 +326,7 @@ function parseReceipt(text) {
     const match = line.match(headingPattern);
     if (match) {
       current = canonicalHeading(match[1]);
-      sections[current] = "";
+      sections[current] = match[2].trim();
       continue;
     }
     if (current) {
