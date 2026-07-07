@@ -9,6 +9,7 @@ import {
   routeProjectFromContent,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
+import { timingSafeEqualStr } from "../_shared/access-key.ts";
 import { filterCandidatesForDone } from "../_shared/done-filter.ts";
 import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
@@ -56,22 +57,8 @@ async function verifySlackSignature(
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-  return constantTimeEqual(hexSig, signature);
-}
-
-// Compares two strings in constant time relative to their length. Defense
-// against timing-side-channel attacks on Slack signature verification: `===`
-// short-circuits at the first byte mismatch, leaking position via response
-// time. Practical attack surface is negligible at this layer (network jitter
-// dominates), but the constant-time comparison is best practice and costs one
-// loop. Always returns false if lengths differ.
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return mismatch === 0;
+  // Constant-time compare — same shared helper the MCP access-key gate uses.
+  return timingSafeEqualStr(hexSig, signature);
 }
 
 // --- Shared Utilities ---
