@@ -10,7 +10,7 @@ Every thought that passes through your day (a Slack note to yourself, an email y
 - **Proactive morning digests** delivered to Slack with yesterday's narrative, today's meeting briefings, open action items, and client cross-references.
 - **Auto-compiled wiki pages** for people, topics, and projects that come up often, regenerated as the underlying captures change.
 - **Action-item tracking with auto-resolution** that recognizes when a follow-up thought indicates something got done and closes the loop without manual bookkeeping.
-- **Manual Open Engine task board** at `dashboard/tasks` for queuing agent work packets with explicit risk, claim, and receipt rules. The Queue Runner skill at [`skills/queue-runner/SKILL.md`](skills/queue-runner/SKILL.md) walks an operator-driven runtime through one heartbeat at a time. No autonomous loop, no scheduled runner.
+- **Open Engine task board** at `dashboard/tasks` for queuing agent work packets with explicit risk, claim, and receipt rules. The Queue Runner skill at [`skills/queue-runner/SKILL.md`](skills/queue-runner/SKILL.md) walks an operator-driven runtime through one heartbeat at a time, and an opt-in scheduled executor lane ([`integrations/open-engine-executor/`](integrations/open-engine-executor/README.md)) can run one low-risk task per day autonomously. Every lane is bounded to one claim per run, and canonical state stays behind the human/controlled apply layer.
 
 Brain Bank is an engine plus a dashboard. You bring the captures (Slack, Gmail, calendar, voice, Apple Notes, Notion, a ChatGPT custom GPT, or anything that speaks MCP or a plain REST POST). It stores, synthesizes, and surfaces the rest, and you drive the manual task board from the dashboard or the MCP task tools.
 
@@ -119,12 +119,13 @@ brain-bank/
 
 ## Open Engine task board
 
-Open Engine is Nate B. Jones' framework for human-controlled, manually queued agent work. Brain Bank's adaptation ships as:
+Open Engine is Nate B. Jones' framework for human-controlled, queued agent work. Brain Bank's adaptation keeps the human in control of what enters the queue and how canonical state changes, while offering progressively more automation for claiming and executing work. It ships as:
 
 - **Schema:** `agent_tasks`, `agent_task_events`, `agent_task_ledger` (service-role-only RLS). Each task carries a status (`Standing`, `Agent Todo`, `Doing`, `Human Hold`, `Blocked`, `Review`, `Done`, `Archived`), a risk band (`low`, `medium`, `high`), an `agent_code` runtime, and a receipt history.
 - **Dashboard board:** the protected `dashboard/tasks` page lets you create packets, move tasks through Open Engine statuses, edit core fields, filter by status / agent / risk, and inspect a per-task event timeline plus a runtime ledger panel.
 - **MCP task tools:** 12 guarded tools surface the same operations through MCP — `list_agent_tasks`, `get_agent_task`, `claim_next_agent_task`, `update_agent_task`, `complete_agent_task`, `block_agent_task`, `request_agent_review`, `resume_agent_task`, `unblock_agent_task`, `answer_agent_task`, `read_agent_ledger`, and `write_agent_ledger`. A heartbeat guard prevents `update_agent_task` from silently resuming a `Human Hold` or `Blocked` task; resume / unblock / answer are explicit transitions.
-- **Queue Runner skill:** [`skills/queue-runner/SKILL.md`](skills/queue-runner/SKILL.md) walks an operator-driven runtime through one heartbeat at a time: read the project guidance, claim the oldest eligible task, do exactly one task, write a receipt, stop. The skill is manual-only in this release; no cron, no autonomous loop, no scheduled trigger.
+- **Queue Runner skill:** [`skills/queue-runner/SKILL.md`](skills/queue-runner/SKILL.md) walks an operator-driven runtime through one heartbeat at a time: read the project guidance, claim the oldest eligible task, do exactly one task, write a receipt, stop.
+- **Scheduled executor lane (OE-9):** [`integrations/open-engine-executor/`](integrations/open-engine-executor/README.md) is an opt-in daily routine that claims one low-risk `claude-code` task and actually executes it, exiting through an honest receipt into Agent Review. It is bounded to one claim per run, low risk only, agent-code scoped, and never touches canonical state — the OE-7/OE-8 apply layer stays human/controlled. Run it as a local scheduled task or a machine-independent cloud routine.
 
 For deeper background, see Nate's posts and the Open Engine specification text Brain Bank's adaptation is built against.
 
