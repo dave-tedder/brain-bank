@@ -42,6 +42,7 @@ import {
   assertAgentCanWriteTask,
   assertClaimAllowed,
   assertIntakePromotionAllowed,
+  assertPromotionCallerAllowed,
   assertResumeTransitionAllowed,
   assertReviewApplyAllowed,
   assertStatusHeartbeatAllowed,
@@ -2087,7 +2088,7 @@ server.registerTool(
   {
     title: "Promote Agent Task Intake",
     description:
-      "Human-controlled promotion for one Standing intake draft. Moves it to Agent Todo so normal Queue Runner claim rules can see it. Does not grant explicit approval.",
+      "Human-controlled promotion for one Standing intake draft. Moves it to Agent Todo so normal Queue Runner claim rules can see it. Does not grant explicit approval. promoted_by must name the human operator who approved the promotion — anonymous callers, registered agent codes, and automated-runtime identities are refused.",
     inputSchema: {
       task_id: z.string().uuid(),
       promoted_by: z.string().min(1).optional(),
@@ -2106,6 +2107,14 @@ server.registerTool(
       promoted_by,
     }, "mcp");
     try {
+      const { data: ledgerRows, error: ledgerError } = await supabase
+        .from("agent_task_ledger")
+        .select("agent_code");
+      if (ledgerError) throw ledgerError;
+      assertPromotionCallerAllowed(
+        promoted_by,
+        (ledgerRows ?? []).map((row) => row.agent_code as string),
+      );
       const task = await loadAgentTaskForTool(task_id);
       if (!task) throw new Error(`Task not found: ${task_id}`);
       assertIntakePromotionAllowed(task);
@@ -2120,7 +2129,9 @@ server.registerTool(
       if (error) throw error;
       return textToolResponse({
         receipt: "INTAKE_PROMOTED",
-        audit_event_written: false,
+        // The S3 hardening batch made the SQL function write an AGENT STATUS
+        // promotion audit event (verified Session 265); the flag predated it.
+        audit_event_written: true,
         explicit_approval_granted: false,
         task: data,
       });
