@@ -2,13 +2,16 @@
 // Run: deno test supabase/functions/_shared/metadata-validation.test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  _resetRouteMapCacheForTests,
   _resetSlugCacheForTests,
   coerceMetadata,
   coerceType,
   isOperationCommandCapture,
   loadKnownSlugs,
+  loadRouteMap,
   normalizeTopic,
   recombineHyphenated,
+  routeProjectFromContent,
   shouldExtractActionItems,
 } from "./metadata-validation.ts";
 
@@ -386,4 +389,141 @@ Deno.test("loadKnownSlugs: DB error with no cache returns empty Set", async () =
   const bad = makeFakeSupabase([], new Error("boom"));
   const set = await loadKnownSlugs(bad.client);
   assertEquals(set.size, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Route map (Session 272): deterministic content-phrase → project routing
+// for captures whose LLM-extracted project is null. Unique-match only.
+// ---------------------------------------------------------------------------
+
+function makeRouteMap(entries: Array<[string, string[]]>): Map<string, string[]> {
+  return new Map(entries);
+}
+
+Deno.test("routeProjectFromContent: single phrase match routes", () => {
+  const map = makeRouteMap([["jane-website", ["janedoe.com"]]]);
+  assertEquals(
+    routeProjectFromContent("Fixed the nav menu on janedoe.com today", map),
+    "jane-website",
+  );
+});
+
+Deno.test("routeProjectFromContent: case-insensitive match", () => {
+  const map = makeRouteMap([["seo-agent", ["seo agent"]]]);
+  assertEquals(
+    routeProjectFromContent("Ran the SEO Agent weekly crawl", map),
+    "seo-agent",
+  );
+});
+
+Deno.test("routeProjectFromContent: no phrase match returns null", () => {
+  const map = makeRouteMap([["jane-website", ["janedoe.com"]]]);
+  assertEquals(
+    routeProjectFromContent("Utility bill reminder for the shop", map),
+    null,
+  );
+});
+
+Deno.test("routeProjectFromContent: two distinct projects match returns null", () => {
+  const map = makeRouteMap([
+    ["jane-website", ["janedoe.com"]],
+    ["studio-website", ["janedoestudio.com"]],
+  ]);
+  assertEquals(
+    routeProjectFromContent(
+      "Digest: updated janedoe.com and janedoestudio.com footers",
+      map,
+    ),
+    null,
+  );
+});
+
+Deno.test("routeProjectFromContent: multiple phrases for same project still route", () => {
+  const map = makeRouteMap([
+    ["family-bakery-website", [
+      "doefamilybakery.com",
+      "doe family bakery",
+    ]],
+  ]);
+  assertEquals(
+    routeProjectFromContent(
+      "Doe Family Bakery homepage copy shipped to doefamilybakery.com",
+      map,
+    ),
+    "family-bakery-website",
+  );
+});
+
+Deno.test("routeProjectFromContent: empty and short phrases ignored", () => {
+  const map = makeRouteMap([["jane-website", ["", "  ", "a"]]]);
+  assertEquals(
+    routeProjectFromContent("a note that contains the letter a", map),
+    null,
+  );
+});
+
+Deno.test("routeProjectFromContent: empty map returns null", () => {
+  assertEquals(
+    routeProjectFromContent("anything at all", new Map()),
+    null,
+  );
+});
+
+function makeFakeRouteSupabase(
+  rows: Array<{ slug: string; route_phrases: string[] | null }>,
+  error: unknown = null,
+) {
+  let calls = 0;
+  const client = {
+    from: (_table: string) => ({
+      select: (_cols: string) => {
+        calls += 1;
+        return Promise.resolve({ data: error ? null : rows, error });
+      },
+    }),
+  };
+  return { client, calls: () => calls };
+}
+
+Deno.test("loadRouteMap: returns slug→phrases map, skipping empty rows", async () => {
+  _resetRouteMapCacheForTests();
+  const fake = makeFakeRouteSupabase([
+    { slug: "jane-website", route_phrases: ["janedoe.com"] },
+    { slug: "brain-bank", route_phrases: [] },
+    { slug: "seo", route_phrases: null },
+  ]);
+  const map = await loadRouteMap(fake.client);
+  assertEquals(map.get("jane-website"), ["janedoe.com"]);
+  assertEquals(map.has("brain-bank"), false);
+  assertEquals(map.has("seo"), false);
+  assertEquals(map.size, 1);
+});
+
+Deno.test("loadRouteMap: caches within TTL", async () => {
+  _resetRouteMapCacheForTests();
+  const fake = makeFakeRouteSupabase([
+    { slug: "jane-website", route_phrases: ["janedoe.com"] },
+  ]);
+  await loadRouteMap(fake.client, 300_000);
+  await loadRouteMap(fake.client, 300_000);
+  assertEquals(fake.calls(), 1);
+});
+
+Deno.test("loadRouteMap: DB error returns last good cache", async () => {
+  _resetRouteMapCacheForTests();
+  const good = makeFakeRouteSupabase([
+    { slug: "jane-website", route_phrases: ["janedoe.com"] },
+  ]);
+  await loadRouteMap(good.client, 0);
+  await new Promise((r) => setTimeout(r, 1));
+  const bad = makeFakeRouteSupabase([], new Error("connection refused"));
+  const map = await loadRouteMap(bad.client, 0);
+  assertEquals(map.get("jane-website"), ["janedoe.com"]);
+});
+
+Deno.test("loadRouteMap: DB error with no cache returns empty map", async () => {
+  _resetRouteMapCacheForTests();
+  const bad = makeFakeRouteSupabase([], new Error("boom"));
+  const map = await loadRouteMap(bad.client);
+  assertEquals(map.size, 0);
 });

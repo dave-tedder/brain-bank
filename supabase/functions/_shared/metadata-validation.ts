@@ -37,9 +37,10 @@ export type CoercedMetadata = {
 // pulling in the full @supabase/supabase-js type surface.
 // `select()` returns PromiseLike (not Promise) so both Promise-returning
 // test mocks and supabase-js's thenable PostgrestFilterBuilder satisfy it.
-export type SupabaseLike = {
+// deno-lint-ignore no-explicit-any
+export type SupabaseLike<Row = any> = {
   from: (table: string) => {
-    select: (cols: string) => PromiseLike<{ data: Array<{ slug: string }> | null; error: unknown }>;
+    select: (cols: string) => PromiseLike<{ data: Row[] | null; error: unknown }>;
   };
 };
 
@@ -140,6 +141,70 @@ export async function loadKnownSlugs(
     console.error("loadKnownSlugs error, reusing cache:", err);
     return _slugCache?.set ?? new Set();
   }
+}
+
+// Session 272 route map: deterministic content-phrase → project routing.
+// Fills metadata.project ONLY when the LLM returned null AND exactly one
+// project's route_phrases match the content. The unique-match rule keeps
+// cross-project digests unrouted instead of mis-routed (the Session 203
+// failure class). Phrases live in projects.route_phrases (operator data).
+let _routeMapCache: { map: Map<string, string[]>; loadedAt: number } | null =
+  null;
+
+// Exported for tests only.
+export function _resetRouteMapCacheForTests(): void {
+  _routeMapCache = null;
+}
+
+export async function loadRouteMap(
+  supabase: SupabaseLike<{ slug: string; route_phrases: string[] | null }>,
+  ttlMs: number = 300_000,
+): Promise<Map<string, string[]>> {
+  const now = Date.now();
+  if (_routeMapCache && now - _routeMapCache.loadedAt < ttlMs) {
+    return _routeMapCache.map;
+  }
+  try {
+    const { data, error } = await supabase.from("projects").select(
+      "slug, route_phrases",
+    );
+    if (error) throw error;
+    const map = new Map<string, string[]>();
+    for (const row of data ?? []) {
+      const phrases = (row.route_phrases ?? []).filter(
+        (p): p is string => typeof p === "string" && p.trim().length > 0,
+      );
+      if (row.slug && phrases.length > 0) map.set(row.slug, phrases);
+    }
+    _routeMapCache = { map, loadedAt: now };
+    return map;
+  } catch (err) {
+    console.error("loadRouteMap error, reusing cache:", err);
+    return _routeMapCache?.map ?? new Map();
+  }
+}
+
+// Phrases shorter than this are too ambiguous to route on ("a", "ok").
+const ROUTE_PHRASE_MIN_LENGTH = 4;
+
+export function routeProjectFromContent(
+  content: string,
+  routeMap: Map<string, string[]>,
+): string | null {
+  if (routeMap.size === 0) return null;
+  const haystack = content.toLowerCase();
+  let matched: string | null = null;
+  for (const [slug, phrases] of routeMap) {
+    const hit = phrases.some((p) => {
+      const needle = p.trim().toLowerCase();
+      return needle.length >= ROUTE_PHRASE_MIN_LENGTH &&
+        haystack.includes(needle);
+    });
+    if (!hit) continue;
+    if (matched !== null) return null; // two distinct projects → ambiguous
+    matched = slug;
+  }
+  return matched;
 }
 
 function asStringArray(raw: unknown): string[] {

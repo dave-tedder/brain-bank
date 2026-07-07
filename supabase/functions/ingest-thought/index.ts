@@ -5,6 +5,8 @@ import {
   coerceMetadata,
   isOperationCommandCapture,
   loadKnownSlugs,
+  loadRouteMap,
+  routeProjectFromContent,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { filterCandidatesForDone } from "../_shared/done-filter.ts";
@@ -823,6 +825,16 @@ async function processCaptureMessage(
     ]);
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, messageText);
+    // Route map: fill a null project from content phrases (unique match only).
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        messageText,
+        await loadRouteMap(supabase),
+      );
+      if (coerced.project) {
+        console.log(`route map: project null → ${coerced.project}`);
+      }
+    }
     const finalMetadata = { ...coerced, source: "slack", slack_ts: messageTs } as Record<string, unknown>;
 
     const insertData = {
@@ -894,6 +906,18 @@ async function processCaptureThreadReply(
     ]);
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, replyText);
+    // Route map: fill a null project from content phrases (unique match only).
+    // Routes from the raw reply, not contextualText (combined-context rule:
+    // decisions read the raw input; parent language creates false signal).
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        replyText,
+        await loadRouteMap(supabase),
+      );
+      if (coerced.project) {
+        console.log(`route map: project null → ${coerced.project}`);
+      }
+    }
     const finalMetadata = {
       ...coerced,
       source: "slack",
@@ -996,6 +1020,16 @@ async function processBrainMessage(messageText: string, messageTs: string): Prom
     ]);
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, messageText);
+    // Route map: fill a null project from content phrases (unique match only).
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        messageText,
+        await loadRouteMap(supabase),
+      );
+      if (coerced.project) {
+        console.log(`route map: project null → ${coerced.project}`);
+      }
+    }
     const finalMetadata = { ...coerced, source: "brain-channel", slack_ts: messageTs } as Record<string, unknown>;
 
     const { data: inserted, error } = await supabase.from("thoughts").insert({
