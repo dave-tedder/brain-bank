@@ -140,7 +140,7 @@ If you intend to expose Brain Bank to multiple users or untrusted callers, place
 
 ## Status
 
-**v0.3.0 current stable** (2026-06-30): adds the manual Open Engine task board end-to-end: schema (`agent_tasks` / `agent_task_events` / `agent_task_ledger`), the dashboard `dashboard/tasks` page, 12 guarded MCP task tools with explicit resume / unblock / answer transitions and a status heartbeat guard, and the Queue Runner skill for one-task-at-a-time manual runs. OE-5 (scheduled queue runner) and OE-6 (intake foundation, dashboard intake, action-item intake, thought intake, promotion) are not in this release. See [`CHANGELOG.md`](CHANGELOG.md) for the full entry. Prior releases (v0.2.x, v0.1.x) are summarized there too.
+**v0.4.3 current stable** (2026-07-07): adds `claim_specific_agent_task`, a guarded RPC and MCP tool that claims a *named* Open Engine board task by its ID for human-supervised sessions, under the same guard rails as `claim_next_agent_task` (status, risk ceiling, high-risk approval, atomic lock, claim TTL) but raising an actionable error instead of silently claiming the wrong task. This caps the 0.4.x Open Engine line: v0.4.0 shipped the OE-5/OE-6 scheduled Queue Runner foundation and draft-safe intake, v0.4.1 the OE-7 review/apply contract, the database-enforced state-guard hardening migration, the honest claim-and-hold scheduled runner, and the OE-8 closeout controller, and v0.4.2 the null-project route map, appointment guard, and dashboard credential hardening. Execution stays human-controlled throughout. See [`CHANGELOG.md`](CHANGELOG.md) for the full entry. Prior releases (v0.3.x, v0.2.x, v0.1.x) are summarized there too.
 
 ## Inspired by
 
