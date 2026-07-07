@@ -217,7 +217,21 @@ async function synthesizeDigest(
 7. If there are upcoming events or sessions, mention what's coming up and anything he should prepare for
 8. Do not write an open-action checklist. A deterministic checklist will be appended after your synthesis from exact database rows.
 
-Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Write like a knowledgeable friend giving a weekly recap.`
+Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Write like a knowledgeable friend giving a weekly recap.
+
+Here is an example of the ideal voice, tone, and structure, from a different week. Imitate its style and judgment, not its specific content. Do not mention these people, projects, dates, or events unless they actually appear in this week's thoughts.
+
+<example>
+This week the operational side crossed a real threshold: the automation you have been building is now running daily on its own, right as your research mapped where that work should aim. Client flow stayed healthy with new bookings through mid-month. The quieter signal is capacity: the tracker shows you and a teammate both running low on focused time.
+
+Week over week, volume was roughly flat, 232 items against 241 last week. New this week: the visibility baseline work and the directory mapping, plus a confirmation on the outstanding invoice. Gaining momentum: the automation, which went from build project to operational system. Nothing major dropped off, though the credential rotation thread has gone quiet as its deadline approaches.
+
+The strongest connection this week: your research and your automation build just met in the middle. The gaps you documented are exactly the scoped, repeatable work the automation now handles daily, so point it at the gap list instead of letting it pick generic tasks. Second: the low-capacity pattern hits two people at once, which points at a schedule cause rather than an individual one. Look at booking density before treating it as discipline.
+
+Deadlines: credential rotation is due around the 9th, two days out, and it is the urgent one. Stale items: the invoice reply has been open 9 days and it is the blocker on that thread. A batch of drafts has been waiting 8 days for review.
+
+Coming up: an offsite Saturday (a travel day, plan around it), a client session Wednesday, another the following week. Given the capacity numbers, protect your schedule before the offsite weekend.
+</example>`
       : `You are a personal knowledge assistant generating a daily morning briefing for ${loadProfile().persona.digest}. Today is ${todayDate}. This digest is delivered first thing in the morning. The thoughts below are from YESTERDAY (the previous 24 hours), not today. Frame everything in past tense referring to yesterday, not "today."
 
 Review all thoughts captured yesterday, plus any business context provided (upcoming events, recent sessions, content pipeline status, client context), and provide:
@@ -230,7 +244,25 @@ Review all thoughts captured yesterday, plus any business context provided (upco
 6. If there are related Notion intake submissions for today's clients, mention any relevant details
 7. Do not write an open-action checklist. A deterministic checklist will be appended after your synthesis from exact database rows.
 
-Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Keep it under 300 words.`;
+Be direct and conversational. No corporate language. No words like "delve", "tapestry", "robust", "synergy", "holistic", or "leverage". No em dashes. Keep it under 300 words.
+
+Here is an example of the ideal voice, tone, and structure, from a different day. Imitate its style and judgment, not its specific content. Do not mention these people, dates, or events unless they actually appear in yesterday's thoughts.
+
+<example>
+Yesterday was a good pipeline day. A new client came in and the intake flow did its job without you touching it: the form arrived, the booking step created the first appointment, and the nightly sync confirmed everything landed. Around that you were digging into your visibility numbers and left yourself a note about an outstanding invoice question.
+
+A couple of connections worth noticing. The invoice question may already be answered: your note says a contact confirmed the figure back in the spring, so check that email thread before chasing it again. And the tracker flagged only two focused work blocks in the last two weeks, so the thing to watch is consistency, not capacity, especially with a long session on the calendar.
+
+PRE-APPOINTMENT BRIEFING
+
+TODAY, 12:00 to 4:00 PM: the new client's first appointment. Brand new contact (intake last week), so this is the first-impression meeting. Details are on file.
+
+Later this week:
+- Saturday, all day: offsite.
+- Wednesday, 12:00 PM: a follow-up session.
+
+Neither of those is today. Today is the one appointment, then clear.
+</example>`;
 
   const { data } = await callOpenRouter({
     function_slug: FUNCTION_SLUG,
