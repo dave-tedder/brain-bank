@@ -12,6 +12,7 @@ import {
   truncatePageContentForPrompt,
 } from "./_intake.ts";
 import { applyEdits, parseEditsXml } from "./_section_merge.ts";
+import { selectPagesToCompile } from "./_selection.ts";
 import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import { loadProfile } from "../_shared/profile.ts";
@@ -1362,9 +1363,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
         });
       }
 
-      // Apply per-run cap. Anything past the cap counts as "skipped" — same
-      // semantic as the original loop's batch limit.
-      const candidatesToCompile = eligiblePages.slice(0, maxCompilePerRun);
+      // Apply per-run cap with a fairness lane (Session 281). Reserve ~half the
+      // batch for client + curated-project pages so a deep topic backlog can't
+      // permanently starve entity pages at the front of the oldest-first queue.
+      // Targeted runs (?slug=) select a single page, so no reservation applies.
+      // Anything past the cap counts as "skipped" — same semantic as the
+      // original batch limit.
+      const reserveHighValue = targetSlug ? 0 : Math.floor(maxCompilePerRun / 2);
+      const candidatesToCompile = selectPagesToCompile(
+        eligiblePages,
+        maxCompilePerRun,
+        reserveHighValue,
+      );
       skipped = eligiblePages.length - candidatesToCompile.length;
 
       // Bounded-parallel compile. Keep synthesis concurrency below the common
