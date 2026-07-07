@@ -72,6 +72,9 @@ export function coerceType(raw: unknown): ValidType {
 // Fail OPEN on missing/malformed metadata so real task captures
 // don't get silently swallowed if shape is unexpected.
 export function shouldExtractActionItems(metadata: RawMetadata): boolean {
+  // Slack task-intake captures become Standing agent-task drafts (OE-6);
+  // extracting action items from them too would double-track the same work.
+  if (metadata?.task_intake === true) return false;
   const type = String(metadata?.type ?? "").toLowerCase();
   if (type === "observation" || type === "reference") return false;
   const source = String(metadata?.source ?? "").toLowerCase();
