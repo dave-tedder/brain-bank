@@ -5,9 +5,13 @@ import {
   coerceMetadata,
   isOperationCommandCapture,
   loadKnownSlugs,
+  loadRouteMap,
+  routeProjectFromContent,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
+import { timingSafeEqualStr } from "../_shared/access-key.ts";
 import { filterCandidatesForDone } from "../_shared/done-filter.ts";
+import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
@@ -53,22 +57,8 @@ async function verifySlackSignature(
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-  return constantTimeEqual(hexSig, signature);
-}
-
-// Compares two strings in constant time relative to their length. Defense
-// against timing-side-channel attacks on Slack signature verification: `===`
-// short-circuits at the first byte mismatch, leaking position via response
-// time. Practical attack surface is negligible at this layer (network jitter
-// dominates), but the constant-time comparison is best practice and costs one
-// loop. Always returns false if lengths differ.
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let mismatch = 0;
-  for (let i = 0; i < a.length; i++) {
-    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return mismatch === 0;
+  // Constant-time compare — same shared helper the MCP access-key gate uses.
+  return timingSafeEqualStr(hexSig, signature);
 }
 
 // --- Shared Utilities ---
@@ -410,6 +400,20 @@ async function extractAndStoreActionItems(
       description: String(desc),
       status: "open",
     }))
+    // Appointment guard: unanchored appointment reminders (no still-owed
+    // language, no future-date signal in item or source) are review-only —
+    // they duplicate the booking system, not real backlog.
+    .filter((row) => {
+      if (isUnanchoredAppointmentItem(row.description, content, new Date())) {
+        console.log(
+          `appointment guard: skipped unanchored item: ${
+            row.description.slice(0, LOG_TRUNC)
+          }`,
+        );
+        return false;
+      }
+      return true;
+    })
     .filter((row) => !existingNormalized.has(normalizeActionText(row.description)));
 
   if (rows.length === 0) return;
@@ -823,6 +827,16 @@ async function processCaptureMessage(
     ]);
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, messageText);
+    // Route map: fill a null project from content phrases (unique match only).
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        messageText,
+        await loadRouteMap(supabase),
+      );
+      if (coerced.project) {
+        console.log(`route map: project null → ${coerced.project}`);
+      }
+    }
     const finalMetadata = { ...coerced, source: "slack", slack_ts: messageTs } as Record<string, unknown>;
 
     const insertData = {
@@ -894,6 +908,18 @@ async function processCaptureThreadReply(
     ]);
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, replyText);
+    // Route map: fill a null project from content phrases (unique match only).
+    // Routes from the raw reply, not contextualText (combined-context rule:
+    // decisions read the raw input; parent language creates false signal).
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        replyText,
+        await loadRouteMap(supabase),
+      );
+      if (coerced.project) {
+        console.log(`route map: project null → ${coerced.project}`);
+      }
+    }
     const finalMetadata = {
       ...coerced,
       source: "slack",
@@ -996,6 +1022,16 @@ async function processBrainMessage(messageText: string, messageTs: string): Prom
     ]);
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, messageText);
+    // Route map: fill a null project from content phrases (unique match only).
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        messageText,
+        await loadRouteMap(supabase),
+      );
+      if (coerced.project) {
+        console.log(`route map: project null → ${coerced.project}`);
+      }
+    }
     const finalMetadata = { ...coerced, source: "brain-channel", slack_ts: messageTs } as Record<string, unknown>;
 
     const { data: inserted, error } = await supabase.from("thoughts").insert({

@@ -55,3 +55,15 @@ node --check integrations/action-item-triage/triage-lib.mjs
 ```
 
 The pure library has no file, network, environment, or process side effects.
+
+## Unknown-project reroute report
+
+`reroute-report.mjs` is a READ-ONLY companion: it lists every open action item
+whose source thought has a null/`unknown` `metadata.project`, applies the
+`projects.route_phrases` route map in dry run (same unique-match semantics the
+capture paths use live via `_shared/metadata-validation.ts`), and writes an
+approval packet to `out/reroute-report-<date>.md` with exact thought IDs and
+the apply-shape SQL. Nothing is written to the database; applying requires the
+operator running the approved UPDATE lines. Pure helpers live in
+`reroute-lib.mjs` (`node --test reroute.test.mjs`). Same `.env` as `triage.mjs`
+(only the Supabase pair is needed).

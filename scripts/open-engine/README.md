@@ -26,6 +26,7 @@ node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/f
 node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-standing-risk.json $REG --expect HELD
 node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-mixed.json $REG --expect MIXED
 node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-unknown-route.json $REG --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-inline-headings.json $REG --expect APPLYABLE
 ```
 
 A receipt must carry the canonical 8 sections, in the order the queue-runner
@@ -33,6 +34,14 @@ skill documents (`Work summary:`, `Verification:`, `Touched files or
 records:`, `Limitations:`, `Tracker draft:`, `Session-log draft:`, `Brain Bank
 capture draft:`, `Follow-up recommendation:`). A receipt missing a section is
 held out of auto-closeout, not guessed at.
+
+Heading grammar: a canonical heading is matched at line start,
+case-insensitive, with the section content either inline after the colon
+("Limitations: none beyond ...") or on the following lines. A heading string
+appearing mid-sentence never opens a section — the line-start anchor is what
+keeps a dishonest receipt whose prose merely mentions "Verification:" from
+parsing as sectioned. `closeout-controller-inline-headings.json` exercises the
+inline-content form.
 
 ### Review-note augmentation
 

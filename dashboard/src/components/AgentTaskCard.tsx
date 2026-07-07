@@ -8,6 +8,13 @@ import {
   type AgentTaskStatus,
 } from "@/lib/agent-tasks";
 import {
+  isGenericStatusMoveDisabled,
+  shouldShowLinkedActionResolutionControl,
+  shouldShowReviewApplyControls,
+} from "@/lib/agent-task-review-controls";
+import {
+  applyReviewedTask,
+  createFollowUpDraft,
   moveAgentTaskStatus,
   promoteAgentTaskIntake,
   updateAgentTask,
@@ -98,20 +105,26 @@ export default function AgentTaskCard({
       </div>
 
       <div className="mt-4 flex gap-2 flex-wrap">
-        {AGENT_TASK_STATUSES.map((status) => (
-          <StatusButton
-            key={status}
-            task={task}
-            target={status}
-            currentPath={currentPath}
-            disabled={
-              status === task.status ||
-              (status === "Agent Working" && approvalNeeded) ||
-              (task.status === "Standing" && status === "Agent Todo")
-            }
-          />
-        ))}
+        {AGENT_TASK_STATUSES.map((status) =>
+          task.status === "Agent Review" && status === "Agent Done" ? null : (
+            <StatusButton
+              key={status}
+              task={task}
+              target={status}
+              currentPath={currentPath}
+              disabled={isGenericStatusMoveDisabled({
+                currentStatus: task.status,
+                targetStatus: status,
+                approvalNeeded,
+              })}
+            />
+          )
+        )}
       </div>
+
+      {shouldShowReviewApplyControls(task.status) && (
+        <ReviewApplyControls task={task} currentPath={currentPath} />
+      )}
 
       {events.length > 0 && (
         <div className="mt-4 border-t border-[var(--border)] pt-3">
@@ -168,6 +181,100 @@ export default function AgentTaskCard({
         </form>
       </details>
     </article>
+  );
+}
+
+function ReviewApplyControls({
+  task,
+  currentPath,
+}: {
+  task: AgentTask;
+  currentPath: string;
+}) {
+  const showLinkedResolve = shouldShowLinkedActionResolutionControl(task);
+
+  return (
+    <div className="mt-4 border border-[var(--phosphor-glow)] bg-[rgba(95,247,157,0.05)] px-3 py-3">
+      <h3 className="font-terminal text-sm uppercase tracking-wider text-[var(--text-primary)]">
+        review apply
+      </h3>
+
+      <form action={applyReviewedTask} className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+        <input type="hidden" name="task_id" value={task.id} />
+        <input type="hidden" name="redirect_path" value={currentPath} />
+        <input type="hidden" name="resolution" value="accepted" />
+        <input type="hidden" name="applied_by" value="dashboard" />
+        <Field name="note" label="apply note" defaultValue="" />
+        {showLinkedResolve && (
+          <label className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[var(--text-muted)]">
+            <input name="resolve_linked_action_item" type="checkbox" />
+            resolve linked action item
+          </label>
+        )}
+        <Textarea name="work_summary" label="work summary" defaultValue="" />
+        <Textarea name="verification" label="verification" defaultValue="" />
+        <Textarea name="touched_files_or_records" label="touched files or records" defaultValue="" />
+        <Textarea name="tracker_draft" label="tracker draft" defaultValue="" />
+        <Textarea name="session_log_draft" label="session-log draft" defaultValue="" />
+        <Textarea name="open_brain_capture_draft" label="Open Brain capture draft" defaultValue="" />
+        <div className="md:col-span-2">
+          <button type="submit" className="task-button">
+            [APPLY ACCEPTED]
+          </button>
+        </div>
+      </form>
+
+      <form action={createFollowUpDraft} className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-[var(--border)] pt-3">
+        <input type="hidden" name="parent_task_id" value={task.id} />
+        <input type="hidden" name="redirect_path" value={currentPath} />
+        <input type="hidden" name="agent_code" value={task.agent_code ?? ""} />
+        <input type="hidden" name="project_slug" value={task.project_slug ?? ""} />
+        <input type="hidden" name="requested_by" value="dashboard" />
+        <Field name="desired_outcome" label="follow-up outcome" defaultValue="" required />
+        <Textarea name="context" label="follow-up context" defaultValue="" required />
+        <div className="md:col-span-2">
+          <button type="submit" className="task-button">
+            [CREATE FOLLOW-UP DRAFT]
+          </button>
+        </div>
+      </form>
+
+      <form action={applyReviewedTask} className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-2 border-t border-[var(--border)] pt-3">
+        <input type="hidden" name="task_id" value={task.id} />
+        <input type="hidden" name="redirect_path" value={currentPath} />
+        <input type="hidden" name="resolution" value="accepted_with_follow_up" />
+        <input type="hidden" name="applied_by" value="dashboard" />
+        <Field name="child_task_ids" label="child task ids" defaultValue="" required />
+        <Field name="note" label="apply note" defaultValue="" />
+        <Textarea name="work_summary" label="work summary" defaultValue="" />
+        <Textarea name="verification" label="verification" defaultValue="" />
+        <Textarea name="tracker_draft" label="tracker draft" defaultValue="" />
+        <Textarea name="session_log_draft" label="session-log draft" defaultValue="" />
+        <Textarea name="open_brain_capture_draft" label="Open Brain capture draft" defaultValue="" />
+        <div className="md:col-span-2">
+          <button type="submit" className="task-button">
+            [APPLY WITH FOLLOW-UP]
+          </button>
+        </div>
+      </form>
+
+      <form action={moveAgentTaskStatus} className="mt-4 grid grid-cols-1 md:grid-cols-[1fr_auto] gap-2 border-t border-[var(--border)] pt-3">
+        <input type="hidden" name="task_id" value={task.id} />
+        <input type="hidden" name="target_status" value="Agent Working" />
+        <input type="hidden" name="current_status" value={task.status} />
+        <input type="hidden" name="agent_code" value={task.agent_code ?? ""} />
+        <input type="hidden" name="redirect_path" value={currentPath} />
+        <input
+          name="reason"
+          aria-label="return for work note"
+          placeholder="return for work note"
+          className="task-input h-9 text-[10px]"
+        />
+        <button type="submit" className="task-button">
+          [RETURN FOR WORK]
+        </button>
+      </form>
+    </div>
   );
 }
 
