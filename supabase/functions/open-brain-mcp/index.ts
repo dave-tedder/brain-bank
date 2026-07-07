@@ -10,7 +10,9 @@ import {
   coerceMetadata,
   isOperationCommandCapture,
   loadKnownSlugs,
+  loadRouteMap,
   normalizeTopic,
+  routeProjectFromContent,
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
@@ -940,6 +942,16 @@ async function handleRestCapture(req: Request): Promise<Response> {
     ]);
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
+    // Route map: fill a null project from content phrases (unique match only).
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        content,
+        await loadRouteMap(supabase),
+      );
+      if (coerced.project) {
+        console.log(`route map: project null → ${coerced.project}`);
+      }
+    }
     const extractedTopics = coerced.topics;
     const mergedTopics = Array.from(
       new Set([...extractedTopics, ...explicitTags]),
@@ -2826,6 +2838,16 @@ server.registerTool(
       ]);
       const knownSlugs = await loadKnownSlugs(supabase);
       const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
+      // Route map: fill a null project from content phrases (unique match only).
+      if (!coerced.project) {
+        coerced.project = routeProjectFromContent(
+          content,
+          await loadRouteMap(supabase),
+        );
+        if (coerced.project) {
+          console.log(`route map: project null → ${coerced.project}`);
+        }
+      }
       const extractedTopics = coerced.topics;
       const mergedTopics = Array.from(
         new Set([...extractedTopics, ...explicitTags]),
