@@ -8,6 +8,26 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-07
+
+Brain Bank v0.4.4 adds the OE-9 scheduled executor lane and a Slack task-intake surface, plus quieter capture and wiki-quality improvements. The important shift: for the first time an autonomous runner can *execute* board work, not just claim-and-hold it — but only one low-risk task per day, and canonical state (trackers, session logs, action items) still only changes through the human-controlled OE-7/OE-8 apply layer.
+
+### Added
+
+- **OE-9 scheduled executor lane.** New `integrations/open-engine-executor/` ships a routine prompt and setup notes for an opt-in daily routine that claims one low-risk `claude-code` `Agent Todo` task and actually executes it, exiting through an honest 8-section receipt into `Agent Review`. It is bounded to one claim per run, low risk only, agent-code scoped, and never writes canonical state — the OE-7 review and OE-8 closeout apply layer stays human/controlled. Run it as a local scheduled task or a machine-independent cloud routine. This is the first Brain Bank lane where a scheduled runner does the work rather than holding it for a human; the README Open Engine section and status callout are updated to reflect that execution (not just claiming) is now opt-in for low-risk work.
+- **Slack `task:` intake surface.** A Slack message prefixed `task:` now creates a draft Standing packet on the Open Engine board via `_shared/slack-task-intake.ts` (gated in `_shared/metadata-validation.ts`, wired into `ingest-thought`). Draft-only — nothing is promoted to `Agent Todo` without a human. Lets you queue work from wherever you already are.
+- **Compile-pages fairness lane.** New `_shared/`-style `compile-pages/_selection.ts` splits each scheduled compile's page budget into a high-value lane (client + curated-project pages) and a topic-backlog lane, oldest-first, with unused slots spilling between them. Deep, high-volume topic pages can no longer permanently occupy the oldest-first queue and starve client and project pages behind them. Targeted (non-scheduled) compiles are unaffected.
+
+### Changed
+
+- **Digest voice anchors.** The daily and weekly digest system prompts each gain one domain-neutral few-shot exemplar, tagged style-only (imitate voice, not content). Digests read a little more like a person wrote them without leaking example content into your data.
+- **Client-name trimming on ingest.** The REST `/client` path and the `add_client` MCP tool now trim surrounding whitespace before the dedup lookup and insert, and reject whitespace-only names. A trailing space could previously defeat the `ilike` dedup and let a daily sync recreate a duplicate client row plus a stub wiki page every run.
+
+### Upgrade Notes
+
+- Deploy the updated `ingest-thought`, `open-brain-mcp`, `brain-digest`, and `compile-pages` functions.
+- The OE-9 executor lane is opt-in: it does nothing until you wire up the routine in `integrations/open-engine-executor/`. No schema migration is required for this release.
+
 ## [0.4.3] - 2026-07-07
 
 Brain Bank v0.4.3 adds a single Open Engine tool: a guarded path to claim a *named* board task by its ID, for human-supervised interactive sessions. Everything else is unchanged from v0.4.2.

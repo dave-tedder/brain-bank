@@ -14,6 +14,10 @@ import { filterCandidatesForDone } from "../_shared/done-filter.ts";
 import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
+import {
+  buildSlackTaskIntakeRecord,
+  parseSlackTaskIntake,
+} from "../_shared/slack-task-intake.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 
 declare const EdgeRuntime: {
@@ -837,7 +841,17 @@ async function processCaptureMessage(
         console.log(`route map: project null → ${coerced.project}`);
       }
     }
-    const finalMetadata = { ...coerced, source: "slack", slack_ts: messageTs } as Record<string, unknown>;
+    // OE-6 Slack intake: "task: <body>" captures normally AND creates a
+    // Standing agent-task draft after insert. task_intake=true suppresses
+    // action-item extraction (shouldExtractActionItems) so the same work
+    // isn't double-tracked as draft + action item.
+    const intake = parseSlackTaskIntake(messageText);
+    const finalMetadata = {
+      ...coerced,
+      source: "slack",
+      slack_ts: messageTs,
+      ...(intake.isIntake ? { task_intake: true } : {}),
+    } as Record<string, unknown>;
 
     const insertData = {
       content: messageText,
@@ -864,10 +878,36 @@ async function processCaptureMessage(
       confirmation += ` - ${meta.topics.join(", ")}`;
     if (Array.isArray(meta.people) && meta.people.length > 0)
       confirmation += `\nPeople: ${meta.people.join(", ")}`;
-    if (Array.isArray(meta.action_items) && meta.action_items.length > 0)
+    // Intake captures store no action items (task_intake gate), so echoing
+    // the LLM-extracted list would claim tracking that didn't happen.
+    if (!intake.isIntake && Array.isArray(meta.action_items) && meta.action_items.length > 0)
       confirmation += `\nAction items: ${meta.action_items.join("; ")}`;
     if (resolved.length > 0)
       confirmation += `\n:white_check_mark: Auto-resolved: ${resolved.join("; ")}`;
+
+    if (intake.isIntake) {
+      const record = buildSlackTaskIntakeRecord({
+        body: intake.body,
+        thoughtId: inserted.id,
+        projectSlug: typeof meta.project === "string" && meta.project
+          ? meta.project
+          : null,
+      });
+      const { data: draft, error: draftError } = await supabase
+        .from("agent_tasks")
+        .insert(record)
+        .select("id")
+        .single();
+      if (draftError || !draft) {
+        console.error("Slack task intake draft insert error:", draftError);
+        confirmation += `\n:warning: Task draft NOT created: ${
+          draftError?.message ?? "unknown error"
+        }`;
+      } else {
+        confirmation +=
+          `\n:clipboard: Task draft created (Standing): ${draft.id} — promote from the /tasks board when ready.`;
+      }
+    }
 
     await replyInSlack(channel, messageTs, confirmation);
   } catch (err) {
