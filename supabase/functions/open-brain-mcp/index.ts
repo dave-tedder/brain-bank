@@ -2267,6 +2267,69 @@ server.registerTool(
 );
 
 server.registerTool(
+  "claim_specific_agent_task",
+  {
+    title: "Claim Specific Agent Task",
+    description:
+      "Atomically claim a NAMED Agent Todo task by task_id, for a human-supervised session that already knows exactly which board task it wants (unlike claim_next_agent_task, which only claims the oldest eligible task for an agent code). Same guard rails as claim_next_agent_task (status, risk ceiling, high-risk explicit approval); raises a specific error naming why the task couldn't be claimed instead of silently returning nothing.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      agent_code: z.string().min(1),
+      max_risk: z.enum(["low", "medium", "high"]).optional().describe(
+        "Highest task risk this claim may accept. Defaults to medium.",
+      ),
+    },
+  },
+  async (
+    { task_id, agent_code, max_risk }: {
+      task_id: string;
+      agent_code: string;
+      max_risk?: AgentTaskRisk;
+    },
+  ) => {
+    const effectiveMaxRisk = isAgentTaskRisk(max_risk || "")
+      ? max_risk
+      : "medium";
+    logToolInvocation("claim_specific_agent_task", {
+      task_id,
+      agent_code,
+      max_risk: effectiveMaxRisk,
+    }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc(
+        "claim_specific_agent_task",
+        {
+          p_task_id: task_id,
+          p_agent_code: agent_code,
+          p_max_risk: effectiveMaxRisk,
+        },
+      );
+      if (error) throw error;
+      const tasks = Array.isArray(data) ? data : data ? [data] : [];
+      if (tasks.length === 0) {
+        return textToolResponse({
+          receipt: "NO_ELIGIBLE_TASK",
+          task_id,
+          agent_code,
+          max_risk: effectiveMaxRisk,
+          task: null,
+        });
+      }
+      return textToolResponse({
+        receipt: "AGENT CLAIMED",
+        agent_code,
+        max_risk: effectiveMaxRisk,
+        task: tasks[0],
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error claiming specific agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
   "update_agent_task",
   {
     title: "Update Agent Task",
