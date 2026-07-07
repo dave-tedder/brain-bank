@@ -10,6 +10,7 @@ import {
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { filterCandidatesForDone } from "../_shared/done-filter.ts";
+import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
@@ -412,6 +413,20 @@ async function extractAndStoreActionItems(
       description: String(desc),
       status: "open",
     }))
+    // Appointment guard: unanchored appointment reminders (no still-owed
+    // language, no future-date signal in item or source) are review-only —
+    // they duplicate the booking system, not real backlog.
+    .filter((row) => {
+      if (isUnanchoredAppointmentItem(row.description, content, new Date())) {
+        console.log(
+          `appointment guard: skipped unanchored item: ${
+            row.description.slice(0, LOG_TRUNC)
+          }`,
+        );
+        return false;
+      }
+      return true;
+    })
     .filter((row) => !existingNormalized.has(normalizeActionText(row.description)));
 
   if (rows.length === 0) return;
