@@ -8,6 +8,19 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-07-07
+
+Brain Bank v0.4.3 adds a single Open Engine tool: a guarded path to claim a *named* board task by its ID, for human-supervised interactive sessions. Everything else is unchanged from v0.4.2.
+
+### Added
+
+- **Claim a specific board task by ID.** New `claim_specific_agent_task(p_task_id, p_agent_code, p_max_risk)` RPC (migration `20260707_claim_specific_agent_task.sql`) and the matching guarded MCP tool `claim_specific_agent_task`. `claim_next_agent_task` only claims the oldest eligible `Agent Todo` row for an agent code, so an operator who wants to execute one specific task live — with older, unrelated tasks ahead of it in the queue — had no way to claim the one they meant. The new path claims by exact `task_id` under the same guard rails as `claim_next_agent_task` (status must be `Agent Todo`, archived rows excluded, agent-code match, risk within `max_risk`, high-risk requires `explicit_approval`, atomic `FOR UPDATE SKIP LOCKED`, 60-minute claim TTL, `AGENT CLAIMED` event plus ledger heartbeat). Because the caller committed to a specific ID, a claim that can't proceed raises a specific, actionable error (not found/locked, archived, wrong status, assigned to a different agent, risk over ceiling, or high-risk without approval) instead of silently returning nothing. `service_role`-only; scheduled/autonomous runners keep using `claim_next_agent_task` so oldest-eligible fairness holds.
+
+### Upgrade Notes
+
+- Apply migration `20260707_claim_specific_agent_task.sql`.
+- Deploy the updated `open-brain-mcp` function.
+
 ## [0.4.2] - 2026-07-06
 
 Brain Bank v0.4.2 is a capture-quality and security-hardening batch. Captures whose LLM-extracted project is null can now be routed deterministically from operator-maintained content phrases, appointment-shaped noise stays out of the action-item backlog, the dashboard login and Edge Function credential gates harden their compares, and the closeout controller's receipt grammar accepts the inline heading form real receipts write.
