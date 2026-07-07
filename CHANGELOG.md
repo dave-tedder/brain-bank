@@ -8,6 +8,32 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-06
+
+Brain Bank v0.4.2 is a capture-quality and security-hardening batch. Captures whose LLM-extracted project is null can now be routed deterministically from operator-maintained content phrases, appointment-shaped noise stays out of the action-item backlog, the dashboard login and Edge Function credential gates harden their compares, and the closeout controller's receipt grammar accepts the inline heading form real receipts write.
+
+### Added
+
+- **Route map for null-project captures.** New `projects.route_phrases text[]` column (migration `20260706_projects_route_phrases.sql`) plus `loadRouteMap` / `routeProjectFromContent` in `_shared/metadata-validation.ts`, wired after metadata coercion in all five capture paths. Routing fills `metadata.project` ONLY when the LLM returned null AND exactly one project's phrases match the content — two matching projects means no route, so cross-project digests stay unrouted instead of mis-routed. Phrase values are operator data you seed yourself.
+- **Appointment extraction guard.** New `_shared/appointment-guard.ts` shared by both capture files: appointment-shaped extracted action items are skipped unless the item or its source carries still-owed language or a future-date signal. Past/undated appointment reminders duplicate your booking system, not your backlog. Extend the shape regex with your own booking vocabulary if it differs.
+- **Unknown-project reroute report.** `integrations/action-item-triage/reroute-report.mjs` is a read-only dry run of the route map over open action items whose source thought has a null/unknown project. It writes an approval packet (exact IDs plus apply-shape SQL) to gitignored `out/`; nothing is written to the database.
+- **Dashboard login rate limit.** Per-IP limit of 5 failed login attempts per 15 minutes (in-memory, single-instance scope documented), a constant-time password compare in the login action, and `poweredByHeader: false`.
+- **Dashboard Open Engine review controls.** The `/tasks` board gains the OE-7 review controls for applying `Agent Review` work through `apply_agent_task_review` from the dashboard.
+
+### Fixed / Security
+
+- **Constant-time credential compares.** New `_shared/access-key.ts` ships `timingSafeEqualStr` (byte-wise, no early exit, length mismatch still walks the caller-supplied input); the MCP/REST `x-brain-key` gates and Slack signature verification now use it.
+- **PostgREST `.or()` free-text escaping.** Free-text search terms are stripped of filter-DSL reserved characters (comma, parens, quotes, backslash) before interpolation at the four search sites, closing a latent 500 on queries containing commas.
+- **UUID param validation.** Documented UUID tool params (`get_thought_by_id` / `get_thought_edges` ids, `client_id`, `content_id`) are now `z.string().uuid()`, which also de-risks their interpolation into edge filters.
+- **Receipt parser accepts inline heading content.** The closeout controller's heading grammar now captures content written inline after the colon (`Limitations: none beyond ...`) as the section's first line. The line-start anchor is unchanged, so heading strings appearing mid-sentence still never open a section.
+- **Promotion caller guard.** `promote_agent_task_intake` refuses anonymous callers, registered agent codes, and automated-runtime identities (`queue-runner`, `scheduled`, `cron`, ...); promotion stays a named-human action, and the response now reports `audit_event_written: true`.
+
+### Upgrade Notes
+
+- Apply migration `20260706_projects_route_phrases.sql`, then seed `projects.route_phrases` for the projects you want routable (lowercased domains and product names work well).
+- Deploy the updated `ingest-thought` and `open-brain-mcp` functions together.
+- Optionally set the `DASHBOARD_ORIGIN` secret to your dashboard origin to close browser CORS to that single origin (server-side callers are unaffected).
+
 ## [0.4.1] - 2026-07-06
 
 Brain Bank v0.4.1 is the post-audit hardening and reliability batch: the Open Engine board gains a formal review/apply layer, database-enforced state guards, an honest claim-and-hold scheduled runner, and a closeout controller, while the capture and wiki-compile paths pick up the reliability fixes proven live upstream. Execution stays human-controlled throughout — the scheduled path can now only claim, validate, and hold.
