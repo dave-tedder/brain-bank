@@ -6,6 +6,7 @@ import {
   capBacklinkSlugs,
   type CompileSelectionMode,
   type CompilePromptDiagnostics,
+  fitCompileThoughtsToBudget,
   OMITTED_SECTION_MARKER,
   type PageTruncationResult,
   selectCompileThoughts,
@@ -45,14 +46,23 @@ const SOFT_COMPILE_PROMPT_CHAR_LIMIT = 24_000;
 const FALLBACK_CATCHUP_THOUGHT_LIMIT = 1;
 const FALLBACK_CATCHUP_SOURCE_CHAR_LIMIT = 4_000;
 const NO_H2_CATCHUP_THOUGHT_LIMIT = 1;
-// Edit-mode page-side truncation (CAP-1): when the assembled prompt is still
-// over the soft limit after the thought-slice fallback, shrink the page VIEW
-// (keep all H2 headers + newest section bodies) and cap the backlink list.
-// 12K page view + ~2.6K system prompt + <=4K fallback thoughts + ~1.6K capped
-// backlinks lands well under the soft limit with margin for supplemental
-// context. The stored page body is never modified by this.
+// Edit-mode page-side truncation (CAP-1): when the assembled prompt is over
+// the soft limit, FIRST shrink the page VIEW (keep all H2 headers + newest
+// section bodies) and cap the backlink list; only fall back to a smaller
+// thought slice if the prompt is still over afterwards (Session 285 reorder —
+// page-side reduction is lossless in edit mode, dropping thoughts stalls
+// deep-backlog drain). 12K page view + ~2.8K system prompt + ~1.6K capped
+// backlinks leaves ~9K+ for the thought slice under the 24K soft limit.
+// The stored page body is never modified by this.
 const EDIT_PROMPT_PAGE_VIEW_CHAR_LIMIT = 12_000;
 const EDIT_PROMPT_BACKLINK_SLUG_CAP = 40;
+// Budget-fit slice cap (Session 285). Synthesis latency scales with intake
+// (Sonnet writes bigger edit blocks), and the 75s LLM timeout is the binding
+// constraint, not prompt size: a 16-thought budget-fit slice on topic/tattoo
+// timed out at 75s while the same page with 8 thoughts compiled in 48s.
+// 8/run drains a deep backlog ~8x faster than the old 1-thought fallback
+// with comfortable timeout headroom.
+const BUDGET_FIT_THOUGHT_LIMIT = 8;
 const COMPILE_PROMPT_CHAR_LIMIT = 120_000;
 const STEADY_THOUGHT_LIMIT = 50;
 const CATCHUP_RECENCY_WINDOW_MS = 2 * 24 * 60 * 60 * 1000;
@@ -667,25 +677,135 @@ On a new line after BACKLINKS, output SOURCE_THOUGHTS: followed by a comma-separ
 Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, realm, landscape (metaphorical), inked, inking. No em dashes. No emojis.`;
     }
 
-    let userContent = isNewPage
-      ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
-      : `Current page content:\n\n${page.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`;
+    // Prompt view state. CAP-1 page-side truncation may swap in a shrunken
+    // page view + capped backlink list; every prompt rebuild below (including
+    // the thought-slice fallback's) must use whichever view is active, so the
+    // view lives in mutable locals shared by buildUserContent().
+    let activePageView = page.content;
+    let activeBacklinkList = backlinkList;
+    let pageTruncation: PageTruncationResult | undefined;
+    let backlinksCapped = false;
+    let backlinkSlugsShown: number | undefined;
 
-    promptDiagnostics = buildCompilePromptDiagnostics({
-      isCatchup: selectionIsCatchup,
-      thoughts: newThoughts,
-      pageContent: page.content ?? "",
-      userContent,
-      systemPrompt,
-      backlinkList,
-      selectionMode,
-      thoughtLimit: activeThoughtLimit,
-      sourceCharLimit: activeSourceCharLimit,
-      isNewPage,
-      hasH2,
-      useEditMode,
-    });
+    // newThoughts is non-null past the empty-guard above; the closures can't
+    // see that narrowing, hence the assertions.
+    const buildUserContent = () =>
+      isNewPage
+        ? `Source material (${newThoughts!.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${activeBacklinkList}`
+        : `Current page content:\n\n${activePageView}\n\n---\n\nNew thoughts to integrate (${newThoughts!.length}):\n\n${newThoughtsText}${supplementalContext}${activeBacklinkList}`;
 
+    let userContent = buildUserContent();
+
+    const snapshotDiagnostics = (extra: {
+      fallbackApplied?: boolean;
+      fallbackReason?: string;
+      initialThoughtCount?: number;
+      initialThoughtChars?: number;
+      initialPromptChars?: number;
+    } = {}) =>
+      buildCompilePromptDiagnostics({
+        isCatchup: selectionIsCatchup,
+        thoughts: newThoughts!,
+        pageContent: page.content ?? "",
+        userContent,
+        systemPrompt,
+        backlinkList: activeBacklinkList,
+        selectionMode,
+        thoughtLimit: activeThoughtLimit,
+        sourceCharLimit: activeSourceCharLimit,
+        isNewPage,
+        hasH2,
+        useEditMode,
+        pageTruncation,
+        backlinksCapped,
+        backlinkSlugsShown,
+        ...extra,
+      });
+
+    promptDiagnostics = snapshotDiagnostics();
+
+    // Edit-mode page-side truncation (CAP-1) runs BEFORE the thought-slice
+    // fallback. On deep topic pages it is the page body + backlink list that
+    // blow the soft limit, and shrinking them is lossless in edit mode (all
+    // H2 headers stay addressable, applyEdits below still merges into the
+    // full stored body) — whereas dropping thoughts costs catch-up progress.
+    // With the old order the fallback fired on the pre-truncation prompt
+    // size and clamped every deep page to 1 thought per run: topic/tattoo
+    // was draining its 489-thought backlog at one thought per day (Session
+    // 285). Applies to catchup, steady, and targeted runs alike.
+    if (
+      useEditMode &&
+      promptDiagnostics.prompt_chars > SOFT_COMPILE_PROMPT_CHAR_LIMIT
+    ) {
+      const cappedBacklinks = capBacklinkSlugs(
+        otherSlugs,
+        page.backlinks ?? [],
+        EDIT_PROMPT_BACKLINK_SLUG_CAP,
+      );
+      const truncation = truncatePageContentForPrompt(
+        page.content,
+        EDIT_PROMPT_PAGE_VIEW_CHAR_LIMIT,
+      );
+      if (truncation.truncationApplied || cappedBacklinks.capped) {
+        systemPrompt +=
+          `\n\nNote: some section bodies in the current page are replaced with "${OMITTED_SECTION_MARKER}" to fit the prompt budget. Their H2 headers are real and addressable, but never emit "update" or "prepend" for an omitted section; use "append" on it, or target a fully shown section.`;
+        activePageView = truncation.content;
+        activeBacklinkList = cappedBacklinks.slugs.length > 0
+          ? `\n\nExisting pages that could be cross-referenced (use these slugs for backlinks):\n${
+            cappedBacklinks.slugs.join("\n")
+          }`
+          : "";
+        pageTruncation = truncation;
+        backlinksCapped = cappedBacklinks.capped;
+        backlinkSlugsShown = cappedBacklinks.slugs.length;
+        const preTruncationPromptChars = promptDiagnostics.prompt_chars;
+        userContent = buildUserContent();
+        promptDiagnostics = snapshotDiagnostics({
+          initialPromptChars: preTruncationPromptChars,
+        });
+      }
+    }
+
+    // Budget-fit re-selection (Session 285): if a catch-up edit-mode prompt
+    // is still over the soft limit after page-side reduction, size the
+    // thought slice to the remaining budget instead of letting the legacy
+    // fallback collapse it to one thought per run. Worst case (one giant
+    // thought) degrades to the same single thought the fallback would pick.
+    if (
+      useEditMode &&
+      selectionMode === "catchup" &&
+      promptDiagnostics.prompt_chars > SOFT_COMPILE_PROMPT_CHAR_LIMIT
+    ) {
+      const preFitThoughtCount = newThoughts.length;
+      const preFitThoughtChars = promptDiagnostics.thought_chars;
+      const preFitPromptChars = promptDiagnostics.initial_prompt_chars ??
+        promptDiagnostics.prompt_chars;
+      const fit = fitCompileThoughtsToBudget(fetchedThoughts, {
+        promptChars: promptDiagnostics.prompt_chars,
+        thoughtsTextChars: newThoughtsText.length,
+        softPromptCharLimit: SOFT_COMPILE_PROMPT_CHAR_LIMIT,
+        maxCount: BUDGET_FIT_THOUGHT_LIMIT,
+      });
+      newThoughts = fit.thoughts;
+      selectionMode = "catchup_budget_fit";
+      activeThoughtLimit = BUDGET_FIT_THOUGHT_LIMIT;
+      activeSourceCharLimit = fit.maxChars;
+      newThoughtsText = buildNewThoughtsText(newThoughts);
+      userContent = buildUserContent();
+      promptDiagnostics = snapshotDiagnostics({
+        fallbackApplied: true,
+        fallbackReason: "prompt_soft_limit",
+        initialThoughtCount: preFitThoughtCount,
+        initialThoughtChars: preFitThoughtChars,
+        initialPromptChars: preFitPromptChars,
+      });
+    }
+
+    // Legacy thought-slice fallback: no-H2 migration pages (always collapse
+    // to one thought for the lazy full-rewrite migration) and non-edit-mode
+    // catch-up prompts over the soft limit. Edit-mode pages that went through
+    // budget-fit above no longer match (selectionMode changed), so this
+    // cannot undo their slice.
     const fallback = applyCatchupPromptFallback(newThoughts, {
       originalThoughts: fetchedThoughts,
       selectionMode,
@@ -703,84 +823,16 @@ Do not use the words: delve, tapestry, robust, synergy, holistic, leverage, real
       activeThoughtLimit = fallback.thoughtLimit ?? activeThoughtLimit;
       activeSourceCharLimit = fallback.sourceCharLimit ?? activeSourceCharLimit;
       newThoughtsText = buildNewThoughtsText(newThoughts);
-      userContent = isNewPage
-        ? `Source material (${newThoughts.length} thoughts):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`
-        : `Current page content:\n\n${page.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${backlinkList}`;
-      promptDiagnostics = buildCompilePromptDiagnostics({
-        isCatchup: selectionIsCatchup,
-        thoughts: newThoughts,
-        pageContent: page.content ?? "",
-        userContent,
-        systemPrompt,
-        backlinkList,
-        selectionMode,
-        thoughtLimit: activeThoughtLimit,
-        sourceCharLimit: activeSourceCharLimit,
+      userContent = buildUserContent();
+      promptDiagnostics = snapshotDiagnostics({
         fallbackApplied: true,
         fallbackReason: fallback.fallbackReason,
         initialThoughtCount: fallback.initialThoughtCount,
         initialThoughtChars: fallback.initialThoughtChars,
-        initialPromptChars: fallback.initialPromptChars,
-        isNewPage,
-        hasH2,
-        useEditMode,
+        // Keep the pre-truncation prompt size when CAP-1 already recorded it.
+        initialPromptChars: promptDiagnostics.initial_prompt_chars ??
+          fallback.initialPromptChars,
       });
-    }
-
-    // Edit-mode page-side truncation (CAP-1). The fallback above only shrinks
-    // the thought slice; when the page body + backlink list keep the prompt
-    // over the soft limit anyway, shrink the page VIEW (all H2 headers stay
-    // addressable, newest bodies kept) and cap the backlink list. Applies to
-    // catchup, steady, and targeted runs alike. applyEdits below still merges
-    // into the full stored body.
-    if (
-      useEditMode &&
-      promptDiagnostics.prompt_chars > SOFT_COMPILE_PROMPT_CHAR_LIMIT
-    ) {
-      const cappedBacklinks = capBacklinkSlugs(
-        otherSlugs,
-        page.backlinks ?? [],
-        EDIT_PROMPT_BACKLINK_SLUG_CAP,
-      );
-      const cappedBacklinkList = cappedBacklinks.slugs.length > 0
-        ? `\n\nExisting pages that could be cross-referenced (use these slugs for backlinks):\n${
-          cappedBacklinks.slugs.join("\n")
-        }`
-        : "";
-      const pageTruncation: PageTruncationResult =
-        truncatePageContentForPrompt(
-          page.content,
-          EDIT_PROMPT_PAGE_VIEW_CHAR_LIMIT,
-        );
-      if (pageTruncation.truncationApplied || cappedBacklinks.capped) {
-        systemPrompt +=
-          `\n\nNote: some section bodies in the current page are replaced with "${OMITTED_SECTION_MARKER}" to fit the prompt budget. Their H2 headers are real and addressable, but never emit "update" or "prepend" for an omitted section; use "append" on it, or target a fully shown section.`;
-        userContent =
-          `Current page content:\n\n${pageTruncation.content}\n\n---\n\nNew thoughts to integrate (${newThoughts.length}):\n\n${newThoughtsText}${supplementalContext}${cappedBacklinkList}`;
-        promptDiagnostics = buildCompilePromptDiagnostics({
-          isCatchup: selectionIsCatchup,
-          thoughts: newThoughts,
-          pageContent: page.content ?? "",
-          userContent,
-          systemPrompt,
-          backlinkList: cappedBacklinkList,
-          selectionMode,
-          thoughtLimit: activeThoughtLimit,
-          sourceCharLimit: activeSourceCharLimit,
-          fallbackApplied: promptDiagnostics.fallback_applied,
-          fallbackReason: promptDiagnostics.fallback_reason,
-          initialThoughtCount: promptDiagnostics.initial_thought_count,
-          initialThoughtChars: promptDiagnostics.initial_thought_chars,
-          initialPromptChars: promptDiagnostics.initial_prompt_chars ??
-            promptDiagnostics.prompt_chars,
-          isNewPage,
-          hasH2,
-          useEditMode,
-          pageTruncation,
-          backlinksCapped: cappedBacklinks.capped,
-          backlinkSlugsShown: cappedBacklinks.slugs.length,
-        });
-      }
     }
 
     if (userContent.length + systemPrompt.length > COMPILE_PROMPT_CHAR_LIMIT) {

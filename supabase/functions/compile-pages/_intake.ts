@@ -13,6 +13,7 @@ export interface SelectCompileThoughtsOptions {
 export type CompileSelectionMode =
   | "steady"
   | "catchup"
+  | "catchup_budget_fit"
   | "catchup_fallback"
   | "targeted";
 
@@ -141,6 +142,50 @@ export function buildCompilePromptDiagnostics<
   return diagnostics;
 }
 
+// --- Budget-fit thought re-selection (Session 285) ---
+//
+// The initial catch-up slice is selected against CATCHUP_SOURCE_CHAR_LIMIT,
+// not against what actually remains of the prompt budget once the page view,
+// backlinks, and system prompt are accounted for. When the assembled prompt
+// is still over the soft limit after CAP-1 page-side truncation, re-select
+// the largest ascending prefix of the fetched oversample that fits the
+// remaining budget — instead of collapsing to the 1-thought fallback, which
+// stalls deep-backlog drain (topic/tattoo: 1 thought/day against 489).
+//
+// The allowance covers the per-thought "[i] (id: <uuid>, date, type) " header
+// that buildNewThoughtsText adds on top of raw content chars.
+export const BUDGET_FIT_THOUGHT_HEADER_ALLOWANCE = 80;
+
+export interface BudgetFitOptions {
+  // Current assembled prompt size (system + user content).
+  promptChars: number;
+  // Chars of the rendered thought block currently inside that prompt.
+  thoughtsTextChars: number;
+  softPromptCharLimit: number;
+  maxCount: number;
+}
+
+export function fitCompileThoughtsToBudget<T extends CompileThoughtLike>(
+  fetched: T[],
+  options: BudgetFitOptions,
+): { thoughts: T[]; maxChars: number } {
+  const overhead = options.promptChars - options.thoughtsTextChars;
+  const headerAllowance = BUDGET_FIT_THOUGHT_HEADER_ALLOWANCE *
+    Math.min(options.maxCount, fetched.length);
+  const maxChars = Math.max(
+    0,
+    options.softPromptCharLimit - overhead - headerAllowance,
+  );
+  // selectCompileThoughts guarantees at least one thought through, so a
+  // negative or tiny budget degrades to the old 1-thought behavior.
+  const thoughts = selectCompileThoughts(fetched, {
+    catchup: true,
+    maxCount: options.maxCount,
+    maxChars,
+  });
+  return { thoughts, maxChars };
+}
+
 export interface CatchupPromptFallbackOptions {
   originalThoughts: CompileThoughtLike[];
   selectionMode: CompileSelectionMode;
@@ -228,6 +273,12 @@ export function applyCatchupPromptFallback<T extends CompileThoughtLike>(
 // section bodies can be dropped from the prompt view while every header stays
 // addressable. Only the prompt view shrinks — applyEdits still runs against
 // the full stored page body.
+//
+// Ordering (Session 285): the caller applies this truncation BEFORE the
+// thought-slice fallback. Page-side reduction is lossless; collapsing the
+// thought slice to FALLBACK_CATCHUP_THOUGHT_LIMIT costs catch-up progress
+// (topic/tattoo drained 1 thought/day against a 489-thought backlog when the
+// fallback fired on the pre-truncation prompt size).
 
 export const OMITTED_SECTION_MARKER =
   "[section body omitted for prompt budget; do not update this section]";

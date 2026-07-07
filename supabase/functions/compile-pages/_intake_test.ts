@@ -3,6 +3,7 @@ import {
   applyCatchupPromptFallback,
   buildCompilePromptDiagnostics,
   capBacklinkSlugs,
+  fitCompileThoughtsToBudget,
   OMITTED_SECTION_MARKER,
   selectCompileThoughts,
   truncatePageContentForPrompt,
@@ -330,4 +331,60 @@ Deno.test("capBacklinkSlugs: existing backlinks first, then fill, no dupes", () 
 
   assertEquals(result.capped, true);
   assertEquals(result.slugs, ["p4", "p2", "p1", "p3"]);
+});
+
+Deno.test("fitCompileThoughtsToBudget: sizes slice to remaining prompt budget", () => {
+  // overhead = 10_000 - 4_000 = 6_000; header allowance = 80 * 4 = 320;
+  // content budget = 24_000 - 6_000 - 320 = 17_680 -> first three fit
+  // (3 * 5_000 = 15_000), the fourth (5_000 more) would exceed it.
+  const fetched = [
+    thought("1", "a".repeat(5_000)),
+    thought("2", "b".repeat(5_000)),
+    thought("3", "c".repeat(5_000)),
+    thought("4", "d".repeat(5_000)),
+  ];
+
+  const fit = fitCompileThoughtsToBudget(fetched, {
+    promptChars: 10_000,
+    thoughtsTextChars: 4_000,
+    softPromptCharLimit: 24_000,
+    maxCount: 25,
+  });
+
+  assertEquals(fit.maxChars, 17_680);
+  assertEquals(fit.thoughts.map((t) => t.id), ["1", "2", "3"]);
+});
+
+Deno.test("fitCompileThoughtsToBudget: always lets one thought through on a blown budget", () => {
+  const fetched = [
+    thought("1", "a".repeat(30_000)),
+    thought("2", "b".repeat(100)),
+  ];
+
+  const fit = fitCompileThoughtsToBudget(fetched, {
+    promptChars: 40_000,
+    thoughtsTextChars: 2_000,
+    softPromptCharLimit: 24_000,
+    maxCount: 25,
+  });
+
+  assertEquals(fit.maxChars, 0);
+  assertEquals(fit.thoughts.map((t) => t.id), ["1"]);
+});
+
+Deno.test("fitCompileThoughtsToBudget: respects maxCount even with budget to spare", () => {
+  const fetched = [
+    thought("1", "aa"),
+    thought("2", "bb"),
+    thought("3", "cc"),
+  ];
+
+  const fit = fitCompileThoughtsToBudget(fetched, {
+    promptChars: 5_000,
+    thoughtsTextChars: 1_000,
+    softPromptCharLimit: 24_000,
+    maxCount: 2,
+  });
+
+  assertEquals(fit.thoughts.map((t) => t.id), ["1", "2"]);
 });
