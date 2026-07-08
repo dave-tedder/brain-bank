@@ -21,6 +21,13 @@ import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
+  assertRestoreSelector,
+  buildDeferActionItemUpdate,
+  buildResolveActionItemUpdate,
+  buildRestoreActionItemUpdate,
+  stateGuardError,
+} from "./_action_items.ts";
+import {
   ACTIVE_ACTION_ITEM_DRAFT_STATUSES,
   ACTIVE_THOUGHT_DRAFT_STATUSES,
   AGENT_TASK_INTAKE_SOURCES,
@@ -2013,6 +2020,204 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error creating agent task from action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "list_open_action_items",
+  {
+    title: "List Open Action Items",
+    description:
+      "Read-only OE-12 triage surface. Returns open action_items rows, newest first, each flagged has_active_draft when an active agent_tasks draft already links to it. Set include_deferred=true to also return items held out by defer_action_item (each carrying defer_reason + deferred_at). Never resolves, archives, or mutates anything.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(100).optional(),
+      include_deferred: z.boolean().optional(),
+    },
+  },
+  async (
+    { limit, include_deferred }: { limit?: number; include_deferred?: boolean },
+  ) => {
+    logToolInvocation(
+      "list_open_action_items",
+      { limit, include_deferred },
+      "mcp",
+    );
+    try {
+      const statuses = include_deferred ? ["open", "deferred"] : ["open"];
+      const { data: items, error } = await supabase
+        .from("action_items")
+        .select(
+          "id, description, status, created_at, source_thought_id, defer_reason, deferred_at",
+        )
+        .in("status", statuses)
+        .order("created_at", { ascending: false })
+        .limit(limit ?? 50);
+      if (error) throw error;
+      const ids = (items ?? []).map((i) => i.id as string);
+      let activeIds = new Set<string>();
+      if (ids.length) {
+        const { data: drafts, error: draftsError } = await supabase
+          .from("agent_tasks")
+          .select("linked_action_item_id, status")
+          .in("linked_action_item_id", ids)
+          .in("status", [...ACTIVE_ACTION_ITEM_DRAFT_STATUSES]);
+        if (draftsError) throw draftsError;
+        activeIds = new Set(
+          (drafts ?? []).map((d) => d.linked_action_item_id as string),
+        );
+      }
+      return textToolResponse({
+        count: (items ?? []).length,
+        items: (items ?? []).map((i) => ({
+          ...i,
+          has_active_draft: activeIds.has(i.id as string),
+        })),
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error listing open action items: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "resolve_action_item",
+  {
+    title: "Resolve Action Item",
+    description:
+      "Operator-gated close for a genuinely-done open action_items row. Sets status='resolved' and records reason as an audit note (resolution_note). Guarded: only an item currently 'open' can be resolved. This is NOT an is-it-done matcher — it trusts the caller's stated judgment and does no LLM matching. For a paused-project item you want back later, use defer_action_item instead.",
+    inputSchema: {
+      id: z.string().uuid(),
+      reason: z.string().min(1).max(500),
+    },
+  },
+  async ({ id, reason }: { id: string; reason: string }) => {
+    logToolInvocation("resolve_action_item", { id }, "mcp");
+    try {
+      const update = buildResolveActionItemUpdate(
+        reason,
+        new Date().toISOString(),
+      );
+      const { data: updated, error } = await supabase
+        .from("action_items")
+        .update(update)
+        .eq("id", id)
+        .eq("status", "open")
+        .select("id, description, status, resolved_at, resolution_note");
+      if (error) throw error;
+      if (!updated || updated.length === 0) {
+        const { data: current } = await supabase
+          .from("action_items")
+          .select("status")
+          .eq("id", id)
+          .maybeSingle();
+        return errorToolResponse(stateGuardError("resolve", "open", current));
+      }
+      return textToolResponse({ resolved: updated[0] });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error resolving action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "defer_action_item",
+  {
+    title: "Defer Action Item",
+    description:
+      "Operator-gated reversible hold for an open action_items row (typically a paused-project item). Sets status='deferred' so it drops out of list_open_action_items and every other status='open' consumer until restore_action_item reopens it. reason should carry the pause tag, e.g. 'paused-project:some-project', so the whole set can be restored together on unpause. Guarded: only an 'open' item can be deferred.",
+    inputSchema: {
+      id: z.string().uuid(),
+      reason: z.string().min(1).max(500),
+    },
+  },
+  async ({ id, reason }: { id: string; reason: string }) => {
+    logToolInvocation("defer_action_item", { id }, "mcp");
+    try {
+      const update = buildDeferActionItemUpdate(
+        reason,
+        new Date().toISOString(),
+      );
+      const { data: updated, error } = await supabase
+        .from("action_items")
+        .update(update)
+        .eq("id", id)
+        .eq("status", "open")
+        .select("id, description, status, defer_reason, deferred_at");
+      if (error) throw error;
+      if (!updated || updated.length === 0) {
+        const { data: current } = await supabase
+          .from("action_items")
+          .select("status")
+          .eq("id", id)
+          .maybeSingle();
+        return errorToolResponse(stateGuardError("defer", "open", current));
+      }
+      return textToolResponse({ deferred: updated[0] });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error deferring action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "restore_action_item",
+  {
+    title: "Restore Action Item",
+    description:
+      "Operator-gated reverse of defer_action_item: flips deferred items back to 'open' and clears the defer marker. Provide EXACTLY ONE of id (one item) or defer_reason (every deferred item carrying that exact pause tag — the unpause path). Only 'deferred' rows are touched; anything already open or resolved is left alone.",
+    inputSchema: {
+      id: z.string().uuid().optional(),
+      defer_reason: z.string().min(1).max(500).optional(),
+    },
+  },
+  async (
+    { id, defer_reason }: { id?: string; defer_reason?: string },
+  ) => {
+    logToolInvocation("restore_action_item", { id, defer_reason }, "mcp");
+    try {
+      const selector = assertRestoreSelector({ id, defer_reason });
+      const update = buildRestoreActionItemUpdate();
+      let query = supabase
+        .from("action_items")
+        .update(update)
+        .eq("status", "deferred");
+      query = "id" in selector
+        ? query.eq("id", selector.id)
+        : query.eq("defer_reason", selector.defer_reason);
+      const { data: restored, error } = await query.select(
+        "id, description, status",
+      );
+      if (error) throw error;
+      if (!restored || restored.length === 0) {
+        if ("id" in selector) {
+          const { data: current } = await supabase
+            .from("action_items")
+            .select("status")
+            .eq("id", selector.id)
+            .maybeSingle();
+          return errorToolResponse(
+            stateGuardError("restore", "deferred", current),
+          );
+        }
+        return errorToolResponse(
+          `No deferred action items found with defer_reason '${selector.defer_reason}'.`,
+        );
+      }
+      return textToolResponse({
+        restored_count: restored.length,
+        restored,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error restoring action item: ${(err as Error).message}`,
       );
     }
   },
