@@ -13,7 +13,7 @@ import {
   truncatePageContentForPrompt,
 } from "./_intake.ts";
 import { applyEdits, parseEditsXml } from "./_section_merge.ts";
-import { selectPagesToCompile } from "./_selection.ts";
+import { partitionQuarantine, selectPagesToCompile } from "./_selection.ts";
 import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import { loadProfile } from "../_shared/profile.ts";
@@ -245,6 +245,16 @@ async function pageHasNewThoughts(
 // writes are best-effort: a counter failure must never fail the compile
 // itself.
 const COMPILE_FAILURE_QUARANTINE_THRESHOLD = 3;
+
+// Slow lane (Session 289). Rather than skipping quarantined pages forever, each
+// scheduled run re-attempts up to this many of the most-overdue ones at forced
+// intake=1 (SLOW_LANE_INTAKE). A single thought's edit-mode synthesis fits
+// under LLM_CALL_TIMEOUT_MS even on the deep pages that quarantined, so they
+// drain one thought per run instead of stalling permanently. Kept small so the
+// slow lane can't crowd fresh eligible pages out of the 150s wall; slow-lane
+// work is appended after eligible work and still gated by RUN_BUDGET_MS.
+const SLOW_LANE_MAX_PER_RUN = 2;
+const SLOW_LANE_INTAKE = 1;
 
 async function recordCompileFailure(
   page: { id: string; slug: string; compile_failures?: number | null },
@@ -1406,7 +1416,14 @@ Deno.serve(async (req: Request): Promise<Response> => {
           (p) =>
             (p.compile_failures ?? 0) < COMPILE_FAILURE_QUARANTINE_THRESHOLD,
         );
-      for (const page of quarantinedPages) {
+      // Slow lane (Session 289): admit the most-overdue quarantined pages back
+      // into this run at forced intake=1 instead of skipping every one.
+      // candidatePages inherits sortedPages' oldest-first order, so the slow
+      // lane takes the pages stuck longest. The rest still report through
+      // errored so the digest degraded-run warning keeps firing.
+      const { slowLane: slowLanePages, skipped: quarantineSkipped } =
+        partitionQuarantine(quarantinedPages, SLOW_LANE_MAX_PER_RUN);
+      for (const page of quarantineSkipped) {
         errors++;
         errored.push({
           slug: page.slug,
@@ -1429,14 +1446,28 @@ Deno.serve(async (req: Request): Promise<Response> => {
       );
       skipped = eligiblePages.length - candidatesToCompile.length;
 
+      // Compile worklist: eligible pages at the run's normal intake (undefined
+      // => catch-up/steady selection), then slow-lane quarantined pages pinned
+      // to intake=1. Slow-lane entries come last so the RUN_BUDGET_MS gate
+      // spends fresh eligible pages first and only drains stuck pages with the
+      // time that remains. targetedIntakeLimit is undefined on scheduled runs
+      // (where slowLanePages is non-empty) and slowLanePages is empty on
+      // targeted runs, so the two intakes never collide.
+      const compileWorklist: Array<
+        { page: typeof candidatesToCompile[number]; intake?: number }
+      > = [
+        ...candidatesToCompile.map((page) => ({ page, intake: targetedIntakeLimit })),
+        ...slowLanePages.map((page) => ({ page, intake: SLOW_LANE_INTAKE })),
+      ];
+
       // Bounded-parallel compile. Keep synthesis concurrency below the common
       // timed-out catch-up cluster size so one heavy slug group cannot consume
       // every slow LLM lane at once. Each worker checks the wall budget before
       // its LLM call so a straggler can't push us into the 150s wall.
       await runWithConcurrency(
-        candidatesToCompile,
+        compileWorklist,
         COMPILE_CONCURRENCY,
-        async (page) => {
+        async ({ page, intake }) => {
           if (Date.now() - startTime > RUN_BUDGET_MS) {
             budgetExhausted = true;
             return;
@@ -1445,7 +1476,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
             page,
             allSlugs,
             compileModel,
-            targetedIntakeLimit,
+            intake,
           );
           if (result.updated) {
             compiled++;
@@ -1480,9 +1511,11 @@ Deno.serve(async (req: Request): Promise<Response> => {
 
       if (budgetExhausted) {
         // Workers that bailed before their LLM call get rolled into skipped.
-        // Next cron run picks them up via the same NULLS-FIRST sort.
-        const processed = compiled + errors;
-        skipped += candidatesToCompile.length - processed;
+        // Next cron run picks them up via the same NULLS-FIRST sort. Count
+        // work-loop completions only: `errors` also holds the pre-loop
+        // quarantine skips, which are not worklist items.
+        const workProcessed = compiled + (errors - quarantineSkipped.length);
+        skipped += compileWorklist.length - workProcessed;
         console.log(
           `compile-pages: wall budget reached after ${
             Date.now() - startTime

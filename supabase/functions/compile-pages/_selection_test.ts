@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.220.0/assert/mod.ts";
-import { selectPagesToCompile } from "./_selection.ts";
+import { partitionQuarantine, selectPagesToCompile } from "./_selection.ts";
 
 // Minimal shape the selector needs. Real callers pass full page rows; the
 // selector only reads page_type and preserves the caller's (oldest-first) order.
@@ -90,4 +90,42 @@ Deno.test("selectPagesToCompile: reserve larger than batch is clamped", () => {
   const selected = selectPagesToCompile(pages(10, 10), 4, 20);
   assertEquals(selected.length, 4);
   assertEquals(selected.filter((p) => p.page_type === "client").length, 4);
+});
+
+// --- partitionQuarantine (slow lane) ---
+
+function qpage(slug: string) {
+  return { slug };
+}
+
+Deno.test("partitionQuarantine: admits the oldest N to the slow lane, rest skipped", () => {
+  // Input is oldest-first; the first two are the most-overdue.
+  const input = [qpage("a"), qpage("b"), qpage("c"), qpage("d")];
+  const { slowLane, skipped } = partitionQuarantine(input, 2);
+  assertEquals(slowLane.map((p) => p.slug), ["a", "b"]);
+  assertEquals(skipped.map((p) => p.slug), ["c", "d"]);
+});
+
+Deno.test("partitionQuarantine: fewer quarantined than the cap admits all, none skipped", () => {
+  const { slowLane, skipped } = partitionQuarantine([qpage("a"), qpage("b")], 5);
+  assertEquals(slowLane.map((p) => p.slug), ["a", "b"]);
+  assertEquals(skipped, []);
+});
+
+Deno.test("partitionQuarantine: cap of 0 skips everything", () => {
+  const { slowLane, skipped } = partitionQuarantine([qpage("a"), qpage("b")], 0);
+  assertEquals(slowLane, []);
+  assertEquals(skipped.map((p) => p.slug), ["a", "b"]);
+});
+
+Deno.test("partitionQuarantine: empty input yields empty lanes", () => {
+  const { slowLane, skipped } = partitionQuarantine([], 2);
+  assertEquals(slowLane, []);
+  assertEquals(skipped, []);
+});
+
+Deno.test("partitionQuarantine: negative cap is treated as zero", () => {
+  const { slowLane, skipped } = partitionQuarantine([qpage("a")], -3);
+  assertEquals(slowLane, []);
+  assertEquals(skipped.map((p) => p.slug), ["a"]);
 });
