@@ -25,6 +25,7 @@ const STATUSES = new Set([
   "Agent Working",
   "Agent Needs Input",
   "Agent Review",
+  "Needs Dave",
   "Agent Done",
 ]);
 
@@ -171,6 +172,20 @@ export async function updateAgentTask(formData: FormData) {
 
   if (error) throw error;
   revalidatePath("/tasks");
+}
+
+export async function completeOperatorAction(formData: FormData) {
+  const taskId = requireText(formData, "task_id");
+  const note = textValue(formData, "note");
+  const path = redirectPath(formData);
+
+  const { error } = await supabase().rpc("complete_operator_action", {
+    p_task_id: taskId,
+    p_note: note,
+  });
+
+  if (error) throw error;
+  revalidatePath(path);
 }
 
 export async function moveAgentTaskStatus(formData: FormData) {

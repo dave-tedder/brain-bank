@@ -14,6 +14,7 @@ import {
 } from "@/lib/agent-task-review-controls";
 import {
   applyReviewedTask,
+  completeOperatorAction,
   createFollowUpDraft,
   moveAgentTaskStatus,
   promoteAgentTaskIntake,
@@ -104,23 +105,31 @@ export default function AgentTaskCard({
         <Packet label="reason" value={task.blocked_reason ?? task.review_reason ?? task.last_failure_reason} />
       </div>
 
-      <div className="mt-4 flex gap-2 flex-wrap">
-        {AGENT_TASK_STATUSES.map((status) =>
-          task.status === "Agent Review" && status === "Agent Done" ? null : (
-            <StatusButton
-              key={status}
-              task={task}
-              target={status}
-              currentPath={currentPath}
-              disabled={isGenericStatusMoveDisabled({
-                currentStatus: task.status,
-                targetStatus: status,
-                approvalNeeded,
-              })}
-            />
-          )
-        )}
-      </div>
+      {task.status === "Needs Dave" ? (
+        <NeedsDavePanel task={task} currentPath={currentPath} />
+      ) : (
+        <div className="mt-4 flex gap-2 flex-wrap">
+          {AGENT_TASK_STATUSES.map((status) =>
+            // "Needs Dave" is never a generic move target — the only routes in
+            // are the apply gate (operator_action) and the backfill seed; the
+            // only routes out are Mark done / MCP reroute.
+            status === "Needs Dave" ||
+            (task.status === "Agent Review" && status === "Agent Done") ? null : (
+              <StatusButton
+                key={status}
+                task={task}
+                target={status}
+                currentPath={currentPath}
+                disabled={isGenericStatusMoveDisabled({
+                  currentStatus: task.status,
+                  targetStatus: status,
+                  approvalNeeded,
+                })}
+              />
+            )
+          )}
+        </div>
+      )}
 
       {shouldShowReviewApplyControls(task.status) && (
         <ReviewApplyControls task={task} currentPath={currentPath} />
@@ -278,6 +287,61 @@ function ReviewApplyControls({
   );
 }
 
+function NeedsDavePanel({
+  task,
+  currentPath,
+}: {
+  task: AgentTask;
+  currentPath: string;
+}) {
+  const target = task.operator_target;
+  const isUrl = Boolean(target && /^https?:\/\//i.test(target));
+
+  return (
+    <div className="mt-4 border border-[var(--warning)] bg-[rgba(251,191,36,0.06)] px-3 py-3">
+      <h3 className="font-terminal text-sm uppercase tracking-wider text-[var(--warning)]">
+        needs dave :: your hands
+      </h3>
+      <p className="mt-2 text-sm font-mono text-[var(--text-body)] whitespace-pre-wrap">
+        {task.operator_action ?? "operator step pending"}
+      </p>
+      {target && (
+        <div className="mt-2 text-xs font-mono">
+          <span className="uppercase tracking-wider text-[var(--text-muted)]">where: </span>
+          {isUrl ? (
+            <a
+              href={target}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[var(--phosphor-glow)] underline break-all"
+            >
+              {target}
+            </a>
+          ) : (
+            <span className="text-[var(--text-body)] break-all">{target}</span>
+          )}
+        </div>
+      )}
+      <form
+        action={completeOperatorAction}
+        className="mt-3 grid grid-cols-1 md:grid-cols-[1fr_auto] gap-2 border-t border-[var(--border)] pt-3"
+      >
+        <input type="hidden" name="task_id" value={task.id} />
+        <input type="hidden" name="redirect_path" value={currentPath} />
+        <input
+          name="note"
+          aria-label="what dave did"
+          placeholder="what you did (optional)"
+          className="task-input h-9 text-[10px]"
+        />
+        <button type="submit" className="task-button">
+          [MARK DONE]
+        </button>
+      </form>
+    </div>
+  );
+}
+
 function Packet({ label, value }: { label: string; value: string | null }) {
   if (!value) return null;
   return (
@@ -372,6 +436,8 @@ function shortStatus(status: AgentTaskStatus): string {
       return "needs input";
     case "Agent Review":
       return "review";
+    case "Needs Dave":
+      return "needs dave";
     case "Agent Done":
       return "done";
   }

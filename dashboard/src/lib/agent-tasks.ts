@@ -6,6 +6,7 @@ export const AGENT_TASK_STATUSES = [
   "Agent Working",
   "Agent Needs Input",
   "Agent Review",
+  "Needs Dave",
   "Agent Done",
 ] as const;
 
@@ -23,6 +24,7 @@ export const AGENT_TASK_STATUS_FILTERS: {
   { token: "working", value: "Agent Working", label: "WORKING" },
   { token: "input", value: "Agent Needs Input", label: "NEEDS INPUT" },
   { token: "review", value: "Agent Review", label: "REVIEW" },
+  { token: "needs-dave", value: "Needs Dave", label: "NEEDS DAVE" },
   { token: "done", value: "Agent Done", label: "DONE" },
 ];
 
@@ -77,6 +79,8 @@ export interface AgentTask {
   last_failure_reason: string | null;
   source_thought_id: string | null;
   linked_action_item_id: string | null;
+  operator_action: string | null;
+  operator_target: string | null;
 }
 
 export interface AgentTaskCounts {
@@ -95,7 +99,7 @@ export interface AgentTaskEvent {
 }
 
 const TASK_COLS =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target";
 
 export async function listAgentRuntimes(): Promise<AgentRuntime[]> {
   const { data, error } = await supabase()
@@ -211,6 +215,8 @@ export function taskStatusColor(status: AgentTaskStatus): string {
       return "var(--status-blocker)";
     case "Agent Review":
       return "var(--phosphor-glow)";
+    case "Needs Dave":
+      return "var(--warning)";
     case "Agent Done":
       return "var(--status-done)";
     default:
