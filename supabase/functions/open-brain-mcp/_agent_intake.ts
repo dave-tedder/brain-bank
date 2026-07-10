@@ -8,6 +8,7 @@ export const AGENT_TASK_INTAKE_SOURCES = [
   "slack-intake",
   "action-item-promotion",
   "agent-follow-up",
+  "triage-agent",
 ] as const;
 
 export type AgentTaskIntakeSource = (typeof AGENT_TASK_INTAKE_SOURCES)[number];

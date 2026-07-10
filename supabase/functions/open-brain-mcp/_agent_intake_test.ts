@@ -477,3 +477,28 @@ Deno.test("intake source list remains Brain Bank neutral", () => {
     false,
   );
 });
+
+Deno.test("intake sources include triage-agent for OE-12", () => {
+  assert(
+    AGENT_TASK_INTAKE_SOURCES.includes("triage-agent" as AgentTaskIntakeSource),
+    "triage-agent missing from AGENT_TASK_INTAKE_SOURCES",
+  );
+});
+
+Deno.test("buildAgentTaskIntakeRecord accepts triage-agent source", () => {
+  const record = buildAgentTaskIntakeRecord({
+    desired_outcome: "Research X and produce a report",
+    context: "From open action item",
+    sources: [],
+    do_steps: "1. read 2. report",
+    acceptance_criteria: "Report lists findings with links",
+    output_handoff: "Receipt only",
+    boundaries: "Read-only; no sends",
+    intake_source: "triage-agent",
+    requested_by: "triage",
+    linked_action_item_id: "00000000-0000-0000-0000-000000000001",
+  });
+  assertEquals(record.intake_source, "triage-agent");
+  assertEquals(record.status, "Standing");
+  assertEquals(record.explicit_approval, false);
+});
