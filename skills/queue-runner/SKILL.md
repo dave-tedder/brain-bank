@@ -83,7 +83,7 @@ Do not claim or resume a task when any of these are true:
 - The desired outcome, do steps, boundaries, or acceptance criteria are ambiguous.
 - The work would require deletes, credential changes, billing or spend changes, client-facing messages, Slack sends, deploys, WordPress changes, or production data edits not explicitly approved in the task.
 - Required tools, repository context, secrets, or source files are unavailable.
-- The task asks a worker or subagent to update `PROJECT-TRACKER.md`, `SESSION-LOG.md`, commit, push, or capture the Brain Bank closeout.
+- The task asks a worker or subagent to update `PROJECT-TRACKER.md`, `SESSION-LOG.md`, commit, push, or capture the project closeout.
 - The task would require claiming a second task in the same heartbeat.
 
 When a refusal gate triggers on a claimed task, use `block_agent_task` with a specific blocker. When it triggers before claim, leave the task unclaimed and report the reason to the parent session.
@@ -126,7 +126,7 @@ Brain Bank capture draft:
 Follow-up recommendation:
 ```
 
-The OE-8 closeout controller consumes these headings; a receipt missing a section is held out of auto-closeout, not guessed at. Keep receipts factual. Do not claim tracker, session-log, commit, push, or Brain Bank capture work was done by a worker if the parent session still needs to do it.
+The OE-8 closeout controller consumes these headings; a receipt missing a section is held out of auto-closeout, not guessed at. Keep receipts factual. Do not claim tracker, session-log, commit, push, or project capture work was done by a worker if the parent session still needs to do it.
 
 DELIVERABLES-TO-FILE (local runtime): when the task produces a client-facing standalone draft (a listing pack, a bio, a directory field-by-field, blog copy), write it to `deliverables/<project_slug>/<task-shortid>-<slug>.md` in the Brain Bank repo and record that exact path under "Touched files or records:". `deliverables/` is gitignored — the draft never ships to brain-bank. Do NOT use `deliverables/` for code/config changes to a project: those are a commit/diff in that project's own repo; record the repo + branch under "Touched files or records:" instead.
 
@@ -173,13 +173,13 @@ The parent session owns:
 - File edits unless the task explicitly delegates them.
 - `PROJECT-TRACKER.md` updates.
 - `SESSION-LOG.md` updates.
-- Brain Bank `capture_thought` closeout.
+- Project closeout capture.
 - Git commits and pushes.
 - Brain Bank public/private classification and port decisions.
 
 Worker subagents may do independent read-only audits or scoped task work when a task grants that authority. Their output is a receipt, not canonical project state.
 
-A standalone fresh chat that manually claims a board task is the parent session for that task unless the task packet explicitly says `worker_only=true` in `sources` or `context`. Parent sessions are responsible for tracker/session-log/Brain Bank closeout when the task touches a project with those records. Scheduled runners and worker subagents leave review evidence and closeout drafts only.
+A standalone fresh chat that manually claims a board task is the parent session for that task unless the task packet explicitly says `worker_only=true` in `sources` or `context`. Parent sessions are responsible for tracker/session-log/project-capture closeout when the task touches a project with those records. Scheduled runners and worker subagents leave review evidence and closeout drafts only.
 
 ## Required Smoke Tests
 
