@@ -4,7 +4,7 @@ export const AGENT_TASK_STATUSES = [
   "Agent Working",
   "Agent Needs Input",
   "Agent Review",
-  "Needs Dave",
+  "Needs Operator",
   "Agent Done",
 ] as const;
 
@@ -18,7 +18,7 @@ export const AGENT_TASK_RECEIPTS = [
   "AGENT RESUMED",
   "AGENT FAILED",
   "AGENT APPLIED",
-  "AGENT NEEDS DAVE",
+  "AGENT NEEDS OPERATOR",
   "OPERATOR DONE",
   "AGENT SKILL SUBSCRIBED",
   "AGENT SKILL INSTALLED",
@@ -221,8 +221,8 @@ export function receiptForTaskTool(
 
 export function receiptForAppliedStatus(
   status: AgentTaskStatus,
-): Extract<AgentTaskReceipt, "AGENT APPLIED" | "AGENT NEEDS DAVE"> {
-  if (status === "Needs Dave") return "AGENT NEEDS DAVE";
+): Extract<AgentTaskReceipt, "AGENT APPLIED" | "AGENT NEEDS OPERATOR"> {
+  if (status === "Needs Operator") return "AGENT NEEDS OPERATOR";
   return "AGENT APPLIED";
 }
 

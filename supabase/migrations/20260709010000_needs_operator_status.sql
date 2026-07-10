@@ -1,19 +1,19 @@
--- OE-11 Phase 2: "Needs Dave" board status + operator-action routing.
+-- OE-11 Phase 2: "Needs Operator" board status + operator-action routing.
 -- Additive. A task whose closeout carries a concrete operator step lands in
--- Needs Dave (a persistent personal-action desk) instead of Agent Done, and
+-- Needs Operator (a persistent personal-action desk) instead of Agent Done, and
 -- only the operator's complete_operator_action closes it.
 
--- 1. Status domain: insert 'Needs Dave' between review and done.
+-- 1. Status domain: insert 'Needs Operator' between review and done.
 alter table public.agent_tasks
   drop constraint agent_tasks_status_check;
 alter table public.agent_tasks
   add constraint agent_tasks_status_check
   check (status in (
     'Standing','Agent Todo','Agent Working','Agent Needs Input',
-    'Agent Review','Needs Dave','Agent Done'
+    'Agent Review','Needs Operator','Agent Done'
   ));
 
--- 2. Operator-step columns (set when a task routes to Needs Dave; RETAINED
+-- 2. Operator-step columns (set when a task routes to Needs Operator; RETAINED
 -- after close as the audit trail — complete_operator_action does not clear them).
 alter table public.agent_tasks
   add column if not exists operator_action text,
@@ -27,14 +27,14 @@ alter table public.agent_task_events
   check (event_type in (
     'AGENT CLAIMED','AGENT DONE','AGENT BLOCKED','AGENT UNBLOCKED',
     'AGENT HUMAN HOLD','AGENT HUMAN ANSWERED','AGENT RESUMED','AGENT FAILED',
-    'AGENT APPLIED','AGENT NEEDS DAVE','OPERATOR DONE',
+    'AGENT APPLIED','AGENT NEEDS OPERATOR','OPERATOR DONE',
     'AGENT SKILL SUBSCRIBED','AGENT SKILL INSTALLED','AGENT SKILL UPDATED',
     'AGENT SKILL DECLINED','AGENT FOLLOW-UP','AGENT STATUS'
   ));
 
 -- 4. Index the desk so the briefing/dashboard read it cheaply.
-create index if not exists agent_tasks_needs_dave_idx
+create index if not exists agent_tasks_needs_operator_idx
   on public.agent_tasks (status, updated_at desc)
-  where status = 'Needs Dave';
+  where status = 'Needs Operator';
 
 notify pgrst, 'reload schema';

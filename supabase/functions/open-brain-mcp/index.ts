@@ -2714,7 +2714,7 @@ server.registerTool(
       child_task_ids: z.array(z.string().uuid()).optional(),
       closeout_evidence: z.record(z.unknown()).optional(),
       operator_action: z.string().min(1).optional().describe(
-        "One-line human step the operator must do on an outside system. When set, the task routes to Needs Dave instead of Agent Done and the linked action item stays open.",
+        "One-line human step the operator must do on an outside system. When set, the task routes to Needs Operator instead of Agent Done and the linked action item stays open.",
       ),
       operator_target: z.string().min(1).refine(
         operatorTargetHasAllowedScheme,
@@ -2818,7 +2818,7 @@ server.registerTool(
   {
     title: "Complete Operator Action",
     description:
-      "Close a Needs Dave task after the operator has done the outside-system step. Moves Needs Dave to Agent Done with an OPERATOR DONE receipt and resolves the linked action item when one exists. Only the operator closes Needs Dave; agents never do.",
+      "Close a Needs Operator task after the operator has done the outside-system step. Moves Needs Operator to Agent Done with an OPERATOR DONE receipt and resolves the linked action item when one exists. Only the operator closes Needs Operator; agents never do.",
     inputSchema: {
       task_id: z.string().uuid(),
       note: z.string().min(1).optional().describe(
@@ -2844,11 +2844,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  "reroute_needs_dave_task",
+  "reroute_operator_action_task",
   {
-    title: "Reroute Needs Dave Task",
+    title: "Reroute Operator Action Task",
     description:
-      "Escape hatch for a misrouted Needs Dave card: send it back to Agent Todo for the executor lane instead of falsely closing it as done. Clears the operator step, writes an AGENT FOLLOW-UP receipt, leaves any linked action item open.",
+      "Escape hatch for a misrouted Needs Operator card: send it back to Agent Todo for the executor lane instead of falsely closing it as done. Clears the operator step, writes an AGENT FOLLOW-UP receipt, leaves any linked action item open.",
     inputSchema: {
       task_id: z.string().uuid(),
       reason: z.string().min(1).describe(
@@ -2857,9 +2857,9 @@ server.registerTool(
     },
   },
   async ({ task_id, reason }: { task_id: string; reason: string }) => {
-    logToolInvocation("reroute_needs_dave_task", { task_id }, "mcp");
+    logToolInvocation("reroute_operator_action_task", { task_id }, "mcp");
     try {
-      const { data, error } = await supabase.rpc("reroute_needs_dave_task", {
+      const { data, error } = await supabase.rpc("reroute_operator_action_task", {
         p_task_id: task_id,
         p_reason: reason,
       });
@@ -2867,7 +2867,7 @@ server.registerTool(
       return textToolResponse({ receipt: "AGENT FOLLOW-UP", task: data });
     } catch (err: unknown) {
       return errorToolResponse(
-        `Error rerouting Needs Dave task: ${(err as Error).message}`,
+        `Error rerouting Needs Operator task: ${(err as Error).message}`,
       );
     }
   },

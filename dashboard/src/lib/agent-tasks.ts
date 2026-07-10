@@ -6,7 +6,7 @@ export const AGENT_TASK_STATUSES = [
   "Agent Working",
   "Agent Needs Input",
   "Agent Review",
-  "Needs Dave",
+  "Needs Operator",
   "Agent Done",
 ] as const;
 
@@ -24,7 +24,7 @@ export const AGENT_TASK_STATUS_FILTERS: {
   { token: "working", value: "Agent Working", label: "WORKING" },
   { token: "input", value: "Agent Needs Input", label: "NEEDS INPUT" },
   { token: "review", value: "Agent Review", label: "REVIEW" },
-  { token: "needs-dave", value: "Needs Dave", label: "NEEDS DAVE" },
+  { token: "needs-operator", value: "Needs Operator", label: "NEEDS OPERATOR" },
   { token: "done", value: "Agent Done", label: "DONE" },
 ];
 
@@ -215,7 +215,7 @@ export function taskStatusColor(status: AgentTaskStatus): string {
       return "var(--status-blocker)";
     case "Agent Review":
       return "var(--phosphor-glow)";
-    case "Needs Dave":
+    case "Needs Operator":
       return "var(--warning)";
     case "Agent Done":
       return "var(--status-done)";

@@ -1,5 +1,5 @@
 -- OE-11 Phase 2: operator-action routing for the apply gate + operator close
--- + the Needs Dave reroute escape hatch.
+-- + the Needs Operator reroute escape hatch.
 --
 -- Base: the LIVE apply_agent_task_review from 20260702_oe_hardening_batch.sql
 -- (archived-task guard + H-APPLY-HONESTY linked-action outcome reporting),
@@ -39,7 +39,7 @@ declare
   v_action_outcome text := 'not_requested';
   v_updated_action int := 0;
   v_operator_action text := nullif(trim(coalesce(p_operator_action, '')), '');
-  v_needs_dave boolean := v_operator_action is not null;
+  v_needs_operator boolean := v_operator_action is not null;
   v_target_status text;
 begin
   if p_resolution not in ('accepted', 'accepted_with_follow_up') then
@@ -57,10 +57,10 @@ begin
     raise exception 'AGENT APPLIED requires Agent Review.' using errcode = '22023';
   end if;
 
-  -- A Needs-Dave routing keeps the linked action item OPEN (it is not done
+  -- A Needs Operator routing keeps the linked action item OPEN (it is not done
   -- until the operator's hands-on step lands via complete_operator_action).
-  if v_needs_dave and p_resolve_linked_action_item then
-    raise exception 'Cannot resolve a linked action item while routing to Needs Dave; the operator step is still open.'
+  if v_needs_operator and p_resolve_linked_action_item then
+    raise exception 'Cannot resolve a linked action item while routing to Needs Operator; the operator step is still open.'
       using errcode = '22023';
   end if;
   if p_resolve_linked_action_item and p_resolution <> 'accepted' then
@@ -80,18 +80,18 @@ begin
     end if;
   end if;
 
-  v_target_status := case when v_needs_dave then 'Needs Dave' else 'Agent Done' end;
+  v_target_status := case when v_needs_operator then 'Needs Operator' else 'Agent Done' end;
 
   update public.agent_tasks
   set
     status = v_target_status,
-    completed_at = case when v_needs_dave then null else now() end,
+    completed_at = case when v_needs_operator then null else now() end,
     claimed_at = null,
     claimed_by = null,
     claim_expires_at = null,
     blocked_reason = null,
-    operator_action = case when v_needs_dave then v_operator_action else operator_action end,
-    operator_target = case when v_needs_dave then nullif(trim(coalesce(p_operator_target,'')),'') else operator_target end,
+    operator_action = case when v_needs_operator then v_operator_action else operator_action end,
+    operator_target = case when v_needs_operator then nullif(trim(coalesce(p_operator_target,'')),'') else operator_target end,
     review_reason = coalesce(nullif(trim(p_note), ''), review_reason),
     updated_at = now()
   where id = p_task_id
@@ -99,7 +99,7 @@ begin
 
   -- H-APPLY-HONESTY (from 20260702_oe_hardening_batch): report the real
   -- linked-action outcome instead of silently no-oping. Unreachable when
-  -- v_needs_dave (guarded above), so a Needs Dave routing reports 'not_requested'.
+  -- v_needs_operator (guarded above), so a Needs Operator routing reports 'not_requested'.
   if p_resolve_linked_action_item then
     if v_current.linked_action_item_id is null then
       v_action_outcome := 'not_linked';
@@ -114,7 +114,7 @@ begin
   insert into public.agent_task_events (task_id, event_type, agent_code, payload)
   values (
     p_task_id,
-    case when v_needs_dave then 'AGENT NEEDS DAVE' else 'AGENT APPLIED' end,
+    case when v_needs_operator then 'AGENT NEEDS OPERATOR' else 'AGENT APPLIED' end,
     v_current.claimed_by,
     jsonb_strip_nulls(jsonb_build_object(
       'status', v_target_status,
@@ -139,7 +139,7 @@ $$;
 revoke execute on function public.apply_agent_task_review(uuid,text,text,text,boolean,uuid[],jsonb,text,text) from public, anon, authenticated;
 grant execute on function public.apply_agent_task_review(uuid,text,text,text,boolean,uuid[],jsonb,text,text) to service_role;
 
--- Operator close: Needs Dave -> Agent Done, one OPERATOR DONE receipt,
+-- Operator close: Needs Operator -> Agent Done, one OPERATOR DONE receipt,
 -- resolves the linked action item if still open.
 create or replace function public.complete_operator_action(
   p_task_id uuid,
@@ -161,8 +161,8 @@ begin
   if v_current.archived_at is not null then
     raise exception 'Task % is archived; cannot complete operator action', p_task_id using errcode = '22023';
   end if;
-  if v_current.status <> 'Needs Dave' then
-    raise exception 'complete_operator_action requires status Needs Dave (got %).', v_current.status
+  if v_current.status <> 'Needs Operator' then
+    raise exception 'complete_operator_action requires status Needs Operator (got %).', v_current.status
       using errcode = '22023';
   end if;
 
@@ -196,13 +196,13 @@ $$;
 revoke execute on function public.complete_operator_action(uuid,text) from public, anon, authenticated;
 grant execute on function public.complete_operator_action(uuid,text) to service_role;
 
--- Reroute escape hatch: a misrouted Needs Dave card goes back to the executor
+-- Reroute escape hatch: a misrouted Needs Operator card goes back to the executor
 -- queue instead of being falsely closed as done. The generic
 -- move_agent_task_status (live: 20260702_oe_hardening_batch.sql) hardcodes the
 -- six pre-OE-11 statuses and its transition matrix, so it cannot touch
--- Needs Dave; this function is the ONLY exit besides complete_operator_action.
+-- Needs Operator; this function is the ONLY exit besides complete_operator_action.
 -- The linked action item stays open.
-create or replace function public.reroute_needs_dave_task(
+create or replace function public.reroute_operator_action_task(
   p_task_id uuid,
   p_reason text
 )
@@ -217,15 +217,15 @@ declare
   v_reason text := nullif(trim(coalesce(p_reason, '')), '');
 begin
   if v_reason is null then
-    raise exception 'reroute_needs_dave_task requires a reason.' using errcode = '22023';
+    raise exception 'reroute_operator_action_task requires a reason.' using errcode = '22023';
   end if;
 
   select * into v_current from public.agent_tasks where id = p_task_id for update;
   if not found then
     raise exception 'Task not found: %', p_task_id using errcode = 'P0002';
   end if;
-  if v_current.status <> 'Needs Dave' then
-    raise exception 'reroute_needs_dave_task requires status Needs Dave (got %).', v_current.status
+  if v_current.status <> 'Needs Operator' then
+    raise exception 'reroute_operator_action_task requires status Needs Operator (got %).', v_current.status
       using errcode = '22023';
   end if;
 
@@ -242,9 +242,9 @@ begin
     p_task_id, 'AGENT FOLLOW-UP', null,
     jsonb_strip_nulls(jsonb_build_object(
       'status', 'Agent Todo',
-      'from_status', 'Needs Dave',
+      'from_status', 'Needs Operator',
       'reason', v_reason,
-      'source', 'reroute_needs_dave_task'
+      'source', 'reroute_operator_action_task'
     ))
   );
 
@@ -252,7 +252,7 @@ begin
 end;
 $$;
 
-revoke execute on function public.reroute_needs_dave_task(uuid,text) from public, anon, authenticated;
-grant execute on function public.reroute_needs_dave_task(uuid,text) to service_role;
+revoke execute on function public.reroute_operator_action_task(uuid,text) from public, anon, authenticated;
+grant execute on function public.reroute_operator_action_task(uuid,text) to service_role;
 
 notify pgrst, 'reload schema';

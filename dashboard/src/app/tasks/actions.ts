@@ -25,7 +25,7 @@ const STATUSES = new Set([
   "Agent Working",
   "Agent Needs Input",
   "Agent Review",
-  "Needs Dave",
+  "Needs Operator",
   "Agent Done",
 ]);
 
