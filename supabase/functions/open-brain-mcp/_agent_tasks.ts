@@ -4,6 +4,7 @@ export const AGENT_TASK_STATUSES = [
   "Agent Working",
   "Agent Needs Input",
   "Agent Review",
+  "Needs Dave",
   "Agent Done",
 ] as const;
 
@@ -17,6 +18,8 @@ export const AGENT_TASK_RECEIPTS = [
   "AGENT RESUMED",
   "AGENT FAILED",
   "AGENT APPLIED",
+  "AGENT NEEDS DAVE",
+  "OPERATOR DONE",
   "AGENT SKILL SUBSCRIBED",
   "AGENT SKILL INSTALLED",
   "AGENT SKILL UPDATED",
@@ -216,6 +219,13 @@ export function receiptForTaskTool(
   }
 }
 
+export function receiptForAppliedStatus(
+  status: AgentTaskStatus,
+): Extract<AgentTaskReceipt, "AGENT APPLIED" | "AGENT NEEDS DAVE"> {
+  if (status === "Needs Dave") return "AGENT NEEDS DAVE";
+  return "AGENT APPLIED";
+}
+
 export function compactObject<T extends Record<string, unknown>>(value: T): T {
   const copy: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
@@ -224,4 +234,15 @@ export function compactObject<T extends Record<string, unknown>>(value: T): T {
     }
   }
   return copy as T;
+}
+
+export function operatorTargetHasAllowedScheme(value: string): boolean {
+  const trimmed = value.trim();
+  // Protocol-relative //host resolves to an external host in a browser, so it
+  // must be rejected even though it carries no explicit scheme.
+  if (trimmed.startsWith("//")) return false;
+  const schemeMatch = trimmed.match(/^([a-z][a-z0-9+.-]*):/i);
+  if (!schemeMatch) return true;
+  const scheme = schemeMatch[1].toLowerCase();
+  return scheme === "http" || scheme === "https";
 }

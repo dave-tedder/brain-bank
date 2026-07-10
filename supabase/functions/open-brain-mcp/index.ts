@@ -57,6 +57,8 @@ import {
   compactObject,
   isAgentTaskRisk,
   isLedgerAutomationState,
+  operatorTargetHasAllowedScheme,
+  receiptForAppliedStatus,
   receiptForTaskTool,
 } from "./_agent_tasks.ts";
 
@@ -706,7 +708,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, archived_at";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, archived_at";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -2711,6 +2713,15 @@ server.registerTool(
       resolve_linked_action_item: z.boolean().optional(),
       child_task_ids: z.array(z.string().uuid()).optional(),
       closeout_evidence: z.record(z.unknown()).optional(),
+      operator_action: z.string().min(1).optional().describe(
+        "One-line human step the operator must do on an outside system. When set, the task routes to Needs Dave instead of Agent Done and the linked action item stays open.",
+      ),
+      operator_target: z.string().min(1).refine(
+        operatorTargetHasAllowedScheme,
+        "operator_target only allows http(s) URL schemes when a URL scheme is present.",
+      ).optional().describe(
+        "URL or file path where the operator does the operator_action (a listing claim page, a deliverables/ file, a phone number).",
+      ),
     },
   },
   async (
@@ -2722,6 +2733,8 @@ server.registerTool(
       resolve_linked_action_item,
       child_task_ids,
       closeout_evidence,
+      operator_action,
+      operator_target,
     }: {
       task_id: string;
       applied_by?: string;
@@ -2730,6 +2743,8 @@ server.registerTool(
       resolve_linked_action_item?: boolean;
       child_task_ids?: string[];
       closeout_evidence?: Record<string, unknown>;
+      operator_action?: string;
+      operator_target?: string;
     },
   ) => {
     logToolInvocation("apply_agent_task_review", {
@@ -2768,21 +2783,91 @@ server.registerTool(
           p_resolve_linked_action_item: resolve_linked_action_item ?? false,
           p_child_task_ids: childTaskIds,
           p_closeout_evidence: closeout_evidence ?? {},
+          p_operator_action: operator_action ?? null,
+          p_operator_target: operator_target ?? null,
         },
       );
       if (error) throw error;
 
+      const appliedStatus = (data as { status?: AgentTaskStatus } | null)
+        ?.status;
+      const receipt =
+        appliedStatus && AGENT_TASK_STATUSES.includes(appliedStatus)
+          ? receiptForAppliedStatus(appliedStatus)
+          : "AGENT APPLIED";
+
       return textToolResponse({
-        receipt: "AGENT APPLIED",
+        receipt,
         resolution,
         linked_action_item_resolution_requested: resolve_linked_action_item ??
           false,
+        operator_action: operator_action ?? null,
         child_task_ids: childTaskIds,
         task: data,
       });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error applying agent task review: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "complete_operator_action",
+  {
+    title: "Complete Operator Action",
+    description:
+      "Close a Needs Dave task after the operator has done the outside-system step. Moves Needs Dave to Agent Done with an OPERATOR DONE receipt and resolves the linked action item when one exists. Only the operator closes Needs Dave; agents never do.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      note: z.string().min(1).optional().describe(
+        "What the operator did (e.g. 'Claimed the listing and pasted the pack').",
+      ),
+    },
+  },
+  async ({ task_id, note }: { task_id: string; note?: string }) => {
+    logToolInvocation("complete_operator_action", { task_id }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc("complete_operator_action", {
+        p_task_id: task_id,
+        p_note: note ?? null,
+      });
+      if (error) throw error;
+      return textToolResponse({ receipt: "OPERATOR DONE", task: data });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error completing operator action: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "reroute_needs_dave_task",
+  {
+    title: "Reroute Needs Dave Task",
+    description:
+      "Escape hatch for a misrouted Needs Dave card: send it back to Agent Todo for the executor lane instead of falsely closing it as done. Clears the operator step, writes an AGENT FOLLOW-UP receipt, leaves any linked action item open.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      reason: z.string().min(1).describe(
+        "Why the card is going back (e.g. 'not actually a personal step; agent can finish this').",
+      ),
+    },
+  },
+  async ({ task_id, reason }: { task_id: string; reason: string }) => {
+    logToolInvocation("reroute_needs_dave_task", { task_id }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc("reroute_needs_dave_task", {
+        p_task_id: task_id,
+        p_reason: reason,
+      });
+      if (error) throw error;
+      return textToolResponse({ receipt: "AGENT FOLLOW-UP", task: data });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error rerouting Needs Dave task: ${(err as Error).message}`,
       );
     }
   },
