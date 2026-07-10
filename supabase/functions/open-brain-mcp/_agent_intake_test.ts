@@ -1,7 +1,11 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
 import {
+  AGENT_TASK_INTAKE_SOURCES,
+  type AgentTaskIntakeSource,
+  assertFollowUpParentAllowed,
   assertNoActiveActionItemDraft,
   assertNoActiveThoughtDraft,
+  assertNoDuplicateOpenFollowUp,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
   buildFollowUpTaskRecord,
@@ -27,7 +31,7 @@ Deno.test("intake creates Standing draft records with safe defaults", () => {
   assertEquals(record.priority, "medium");
   assertEquals(record.risk, "medium");
   assertEquals(record.explicit_approval, false);
-  assertEquals(record.requested_by, "codex");
+  assertEquals(record.requested_by, null);
   assertEquals(
     record.title.startsWith("[agent instructions][unassigned][task]"),
     true,
@@ -91,6 +95,24 @@ Deno.test("intake requires packet fields and array sources", () => {
       }),
     Error,
     "sources must be an array",
+  );
+  assertThrows(
+    () =>
+      buildAgentTaskIntakeRecord({
+        ...baseInput,
+        desired_outcome: "x".repeat(4001),
+      }),
+    Error,
+    "desired_outcome must be 4000 characters or fewer",
+  );
+  assertThrows(
+    () =>
+      buildAgentTaskIntakeRecord({
+        ...baseInput,
+        title: "x".repeat(241),
+      }),
+    Error,
+    "title must be 240 characters or fewer",
   );
 });
 
@@ -170,18 +192,29 @@ Deno.test("action-item promotion rejects unsafe or invalid input", () => {
 });
 
 Deno.test("action-item promotion rejects duplicate active linked drafts", () => {
-  assertThrows(
-    () =>
-      assertNoActiveActionItemDraft(
-        [{ id: "55555555-5555-4555-8555-555555555555", status: "Standing" }],
-        "33333333-3333-4333-8333-333333333333",
-      ),
-    Error,
-    "already has an active agent task draft",
-  );
+  for (
+    const status of [
+      "Standing",
+      "Agent Todo",
+      "Agent Working",
+      "Agent Needs Input",
+      "Agent Review",
+      "Needs Operator",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        assertNoActiveActionItemDraft(
+          [{ id: "55555555-5555-4555-8555-555555555555", status }],
+          "33333333-3333-4333-8333-333333333333",
+        ),
+      Error,
+      "already has an active agent task draft",
+    );
+  }
 
   assertNoActiveActionItemDraft(
-    [{ id: "66666666-6666-4666-8666-666666666666", status: "Agent Review" }],
+    [{ id: "66666666-6666-4666-8666-666666666666", status: "Agent Done" }],
     "33333333-3333-4333-8333-333333333333",
   );
 });
@@ -301,15 +334,26 @@ Deno.test("thought intake rejects missing or invalid thought input", () => {
 });
 
 Deno.test("thought intake rejects duplicate active source-thought drafts", () => {
-  assertThrows(
-    () =>
-      assertNoActiveThoughtDraft(
-        [{ id: "88888888-8888-4888-8888-888888888888", status: "Agent Todo" }],
-        "77777777-7777-4777-8777-777777777777",
-      ),
-    Error,
-    "already has an active agent task draft",
-  );
+  for (
+    const status of [
+      "Standing",
+      "Agent Todo",
+      "Agent Working",
+      "Agent Needs Input",
+      "Agent Review",
+      "Needs Operator",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        assertNoActiveThoughtDraft(
+          [{ id: "88888888-8888-4888-8888-888888888888", status }],
+          "77777777-7777-4777-8777-777777777777",
+        ),
+      Error,
+      "already has an active agent task draft",
+    );
+  }
 
   assertNoActiveThoughtDraft(
     [{ id: "99999999-9999-4999-8999-999999999999", status: "Agent Done" }],
@@ -374,5 +418,62 @@ Deno.test("follow-up intake rejects missing parent task or packet fields", () =>
       }),
     Error,
     "desired_outcome is required",
+  );
+});
+
+Deno.test("follow-up intake rejects archived parents and duplicate active children", () => {
+  assertFollowUpParentAllowed({
+    id: "11111111-1111-4111-8111-111111111111",
+    archived_at: null,
+  });
+  assertThrows(
+    () =>
+      assertFollowUpParentAllowed({
+        id: "11111111-1111-4111-8111-111111111111",
+        archived_at: "2026-07-09T12:00:00Z",
+      }),
+    Error,
+    "archived and cannot receive follow-up drafts",
+  );
+
+  assertThrows(
+    () =>
+      assertNoDuplicateOpenFollowUp(
+        [{
+          id: "22222222-2222-4222-8222-222222222222",
+          status: "Needs Operator",
+          desired_outcome:
+            "Browser-check live AI answer surfaces for four GEO terms.",
+        }],
+        "11111111-1111-4111-8111-111111111111",
+        "Browser-check live AI answer surfaces for four GEO terms.",
+      ),
+    Error,
+    "already has an active follow-up draft",
+  );
+
+  assertNoDuplicateOpenFollowUp(
+    [{
+      id: "33333333-3333-4333-8333-333333333333",
+      status: "Agent Done",
+      desired_outcome:
+        "Browser-check live AI answer surfaces for four GEO terms.",
+    }],
+    "11111111-1111-4111-8111-111111111111",
+    "Browser-check live AI answer surfaces for four GEO terms.",
+  );
+});
+
+Deno.test("intake source list remains Brain Bank neutral", () => {
+  assert(
+    AGENT_TASK_INTAKE_SOURCES.includes(
+      "brain-bank-capture" as AgentTaskIntakeSource,
+    ),
+  );
+  assertEquals(
+    AGENT_TASK_INTAKE_SOURCES.includes(
+      "open-brain-capture" as AgentTaskIntakeSource,
+    ),
+    false,
   );
 });

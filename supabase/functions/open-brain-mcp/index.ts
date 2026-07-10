@@ -32,8 +32,10 @@ import {
   ACTIVE_THOUGHT_DRAFT_STATUSES,
   AGENT_TASK_INTAKE_SOURCES,
   type AgentTaskIntakeSource,
+  assertFollowUpParentAllowed,
   assertNoActiveActionItemDraft,
   assertNoActiveThoughtDraft,
+  assertNoDuplicateOpenFollowUp,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
   buildFollowUpTaskRecord,
@@ -2398,6 +2400,24 @@ server.registerTool(
       if (!parentTask) {
         throw new Error(`Parent task not found: ${args.parent_task_id}`);
       }
+      assertFollowUpParentAllowed({
+        id: String(parentTask.id),
+        archived_at: typeof parentTask.archived_at === "string"
+          ? parentTask.archived_at
+          : null,
+      });
+      const { data: existingChildren, error: existingChildrenError } =
+        await supabase
+          .from("agent_tasks")
+          .select("id, status, desired_outcome")
+          .eq("parent_task_id", args.parent_task_id)
+          .is("archived_at", null);
+      if (existingChildrenError) throw existingChildrenError;
+      assertNoDuplicateOpenFollowUp(
+        existingChildren ?? [],
+        args.parent_task_id,
+        args.desired_outcome,
+      );
 
       const record = buildFollowUpTaskRecord(args);
       const { data, error } = await supabase
