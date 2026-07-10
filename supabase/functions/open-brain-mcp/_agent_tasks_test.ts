@@ -287,14 +287,18 @@ Deno.test("resume tools only allow blocked or review work back to working", () =
   );
 });
 
-Deno.test("receipt allowlist includes OE-11 Needs Operator board event types", () => {
+Deno.test("receipt allowlist includes OE-11 board and critic event types", () => {
   assertEquals(AGENT_TASK_RECEIPTS.includes("AGENT NEEDS OPERATOR"), true);
   assertEquals(AGENT_TASK_RECEIPTS.includes("OPERATOR DONE"), true);
+  assertEquals(AGENT_TASK_RECEIPTS.includes("AGENT CRITIC"), true);
 });
 
 Deno.test("apply receipt follows returned task status", () => {
   assertEquals(receiptForAppliedStatus("Agent Done"), "AGENT APPLIED");
-  assertEquals(receiptForAppliedStatus("Needs Operator"), "AGENT NEEDS OPERATOR");
+  assertEquals(
+    receiptForAppliedStatus("Needs Operator"),
+    "AGENT NEEDS OPERATOR",
+  );
 });
 
 Deno.test("operator target allows http(s) schemes and rejects unsafe schemes", () => {

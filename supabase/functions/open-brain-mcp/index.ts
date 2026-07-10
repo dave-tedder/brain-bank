@@ -708,7 +708,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, archived_at";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -2859,15 +2859,72 @@ server.registerTool(
   async ({ task_id, reason }: { task_id: string; reason: string }) => {
     logToolInvocation("reroute_operator_action_task", { task_id }, "mcp");
     try {
-      const { data, error } = await supabase.rpc("reroute_operator_action_task", {
-        p_task_id: task_id,
-        p_reason: reason,
-      });
+      const { data, error } = await supabase.rpc(
+        "reroute_operator_action_task",
+        {
+          p_task_id: task_id,
+          p_reason: reason,
+        },
+      );
       if (error) throw error;
       return textToolResponse({ receipt: "AGENT FOLLOW-UP", task: data });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error rerouting Needs Operator task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "record_critic_verdict",
+  {
+    title: "Record Critic Verdict",
+    description:
+      "Advisory only. Store an independent critic's verdict on an Agent Review or Needs Operator task. Never moves task status. The critic runtime must differ from the executor's (Codex reviews Claude-executed tasks and vice versa); the SQL rejects a same-runtime critic.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      critic_agent_code: z.enum(["codex-critic", "claude-critic"]),
+      verdict: z.enum(["clean", "flagged"]),
+      flags: z.array(z.string()).optional().describe(
+        "Specific issues found (voice/brand, unverified facts, scope drift, errors). Empty for clean.",
+      ),
+      allow_rereview: z.boolean().optional().describe(
+        "Set true only when intentionally replacing an existing critic verdict; the event trail keeps both reviews.",
+      ),
+    },
+  },
+  async ({ task_id, critic_agent_code, verdict, flags, allow_rereview }: {
+    task_id: string;
+    critic_agent_code: string;
+    verdict: string;
+    flags?: string[];
+    allow_rereview?: boolean;
+  }) => {
+    logToolInvocation("record_critic_verdict", {
+      task_id,
+      critic_agent_code,
+      verdict,
+    }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc("record_critic_verdict", {
+        p_task_id: task_id,
+        p_critic_agent_code: critic_agent_code,
+        p_verdict: verdict,
+        p_flags: flags ?? [],
+        p_allow_rereview: allow_rereview ?? false,
+      });
+      if (error) throw error;
+      return textToolResponse({
+        receipt: "AGENT CRITIC",
+        verdict,
+        flags: flags ?? [],
+        allow_rereview: allow_rereview ?? false,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error recording critic verdict: ${(err as Error).message}`,
       );
     }
   },
