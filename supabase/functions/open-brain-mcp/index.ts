@@ -2838,23 +2838,48 @@ server.registerTool(
   {
     title: "Complete Operator Action",
     description:
-      "Close a Needs Operator task after the operator has done the outside-system step. Moves Needs Operator to Agent Done with an OPERATOR DONE receipt and resolves the linked action item when one exists. Only the operator closes Needs Operator; agents never do.",
+      "Close a Needs Operator task after the operator has done the outside-system step. Moves Needs Operator to Agent Done with an OPERATOR DONE receipt and resolves the linked action item when one exists. completed_by must name the human operator; anonymous callers, registered agent codes, and automated-runtime identities are refused.",
     inputSchema: {
       task_id: z.string().uuid(),
+      completed_by: z.string().min(1).describe(
+        "Human operator who completed the outside-system step.",
+      ),
       note: z.string().min(1).optional().describe(
-        "What the operator did (e.g. 'Claimed the listing and pasted the pack').",
+        "What the operator did (e.g. 'Claimed the listing and pasted the handoff').",
       ),
     },
   },
-  async ({ task_id, note }: { task_id: string; note?: string }) => {
-    logToolInvocation("complete_operator_action", { task_id }, "mcp");
+  async (
+    { task_id, completed_by, note }: {
+      task_id: string;
+      completed_by: string;
+      note?: string;
+    },
+  ) => {
+    logToolInvocation("complete_operator_action", {
+      task_id,
+      completed_by,
+    }, "mcp");
     try {
+      const { data: ledgerRows, error: ledgerError } = await supabase
+        .from("agent_task_ledger")
+        .select("agent_code");
+      if (ledgerError) throw ledgerError;
+      assertPromotionCallerAllowed(
+        completed_by,
+        (ledgerRows ?? []).map((row: { agent_code: string }) => row.agent_code),
+      );
       const { data, error } = await supabase.rpc("complete_operator_action", {
         p_task_id: task_id,
+        p_completed_by: completed_by,
         p_note: note ?? null,
       });
       if (error) throw error;
-      return textToolResponse({ receipt: "OPERATOR DONE", task: data });
+      return textToolResponse({
+        receipt: "OPERATOR DONE",
+        completed_by,
+        task: data,
+      });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error completing operator action: ${(err as Error).message}`,
