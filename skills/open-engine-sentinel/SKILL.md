@@ -39,11 +39,14 @@ for explicit approval to run this idempotent Supabase `execute_sql` insert:
 insert into public.agent_task_ledger
   (agent_code, operator, runtime, automation, automation_state, notes)
 values
-  ('sentinel', 'operator', 'scheduled-cron-skill',
+  ('sentinel', 'operator', 'codex',
    'daily operations sentinel', 'installed',
    'OE-14 Operations Sentinel. Read-only board watchdog; reports scheduled lane health, stale claims, old Standing drafts, and agent_scorecard learning trends. Never claims or mutates tasks.')
 on conflict (agent_code) do nothing;
 ```
+
+`runtime` is CHECK-constrained to exactly `claude` or `codex`; set it to
+whichever runtime owns your scheduled sentinel.
 
 After approval and insert, verify with `read_agent_ledger(agent_code:
 "sentinel")` before any manual or scheduled run.
@@ -53,13 +56,18 @@ After approval and insert, verify with `read_agent_ledger(agent_code:
 1. **Preflight.** `read_agent_ledger`. Required rows: the scheduled lane codes
    configured on this board (for example `triage`, `claude-code`, `codex`) and
    `sentinel`. A `briefing` row, if present, is useful context but not a
-   sentinel dependency.
+   sentinel dependency. Critic rows (`claude-critic` and `codex-critic`) are
+   WARN-level checks: stale critics never fail the sentinel by themselves
+   because critic verdicts are advisory, but they must be named.
 2. **Lane freshness.** Compare each lane's `last_heartbeat` or
    `last_successful_run` against its configured slot for today in the operator's
    timezone. Example slots: a triage lane in the early morning, an executor lane
    at a few points through the day, a queue-runner/audit lane at its scheduled
-   time. Treat a lane as fresh if its last activity is after its expected slot
-   for today and before the sentinel run. Name stale or missing lanes in `FAIL`.
+   time. WARN-only: the critic lanes (`claude-critic`, `codex-critic`) at their
+   configured slot when registered/active. Treat a lane as fresh if its last
+   activity is after its expected slot for today and before the sentinel run.
+   Name stale or missing required lanes in `FAIL`; name stale or missing critic
+   lanes under `WARN`.
 3. **Board health.** Use `list_agent_tasks` for `Agent Working` and `Standing`,
    or `execute_sql` read-only if a compact result is safer:
    - Agent Working where `claim_expires_at < now()` = would-reap rows. Report
@@ -101,6 +109,7 @@ order by agent_code, task_type;
 ```text
 Open Engine Sentinel: PASS
 Lane health: triage fresh at <time>; executor fresh at <time>; codex fresh at <time>.
+Critic warn: claude-critic <fresh/stale/not registered>; codex-critic <fresh/stale>.
 Board health: expired Working 0; old Standing 1 known canary (<id>).
 Learning eval: claude-code action-item-promotion 10/13 first-try (77%), triage-agent 1/1 (100%), ...
 Phase 4 row text: | <n> | <date> | natural/manual | <draft ids/count> | <mis-tier?> | <PASS/FAIL/RESET> | sentinel |
