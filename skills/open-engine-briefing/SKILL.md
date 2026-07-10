@@ -143,7 +143,28 @@ on conflict (agent_code) do nothing;
    (`AGENT CLAIMED` with no terminal receipt), promoted on its own
    (`AGENT STATUS` with `payload.action='auto-promoted'`).
 4. **Render the Session Operating Map** (structure below).
-5. **Close out, only after a successful render:** `write_agent_ledger` for
+5. **Phase 4 readiness streak (query-backed).** Read the watch views via
+   Supabase `execute_sql` (read-only):
+
+   ```sql
+   select clean_streak, terminated_by_day, terminated_by_verdict, latest_settled_day
+   from oe_triage_watch_streak;
+   select et_day, drafts_created, mechanical_verdict, effective_verdict
+   from oe_triage_watch_days
+   where effective_verdict <> 'CLEAN' or et_day > (now() at time zone 'America/New_York')::date - 7
+   order by et_day;
+   ```
+
+   Render the streak WITH its terminating day and verdict, never as a bare
+   integer — verdicts are retroactive (a draft archived days later can drop
+   the number without anyone editing anything), and a drop must be legible
+   instead of alarming. Any `PENDING_REVIEW` day is a "needs you" item: the
+   operator rules it via `oe_watch_rulings` (promoted draft → clean; archived
+   unpromoted → dirty; untouched → leave pending). The views are the system
+   of record for the streak; do NOT transcribe rows into PROJECT-TRACKER.md.
+   The gate itself is unchanged: 5 consecutive CLEAN days AND the operator's
+   explicit go.
+6. **Close out, only after a successful render:** `write_agent_ledger` for
    `briefing` with `last_successful_run` = the MAXIMUM event/task
    timestamp observed this run (not now()), converted to UTC `Z` datetime form
    (for example `2026-07-09T20:30:30.123456Z`, never a `+00:00` offset).

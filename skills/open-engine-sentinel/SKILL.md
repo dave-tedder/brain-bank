@@ -23,8 +23,12 @@ ToolSearch when deferred.
   2. one `write_agent_ledger` heartbeat for `sentinel`;
   3. one `capture_thought` summary.
 - Scheduled runs do NOT edit `PROJECT-TRACKER.md` or `SESSION-LOG.md`.
-  Include a ready-to-paste Phase 4 readiness-watch row in the Slack report
-  instead. A human session can paste it into the tracker if desired.
+  Report the Phase 4 readiness streak from `oe_triage_watch_streak`
+  (read-only `execute_sql`) instead of a paste-row: the views are the system
+  of record now. Flag any `MISSING` day in `oe_triage_watch_days` loudly —
+  a MISSING day means a scheduled lane left no durable run record, and this
+  flag is the check that would have caught a dead triage lane the same
+  morning rather than days later in conversation.
 - One honest exit. If any required read fails, post/report `FAIL` with the
   missing surface named. Do not paper over partial data.
 - Operator-facing voice: plain, natural prose.
