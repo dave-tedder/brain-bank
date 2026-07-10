@@ -25,6 +25,33 @@ export function isHighValuePage(page: { page_type: string }): boolean {
   return page.page_type === "client" || page.page_type === "project";
 }
 
+// --- Quarantine slow lane (Session 289) ---
+//
+// Pages that hit the consecutive-failure quarantine threshold used to be
+// skipped outright on every scheduled run, which made a deep-backlog page that
+// times out unrecoverable: it never compiles, so its watermark never advances,
+// so the catch-up batch only grows, so it keeps timing out. The three topics
+// that stalled for 1-2 months (dave/development/seo) all landed here.
+//
+// The slow lane admits a bounded number of the most-overdue quarantined pages
+// back into the run at forced intake=1 (the smallest possible edit-mode batch;
+// a single thought's synthesis reliably fits under the per-call LLM timeout
+// even on the deep pages). Input is oldest-`last_compiled`-first, so the first
+// `maxSlowLane` are the ones stuck longest. The rest are still returned as
+// `skipped` so the caller reports them through the run's errored list and the
+// digest degraded-run warning keeps firing. A successful slow-lane compile
+// resets the failure counter and un-quarantines the page.
+export function partitionQuarantine<T>(
+  quarantined: T[],
+  maxSlowLane: number,
+): { slowLane: T[]; skipped: T[] } {
+  const cap = Math.max(0, maxSlowLane);
+  return {
+    slowLane: quarantined.slice(0, cap),
+    skipped: quarantined.slice(cap),
+  };
+}
+
 export function selectPagesToCompile<T extends { page_type: string }>(
   candidates: T[],
   batch: number,

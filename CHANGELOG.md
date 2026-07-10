@@ -8,6 +8,34 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-10
+
+Brain Bank v0.5.0 adds the Open Engine human-facing layer: a briefing that turns the board into an operator cockpit, a draft-safe triage lane that proposes work from open action items, an advisory cross-runtime critic, an operations sentinel, an agent scorecard, and a query-backed readiness watch that gates the (still-opt-in) auto-promote work. Canonical state still only changes through the human-controlled OE-7/OE-8 apply layer; nothing here promotes or executes on its own.
+
+### Added
+
+- **OE-11 operator briefing + Needs Operator desk.** A read-only in-chat briefing renders a Session Operating Map (what happened, what needs you) with every waiting item bucketed by action type and its work one click away. A persistent `Needs Operator` board status gives personal-action items a home between review and done.
+- **OE-12 triage lane + Phase 4 readiness watch.** A draft-safe `triage` lane reads open action items and creates Standing drafts only (never promotes). An append-only `agent_run_log` plus the `oe_triage_watch_days` / `oe_triage_watch_streak` views make clean-day evidence query-backed and immutable, gating the opt-in auto-promote path behind five consecutive clean days.
+- **OE-11 advisory cross-runtime critic.** An independent reviewer in a different runtime than the executor records an advisory verdict per finished task. Advisory only: the verdict never moves task status.
+- **OE-14 operations sentinel + OE-13 agent scorecard.** A read-only daily sentinel reports board health and expired claims; a `security_invoker` scorecard view grades first-try pass-rate per agent and task type.
+- **Action-item resolve/defer path.** Operator-gated `resolve_action_item` / `defer_action_item` / `restore_action_item` MCP tools plus a `deferred` status, so paused work leaves the open pool reversibly.
+
+### Changed
+
+- **Closeout controller hardening.** Journaling before apply, `--resume` after a confirmed apply, marker-guarded appends, tighter operator-target scheme validation (rejects protocol-relative `//host`), append-not-rewrite, and a full node test suite + fixtures now run in CI.
+- **Compile-pages fairness + reliability.** Budget-fit deep-topic drain, failure quarantine, and exclude-tag scheduled-compile skips.
+- **Capture-side reliability.** Error-checked resolve UPDATEs, in-channel failure replies, explicit-tag normalization, and a bounded LAYER 2 auto-resolve call.
+
+### Migrations
+
+Ships 17 SQL migration files (Open Engine watch/scorecard/critic/needs-operator/hardening, action-item defer). Brain Bank ships migrations as files; apply the set in timestamp order against your own Supabase project.
+
+### Upgrade Notes
+
+- Deploy the updated `open-brain-mcp` and `compile-pages` functions.
+- Apply the 17 new migration files in timestamp order against your own Supabase project (Brain Bank has no live database; migrations ship as files only).
+- The OE-12 Phase 4 auto-promote tool itself is **not** in this release — v0.5.0 ships the query-backed readiness watch that gates it, not the auto-promote path. The briefing, triage, critic, sentinel, and scorecard lanes are opt-in and do nothing until you wire up their routines.
+
 ## [0.4.4] - 2026-07-07
 
 Brain Bank v0.4.4 adds the OE-9 scheduled executor lane and a Slack task-intake surface, plus quieter capture and wiki-quality improvements. The important shift: for the first time an autonomous runner can *execute* board work, not just claim-and-hold it — but only one low-risk task per day, and canonical state (trackers, session logs, action items) still only changes through the human-controlled OE-7/OE-8 apply layer.

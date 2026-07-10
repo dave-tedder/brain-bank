@@ -1,12 +1,12 @@
 ---
 name: queue-runner
-description: Use when manually running one Open Engine Queue Runner heartbeat from the agent task board, especially when claiming, resuming, blocking, completing, or writing ledger receipts through the Brain Bank MCP task tools. Keeps the run manual, one-task-only, and parent-session-owned.
+description: Use when manually running one Open Engine Queue Runner heartbeat from the agent task board, especially when claiming, resuming, blocking, completing, or writing ledger receipts for `codex` tasks through the Brain Bank MCP task tools. Keeps the run manual, one-task-only, and parent-session-owned.
 type: skill
 ---
 
 # Queue Runner
 
-Run one manual Open Engine heartbeat for one runtime, then stop. Start with the runtime `agent_code` configured in the task ledger. Add another runtime only after the first one has passed the smoke tests and the build plan says to expand.
+Run one manual Open Engine heartbeat for one runtime, then stop. This skill is for `codex` first. Add another runtime only after `codex` has passed the smoke tests and the build plan says to expand.
 
 This skill does not create cron jobs, scheduled runners, background loops, Slack sends, credential changes, billing changes, deletes, deploys, client-facing messages, WordPress changes, or autonomous execution.
 
@@ -16,11 +16,11 @@ This skill is behavioral guidance for the agent running the heartbeat. It is not
 
 Default runtime:
 
-- `agent_code`: the runtime code requested by the user, such as `your-codex`
-- `operator`: the user
+- `agent_code`: `codex`
+- `operator`: operator
 - `automation_state`: `manual-required`
 
-Use an `agent_code` only after the ledger confirms it exists. Never invent a new ledger identity during a heartbeat.
+If the user explicitly assigns a different runtime, use that `agent_code` only after the ledger confirms it exists. Never invent a new ledger identity during a heartbeat.
 
 ## Mandatory Preflight
 
@@ -67,6 +67,14 @@ Check in this order:
 
 Human-hold and blocked work comes before new claims because it is already in flight and may be waiting on the current runtime. Resume only when the task packet or latest event contains enough information to proceed without guessing.
 
+## Specific Claim From A Goal Prompt
+
+When a briefing Goal Prompt names a task id, use `claim_specific_agent_task`
+instead of the general queue claim. All normal gates still apply: one claim per
+heartbeat, risk must be allowed for the runtime, the packet must be coherent,
+and required tools/context must be available. If the named task fails a refusal
+gate, do not claim another task "while here"; report the refusal and stop.
+
 ## Refusal Gates
 
 Do not claim or resume a task when any of these are true:
@@ -93,6 +101,11 @@ Use exactly one task receipt for the heartbeat result:
 
 If a required source, browser surface, credential, tool, file, approval, or verification surface is missing, use `block_agent_task` with the missing requirement. Honest partial work belongs in the blocker or handoff text, not in an `AGENT DONE` receipt.
 
+For long-running work, post an `AGENT STATUS` heartbeat at least every 30
+minutes before the claim TTL can reap the task. The status note must say what is
+still running and the next checkpoint. If you cannot keep the claim alive, exit
+through hold or block with the partial findings.
+
 Receipt notes must include:
 
 - What was done.
@@ -115,6 +128,24 @@ Follow-up recommendation:
 
 The OE-8 closeout controller consumes these headings; a receipt missing a section is held out of auto-closeout, not guessed at. Keep receipts factual. Do not claim tracker, session-log, commit, push, or project capture work was done by a worker if the parent session still needs to do it.
 
+DELIVERABLES-TO-FILE (local runtime): when the task produces a client-facing standalone draft (a listing pack, a bio, a directory field-by-field, blog copy), write it to `deliverables/<project_slug>/<task-shortid>-<slug>.md` in the Brain Bank repo and record that exact path under "Touched files or records:". `deliverables/` is gitignored — the draft never ships to brain-bank. Do NOT use `deliverables/` for code/config changes to a project: those are a commit/diff in that project's own repo; record the repo + branch under "Touched files or records:" instead.
+
+CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk leaves the full draft inline in "Work summary" and records `Touched files or records: None written (cloud runtime — draft inline above)`. No task is ever unreviewable.
+
+OPERATOR STEP MARKER: when accepting the work leaves the operator a personal outside-system step (claim a listing and paste, make a call, confirm a fact), add this line inside "Follow-up recommendation:":
+
+```text
+OPERATOR-ACTION: <one-line step> || OPERATOR-TARGET: <url-or-path>
+```
+
+(OPERATOR-TARGET and the `||` are optional.) The closeout-controller reads this verbatim to route the task to the Needs Operator desk. No marker => terminal task, closes to Agent Done. The marker is valid ONLY inside "Follow-up recommendation:" — a marker in any other section holds the task (`OPERATOR_MARKER_OUTSIDE_FOLLOW_UP`) instead of closing it, so the step is never silently lost.
+
+VOICE RULES for any drafted client-facing or operator-voice content inside a task
+(blog drafts, emails, titles/metas): no em dashes; never use the words
+"inked", "inking", "tapestry", "delve", "delving", "realm", metaphorical
+"landscape", "leverage" as a verb, "synergy", "holistic", "robust";
+craft-first tone, no hype.
+
 ## Scheduled Path: Claim-and-Hold
 
 The scheduled `queue-runner` Edge Function follows this same heartbeat with one hard difference: it has no executor, so it never writes `AGENT DONE`. Its claim-and-hold contract is: claim through the guarded MCP path, validate the packet, then post `AGENT HUMAN HOLD` with an honest 8-section hold receipt draft. Post-claim failures write `AGENT FAILED` on the claimed task instead of stranding it in `Agent Working`. The scheduled path reports held/blocked work in its summary; it never resumes held work itself.
@@ -126,6 +157,8 @@ After the one task receipt, update the runtime ledger with `write_agent_ledger`.
 Set:
 
 - `last_queue_result`: one compact summary of the heartbeat result.
+- `last_successful_run`: current UTC datetime in `Z` form, never a `+00:00`
+  offset.
 - `local_context`: repository path and relevant branch or task ID.
 - `automation_state`: keep `manual-required` unless the runtime itself is blocked or paused.
 - `notes`: next manual checkpoint, if useful.
@@ -142,7 +175,7 @@ The parent session owns:
 - `SESSION-LOG.md` updates.
 - Project closeout capture.
 - Git commits and pushes.
-- Public/private classification and port decisions.
+- Brain Bank public/private classification and port decisions.
 
 Worker subagents may do independent read-only audits or scoped task work when a task grants that authority. Their output is a receipt, not canonical project state.
 
@@ -150,7 +183,7 @@ A standalone fresh chat that manually claims a board task is the parent session 
 
 ## Required Smoke Tests
 
-Before treating the manual Queue Runner pilot as complete, the parent session must create new harmless test tasks and verify all three:
+Before treating OE-4 as complete, the parent session must create new harmless test tasks and verify all three:
 
 - Hello-world task: claimed once, scoped result posted once, ledger updated in place.
 - Blocked-resume task: blocked or human-hold work is checked before new claim, then one ready blocked task is resumed or deliberately blocked with a clear reason.

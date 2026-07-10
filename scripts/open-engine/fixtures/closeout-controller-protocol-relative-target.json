@@ -1,0 +1,32 @@
+{
+  "_note": "F2 fixture (Fix Session A): a protocol-relative //host OPERATOR-TARGET must be rejected as OPERATOR_TARGET_UNSAFE_SCHEME and hold the task. In a browser //evil.com resolves to that external host, so the absolute-path branch must never accept it. Expected HELD.",
+  "generated_at": "2026-07-10T12:00:00.000Z",
+  "tasks": [
+    {
+      "id": "a1b2c3d4-0022-4a2b-8c3d-000000000022",
+      "title": "[agent instructions][codex][task] F2 protocol-relative operator-target fixture",
+      "status": "Agent Review",
+      "risk": "low",
+      "project_slug": "brain-bank",
+      "explicit_approval": false,
+      "claimed_by": "codex",
+      "linked_action_item_id": null,
+      "review_reason": null,
+      "updated_at": "2026-07-10T11:59:00.000000+00:00",
+      "events": [
+        {
+          "task_id": "a1b2c3d4-0022-4a2b-8c3d-000000000022",
+          "event_type": "AGENT DONE",
+          "agent_code": "codex",
+          "payload": {
+            "reason": "Work summary:\nFixture work with a hostile protocol-relative operator target.\n\nVerification:\nFixture verification.\n\nTouched files or records:\nNone written.\n\nLimitations:\nFixture only.\n\nTracker draft:\nTracker line.\n\nSession-log draft:\nSession line.\n\nBrain Bank capture draft:\nCapture line.\n\nFollow-up recommendation:\nThe operator finishes the last step.\nOPERATOR-ACTION: Open the desk || OPERATOR-TARGET: //evil.com/phish",
+            "status": "Agent Review",
+            "from_status": "Agent Working"
+          },
+          "created_at": "2026-07-10T11:58:15.000000+00:00"
+        }
+      ]
+    }
+  ],
+  "actionItems": []
+}

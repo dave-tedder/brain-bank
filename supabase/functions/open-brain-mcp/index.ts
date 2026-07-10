@@ -21,12 +21,21 @@ import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
+  assertRestoreSelector,
+  buildDeferActionItemUpdate,
+  buildResolveActionItemUpdate,
+  buildRestoreActionItemUpdate,
+  stateGuardError,
+} from "./_action_items.ts";
+import {
   ACTIVE_ACTION_ITEM_DRAFT_STATUSES,
   ACTIVE_THOUGHT_DRAFT_STATUSES,
   AGENT_TASK_INTAKE_SOURCES,
   type AgentTaskIntakeSource,
+  assertFollowUpParentAllowed,
   assertNoActiveActionItemDraft,
   assertNoActiveThoughtDraft,
+  assertNoDuplicateOpenFollowUp,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
   buildFollowUpTaskRecord,
@@ -50,6 +59,8 @@ import {
   compactObject,
   isAgentTaskRisk,
   isLedgerAutomationState,
+  operatorTargetHasAllowedScheme,
+  receiptForAppliedStatus,
   receiptForTaskTool,
 } from "./_agent_tasks.ts";
 
@@ -699,7 +710,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, archived_at";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -2019,6 +2030,204 @@ server.registerTool(
 );
 
 server.registerTool(
+  "list_open_action_items",
+  {
+    title: "List Open Action Items",
+    description:
+      "Read-only OE-12 triage surface. Returns open action_items rows, newest first, each flagged has_active_draft when an active agent_tasks draft already links to it. Set include_deferred=true to also return items held out by defer_action_item (each carrying defer_reason + deferred_at). Never resolves, archives, or mutates anything.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(100).optional(),
+      include_deferred: z.boolean().optional(),
+    },
+  },
+  async (
+    { limit, include_deferred }: { limit?: number; include_deferred?: boolean },
+  ) => {
+    logToolInvocation(
+      "list_open_action_items",
+      { limit, include_deferred },
+      "mcp",
+    );
+    try {
+      const statuses = include_deferred ? ["open", "deferred"] : ["open"];
+      const { data: items, error } = await supabase
+        .from("action_items")
+        .select(
+          "id, description, status, created_at, source_thought_id, defer_reason, deferred_at",
+        )
+        .in("status", statuses)
+        .order("created_at", { ascending: false })
+        .limit(limit ?? 50);
+      if (error) throw error;
+      const ids = (items ?? []).map((i) => i.id as string);
+      let activeIds = new Set<string>();
+      if (ids.length) {
+        const { data: drafts, error: draftsError } = await supabase
+          .from("agent_tasks")
+          .select("linked_action_item_id, status")
+          .in("linked_action_item_id", ids)
+          .in("status", [...ACTIVE_ACTION_ITEM_DRAFT_STATUSES]);
+        if (draftsError) throw draftsError;
+        activeIds = new Set(
+          (drafts ?? []).map((d) => d.linked_action_item_id as string),
+        );
+      }
+      return textToolResponse({
+        count: (items ?? []).length,
+        items: (items ?? []).map((i) => ({
+          ...i,
+          has_active_draft: activeIds.has(i.id as string),
+        })),
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error listing open action items: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "resolve_action_item",
+  {
+    title: "Resolve Action Item",
+    description:
+      "Operator-gated close for a genuinely-done open action_items row. Sets status='resolved' and records reason as an audit note (resolution_note). Guarded: only an item currently 'open' can be resolved. This is NOT an is-it-done matcher — it trusts the caller's stated judgment and does no LLM matching. For a paused-project item you want back later, use defer_action_item instead.",
+    inputSchema: {
+      id: z.string().uuid(),
+      reason: z.string().min(1).max(500),
+    },
+  },
+  async ({ id, reason }: { id: string; reason: string }) => {
+    logToolInvocation("resolve_action_item", { id }, "mcp");
+    try {
+      const update = buildResolveActionItemUpdate(
+        reason,
+        new Date().toISOString(),
+      );
+      const { data: updated, error } = await supabase
+        .from("action_items")
+        .update(update)
+        .eq("id", id)
+        .eq("status", "open")
+        .select("id, description, status, resolved_at, resolution_note");
+      if (error) throw error;
+      if (!updated || updated.length === 0) {
+        const { data: current } = await supabase
+          .from("action_items")
+          .select("status")
+          .eq("id", id)
+          .maybeSingle();
+        return errorToolResponse(stateGuardError("resolve", "open", current));
+      }
+      return textToolResponse({ resolved: updated[0] });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error resolving action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "defer_action_item",
+  {
+    title: "Defer Action Item",
+    description:
+      "Operator-gated reversible hold for an open action_items row (typically a paused-project item). Sets status='deferred' so it drops out of list_open_action_items and every other status='open' consumer until restore_action_item reopens it. reason should carry the pause tag, e.g. 'paused-project:some-project', so the whole set can be restored together on unpause. Guarded: only an 'open' item can be deferred.",
+    inputSchema: {
+      id: z.string().uuid(),
+      reason: z.string().min(1).max(500),
+    },
+  },
+  async ({ id, reason }: { id: string; reason: string }) => {
+    logToolInvocation("defer_action_item", { id }, "mcp");
+    try {
+      const update = buildDeferActionItemUpdate(
+        reason,
+        new Date().toISOString(),
+      );
+      const { data: updated, error } = await supabase
+        .from("action_items")
+        .update(update)
+        .eq("id", id)
+        .eq("status", "open")
+        .select("id, description, status, defer_reason, deferred_at");
+      if (error) throw error;
+      if (!updated || updated.length === 0) {
+        const { data: current } = await supabase
+          .from("action_items")
+          .select("status")
+          .eq("id", id)
+          .maybeSingle();
+        return errorToolResponse(stateGuardError("defer", "open", current));
+      }
+      return textToolResponse({ deferred: updated[0] });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error deferring action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "restore_action_item",
+  {
+    title: "Restore Action Item",
+    description:
+      "Operator-gated reverse of defer_action_item: flips deferred items back to 'open' and clears the defer marker. Provide EXACTLY ONE of id (one item) or defer_reason (every deferred item carrying that exact pause tag — the unpause path). Only 'deferred' rows are touched; anything already open or resolved is left alone.",
+    inputSchema: {
+      id: z.string().uuid().optional(),
+      defer_reason: z.string().min(1).max(500).optional(),
+    },
+  },
+  async (
+    { id, defer_reason }: { id?: string; defer_reason?: string },
+  ) => {
+    logToolInvocation("restore_action_item", { id, defer_reason }, "mcp");
+    try {
+      const selector = assertRestoreSelector({ id, defer_reason });
+      const update = buildRestoreActionItemUpdate();
+      let query = supabase
+        .from("action_items")
+        .update(update)
+        .eq("status", "deferred");
+      query = "id" in selector
+        ? query.eq("id", selector.id)
+        : query.eq("defer_reason", selector.defer_reason);
+      const { data: restored, error } = await query.select(
+        "id, description, status",
+      );
+      if (error) throw error;
+      if (!restored || restored.length === 0) {
+        if ("id" in selector) {
+          const { data: current } = await supabase
+            .from("action_items")
+            .select("status")
+            .eq("id", selector.id)
+            .maybeSingle();
+          return errorToolResponse(
+            stateGuardError("restore", "deferred", current),
+          );
+        }
+        return errorToolResponse(
+          `No deferred action items found with defer_reason '${selector.defer_reason}'.`,
+        );
+      }
+      return textToolResponse({
+        restored_count: restored.length,
+        restored,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error restoring action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
   "create_agent_task_from_thought",
   {
     title: "Create Agent Task From Thought",
@@ -2191,6 +2400,24 @@ server.registerTool(
       if (!parentTask) {
         throw new Error(`Parent task not found: ${args.parent_task_id}`);
       }
+      assertFollowUpParentAllowed({
+        id: String(parentTask.id),
+        archived_at: typeof parentTask.archived_at === "string"
+          ? parentTask.archived_at
+          : null,
+      });
+      const { data: existingChildren, error: existingChildrenError } =
+        await supabase
+          .from("agent_tasks")
+          .select("id, status, desired_outcome")
+          .eq("parent_task_id", args.parent_task_id)
+          .is("archived_at", null);
+      if (existingChildrenError) throw existingChildrenError;
+      assertNoDuplicateOpenFollowUp(
+        existingChildren ?? [],
+        args.parent_task_id,
+        args.desired_outcome,
+      );
 
       const record = buildFollowUpTaskRecord(args);
       const { data, error } = await supabase
@@ -2506,6 +2733,15 @@ server.registerTool(
       resolve_linked_action_item: z.boolean().optional(),
       child_task_ids: z.array(z.string().uuid()).optional(),
       closeout_evidence: z.record(z.unknown()).optional(),
+      operator_action: z.string().min(1).optional().describe(
+        "One-line human step the operator must do on an outside system. When set, the task routes to Needs Operator instead of Agent Done and the linked action item stays open.",
+      ),
+      operator_target: z.string().min(1).refine(
+        operatorTargetHasAllowedScheme,
+        "operator_target only allows http(s) URL schemes when a URL scheme is present.",
+      ).optional().describe(
+        "URL or file path where the operator does the operator_action (a listing claim page, a deliverables/ file, a phone number).",
+      ),
     },
   },
   async (
@@ -2517,6 +2753,8 @@ server.registerTool(
       resolve_linked_action_item,
       child_task_ids,
       closeout_evidence,
+      operator_action,
+      operator_target,
     }: {
       task_id: string;
       applied_by?: string;
@@ -2525,6 +2763,8 @@ server.registerTool(
       resolve_linked_action_item?: boolean;
       child_task_ids?: string[];
       closeout_evidence?: Record<string, unknown>;
+      operator_action?: string;
+      operator_target?: string;
     },
   ) => {
     logToolInvocation("apply_agent_task_review", {
@@ -2563,21 +2803,173 @@ server.registerTool(
           p_resolve_linked_action_item: resolve_linked_action_item ?? false,
           p_child_task_ids: childTaskIds,
           p_closeout_evidence: closeout_evidence ?? {},
+          p_operator_action: operator_action ?? null,
+          p_operator_target: operator_target ?? null,
         },
       );
       if (error) throw error;
 
+      const appliedStatus = (data as { status?: AgentTaskStatus } | null)
+        ?.status;
+      const receipt =
+        appliedStatus && AGENT_TASK_STATUSES.includes(appliedStatus)
+          ? receiptForAppliedStatus(appliedStatus)
+          : "AGENT APPLIED";
+
       return textToolResponse({
-        receipt: "AGENT APPLIED",
+        receipt,
         resolution,
         linked_action_item_resolution_requested: resolve_linked_action_item ??
           false,
+        operator_action: operator_action ?? null,
         child_task_ids: childTaskIds,
         task: data,
       });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error applying agent task review: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "complete_operator_action",
+  {
+    title: "Complete Operator Action",
+    description:
+      "Close a Needs Operator task after the operator has done the outside-system step. Moves Needs Operator to Agent Done with an OPERATOR DONE receipt and resolves the linked action item when one exists. completed_by must name the human operator; anonymous callers, registered agent codes, and automated-runtime identities are refused.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      completed_by: z.string().min(1).describe(
+        "Human operator who completed the outside-system step.",
+      ),
+      note: z.string().min(1).optional().describe(
+        "What the operator did (e.g. 'Claimed the listing and pasted the handoff').",
+      ),
+    },
+  },
+  async (
+    { task_id, completed_by, note }: {
+      task_id: string;
+      completed_by: string;
+      note?: string;
+    },
+  ) => {
+    logToolInvocation("complete_operator_action", {
+      task_id,
+      completed_by,
+    }, "mcp");
+    try {
+      const { data: ledgerRows, error: ledgerError } = await supabase
+        .from("agent_task_ledger")
+        .select("agent_code");
+      if (ledgerError) throw ledgerError;
+      assertPromotionCallerAllowed(
+        completed_by,
+        (ledgerRows ?? []).map((row: { agent_code: string }) => row.agent_code),
+      );
+      const { data, error } = await supabase.rpc("complete_operator_action", {
+        p_task_id: task_id,
+        p_completed_by: completed_by,
+        p_note: note ?? null,
+      });
+      if (error) throw error;
+      return textToolResponse({
+        receipt: "OPERATOR DONE",
+        completed_by,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error completing operator action: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "reroute_operator_action_task",
+  {
+    title: "Reroute Operator Action Task",
+    description:
+      "Escape hatch for a misrouted Needs Operator card: send it back to Agent Todo for the executor lane instead of falsely closing it as done. Clears the operator step, writes an AGENT FOLLOW-UP receipt, leaves any linked action item open.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      reason: z.string().min(1).describe(
+        "Why the card is going back (e.g. 'not actually a personal step; agent can finish this').",
+      ),
+    },
+  },
+  async ({ task_id, reason }: { task_id: string; reason: string }) => {
+    logToolInvocation("reroute_operator_action_task", { task_id }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc(
+        "reroute_operator_action_task",
+        {
+          p_task_id: task_id,
+          p_reason: reason,
+        },
+      );
+      if (error) throw error;
+      return textToolResponse({ receipt: "AGENT FOLLOW-UP", task: data });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error rerouting Needs Operator task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "record_critic_verdict",
+  {
+    title: "Record Critic Verdict",
+    description:
+      "Advisory only. Store an independent critic's verdict on an Agent Review or Needs Operator task. Never moves task status. The critic runtime must differ from the executor's (Codex reviews Claude-executed tasks and vice versa); the SQL rejects a same-runtime critic.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      critic_agent_code: z.enum(["codex-critic", "claude-critic"]),
+      verdict: z.enum(["clean", "flagged"]),
+      flags: z.array(z.string()).optional().describe(
+        "Specific issues found (voice/brand, unverified facts, scope drift, errors). Empty for clean.",
+      ),
+      allow_rereview: z.boolean().optional().describe(
+        "Set true only when intentionally replacing an existing critic verdict; the event trail keeps both reviews.",
+      ),
+    },
+  },
+  async ({ task_id, critic_agent_code, verdict, flags, allow_rereview }: {
+    task_id: string;
+    critic_agent_code: string;
+    verdict: string;
+    flags?: string[];
+    allow_rereview?: boolean;
+  }) => {
+    logToolInvocation("record_critic_verdict", {
+      task_id,
+      critic_agent_code,
+      verdict,
+    }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc("record_critic_verdict", {
+        p_task_id: task_id,
+        p_critic_agent_code: critic_agent_code,
+        p_verdict: verdict,
+        p_flags: flags ?? [],
+        p_allow_rereview: allow_rereview ?? false,
+      });
+      if (error) throw error;
+      return textToolResponse({
+        receipt: "AGENT CRITIC",
+        verdict,
+        flags: flags ?? [],
+        allow_rereview: allow_rereview ?? false,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error recording critic verdict: ${(err as Error).message}`,
       );
     }
   },

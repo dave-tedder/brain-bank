@@ -8,6 +8,7 @@ export const AGENT_TASK_INTAKE_SOURCES = [
   "slack-intake",
   "action-item-promotion",
   "agent-follow-up",
+  "triage-agent",
 ] as const;
 
 export type AgentTaskIntakeSource = (typeof AGENT_TASK_INTAKE_SOURCES)[number];
@@ -40,7 +41,7 @@ export interface AgentTaskIntakeRecord {
   project_slug: string | null;
   priority: "low" | "medium" | "high";
   risk: AgentTaskRisk;
-  requested_by: string;
+  requested_by: string | null;
   intake_source: AgentTaskIntakeSource;
   desired_outcome: string;
   context: string;
@@ -99,24 +100,67 @@ export interface LinkedActionItemDraftRow {
   status: string;
 }
 
+export interface ParentTaskRow {
+  id: string;
+  archived_at?: string | null;
+}
+
+export interface FollowUpChildRow {
+  id: string;
+  status: string;
+  desired_outcome?: string | null;
+}
+
 export const ACTIVE_ACTION_ITEM_DRAFT_STATUSES = [
   "Standing",
   "Agent Todo",
   "Agent Working",
+  "Agent Needs Input",
+  "Agent Review",
+  "Needs Operator",
 ] as const;
 
 export const ACTIVE_THOUGHT_DRAFT_STATUSES = [
   "Standing",
   "Agent Todo",
   "Agent Working",
+  "Agent Needs Input",
+  "Agent Review",
+  "Needs Operator",
 ] as const;
 
 const VALID_PRIORITIES = new Set(["low", "medium", "high"]);
 const THOUGHT_CONTEXT_EXCERPT_CHARS = 1600;
+const TEXT_LIMITS = {
+  title: 240,
+  desired_outcome: 4000,
+  context: 12000,
+  do_steps: 6000,
+  acceptance_criteria: 6000,
+  output_handoff: 6000,
+  boundaries: 6000,
+} as const;
 
 function cleanText(value: string, field: string): string {
   const cleaned = value.trim();
   if (!cleaned) throw new Error(`${field} is required.`);
+  const limit = TEXT_LIMITS[field as keyof typeof TEXT_LIMITS];
+  if (limit && cleaned.length > limit) {
+    throw new Error(`${field} must be ${limit} characters or fewer.`);
+  }
+  return cleaned;
+}
+
+function cleanOptionalText(
+  value: string | null | undefined,
+  field: keyof typeof TEXT_LIMITS,
+): string | null {
+  const cleaned = value?.trim() || null;
+  if (cleaned && cleaned.length > TEXT_LIMITS[field]) {
+    throw new Error(
+      `${field} must be ${TEXT_LIMITS[field]} characters or fewer.`,
+    );
+  }
   return cleaned;
 }
 
@@ -152,7 +196,7 @@ export function buildAgentTaskIntakeRecord(
   const risk: AgentTaskRisk = isAgentTaskRisk(input.risk || "")
     ? input.risk!
     : "medium";
-  const title = input.title?.trim() ||
+  const title = cleanOptionalText(input.title, "title") ||
     fallbackTitle(agentCode, desiredOutcome);
 
   return {
@@ -163,7 +207,7 @@ export function buildAgentTaskIntakeRecord(
     project_slug: input.project_slug?.trim() || null,
     priority,
     risk,
-    requested_by: input.requested_by?.trim() || "codex",
+    requested_by: input.requested_by?.trim() || null,
     intake_source: input.intake_source,
     desired_outcome: desiredOutcome,
     context: cleanText(input.context, "context"),
@@ -208,6 +252,35 @@ export function assertNoActiveThoughtDraft(
   if (activeTask) {
     throw new Error(
       `Thought ${thoughtId} already has an active agent task draft: ${activeTask.id} (${activeTask.status}).`,
+    );
+  }
+}
+
+export function assertFollowUpParentAllowed(parentTask: ParentTaskRow): void {
+  if (parentTask.archived_at) {
+    throw new Error(
+      `Parent task ${parentTask.id} is archived and cannot receive follow-up drafts.`,
+    );
+  }
+}
+
+export function assertNoDuplicateOpenFollowUp(
+  existingChildren: FollowUpChildRow[],
+  parentTaskId: string,
+  desiredOutcome: string,
+): void {
+  const normalizedOutcome = desiredOutcome.replace(/\s+/g, " ").trim()
+    .toLowerCase();
+  const duplicate = existingChildren.find((child) =>
+    (ACTIVE_THOUGHT_DRAFT_STATUSES as readonly string[]).includes(
+      child.status,
+    ) &&
+    (child.desired_outcome ?? "").replace(/\s+/g, " ").trim().toLowerCase() ===
+      normalizedOutcome
+  );
+  if (duplicate) {
+    throw new Error(
+      `Parent task ${parentTaskId} already has an active follow-up draft with the same desired_outcome: ${duplicate.id} (${duplicate.status}).`,
     );
   }
 }

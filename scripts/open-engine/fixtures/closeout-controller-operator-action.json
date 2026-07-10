@@ -1,0 +1,32 @@
+{
+  "_note": "OPERATOR-ACTION fixture (OE-11 Phase 2): a single-task APPLYABLE closeout whose 8-section AGENT DONE receipt carries an OPERATOR-ACTION marker in its Follow-up recommendation. Base shape is closeout-controller-applyable-projected.json (project_slug brain-bank resolves in-repo). Expected APPLYABLE, with apply[0].operator = { operator_action, operator_target }.",
+  "generated_at": "2026-07-09T18:30:00.000Z",
+  "tasks": [
+    {
+      "id": "9708e713-6f98-420a-9a39-22bbae011ec1",
+      "title": "[agent instructions][codex][task] OE-11 operator-action pass-through fixture",
+      "status": "Agent Review",
+      "risk": "low",
+      "project_slug": "brain-bank",
+      "explicit_approval": false,
+      "claimed_by": "codex",
+      "linked_action_item_id": null,
+      "review_reason": null,
+      "updated_at": "2026-07-09T18:29:00.000000+00:00",
+      "events": [
+        {
+          "task_id": "a1b2c3d4-0011-4a2b-8c3d-000000000011",
+          "event_type": "AGENT DONE",
+          "agent_code": "codex",
+          "payload": {
+            "reason": "Work summary:\nAssembled the listing optimization pack and left the final claim-and-paste step to the operator.\n\nVerification:\nRe-read the packet and confirmed the pack is complete; nothing was submitted on the operator's behalf.\n\nTouched files or records:\nNone written. The pack lives inline in this receipt.\n\nLimitations:\nThe agent cannot claim the business listing; that requires the operator's login.\n\nTracker draft:\nRecord the pack build once the operator claims the listing.\n\nSession-log draft:\nBuilt the listing optimization pack and handed the claim step to the operator.\n\nBrain Bank capture draft:\nListing optimization pack ready; operator to claim the listing and paste.\n\nFollow-up recommendation:\nThe operator finishes the last step.\nOPERATOR-ACTION: Claim the listing and paste the optimization pack || OPERATOR-TARGET: https://example.com/listing",
+            "status": "Agent Review",
+            "from_status": "Agent Working"
+          },
+          "created_at": "2026-07-09T18:28:15.000000+00:00"
+        }
+      ]
+    }
+  ],
+  "actionItems": []
+}
