@@ -1,0 +1,24 @@
+{
+  "_note": "WS-4 fixture: duplicate canonical receipt headings must hold instead of silently overwriting the first section.",
+  "generated_at": "2026-07-09T20:00:00.000Z",
+  "tasks": [
+    {
+      "id": "9708e713-6f98-420a-9a39-22bbae011ec1",
+      "title": "WS-4 duplicate heading fixture",
+      "status": "Agent Review",
+      "risk": "low",
+      "project_slug": "brain-bank",
+      "events": [
+        {
+          "event_type": "AGENT DONE",
+          "agent_code": "codex",
+          "created_at": "2026-07-09T20:00:00.000Z",
+          "payload": {
+            "reason": "Work summary:\nFirst summary.\n\nWork summary:\nSecond summary should not overwrite silently.\n\nVerification:\nFixture verification.\n\nTouched files or records:\nNone.\n\nLimitations:\nFixture only.\n\nTracker draft:\nTracker line.\n\nSession-log draft:\nSession line.\n\nBrain Bank capture draft:\nCapture line.\n\nFollow-up recommendation:\nNo follow-up."
+          }
+        }
+      ]
+    }
+  ],
+  "actionItems": []
+}

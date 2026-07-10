@@ -1,14 +1,27 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REGISTRY_PATH = join(__dirname, "project-closeout-registry.json");
 // Draft output is anchored to this repo, never to process.cwd() — routing and
 // output location must not depend on where the controller is invoked from.
 const REPO_ROOT = join(__dirname, "..", "..");
-const DEFAULT_DRAFTS_DIR = join(REPO_ROOT, "docs", "handoffs", "pending-closeouts");
+const DEFAULT_DRAFTS_DIR = join(
+  REPO_ROOT,
+  "docs",
+  "handoffs",
+  "pending-closeouts",
+);
+const DEFAULT_JOURNAL_DIR = join(DEFAULT_DRAFTS_DIR, "journal");
+const FETCH_TIMEOUT_MS = 60_000;
 
 const REQUIRED_RECEIPT_SECTIONS = [
   "Work summary",
@@ -32,6 +45,8 @@ function usage() {
   node scripts/open-engine/closeout-controller.mjs --input <file.json> --write-drafts [--drafts-dir <dir>]
   node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --live-check
   node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply
+  node scripts/open-engine/closeout-controller.mjs --resume <uuid>
+  node scripts/open-engine/closeout-controller.mjs --capture-run-summary --remaining-agent-review <n> [--applied-task-ids <ids>] [--held-tasks <id:reason;...>] [--notable <text>] [--run-timestamp <iso>] [--summary-preview]
   node scripts/open-engine/closeout-controller.mjs --sql
 
 OE-8A is dry-run only. It reads saved Agent Review evidence, validates receipt
@@ -47,7 +62,7 @@ reported as exceptions and produce no file. Nothing else is mutated: no tracker
 or session-log writes, no task status changes, no captures, no apply calls. An
 existing draft with different content is a DRAFT_CONFLICT, never overwritten.
 
-OE-8C live modes need BRAIN_BANK_MCP_URL and BRAIN_BANK_MCP_KEY in the
+OE-8C live modes need BB_MCP_URL and BB_MCP_KEY in the
 environment and a --task-id (single-task discipline). --live-check fetches the
 task packet through the guarded MCP get_agent_task and prints the evaluation
 READ-ONLY. --apply, for an APPLYABLE task only: calls apply_agent_task_review
@@ -56,7 +71,23 @@ items), appends the receipt's tracker/session-log drafts to the routed project
 files (marker-guarded, append-only, never overwrites), and captures one Open
 Brain thought per project batch. The controller never runs git - committing
 closeout writes stays human/session-side (locked decision, Session 268). A
-non-APPLYABLE task is reported and NOT applied; the gate is never relaxed.`;
+non-APPLYABLE task is reported and NOT applied; the gate is never relaxed. An
+APPLYABLE task whose receipt carries an OPERATOR-ACTION marker (a line
+"OPERATOR-ACTION: <step> || OPERATOR-TARGET: <url-or-path>" inside the Follow-up
+recommendation) routes to Needs Operator with the operator step preserved;
+otherwise it closes to Agent Done as before. An OPERATOR-ACTION marker found
+anywhere OUTSIDE the Follow-up recommendation section holds the task
+(OPERATOR_MARKER_OUTSIDE_FOLLOW_UP) instead of silently dropping the step. Before --apply calls the board, it
+writes a local journal under docs/handoffs/pending-closeouts/journal/. If board
+apply succeeds but file/capture closeout fails, --resume <uuid> confirms the
+live task has an AGENT APPLIED event and replays the pending file/capture phase
+from that journal.
+
+OE-8D run-summary capture is additive logging only. It calls capture_thought
+once for the whole automation run, tagged open-engine/closeout/oe-8d, using
+counts, short ids, hold reasons, remaining Agent Review count, and one notable
+clause. It never applies tasks, edits project files, changes gates, or resolves
+linked action items.`;
 }
 
 function parseArgs(argv) {
@@ -70,6 +101,15 @@ function parseArgs(argv) {
     draftsDir: DEFAULT_DRAFTS_DIR,
     liveCheck: false,
     apply: false,
+    resumeTaskId: null,
+    journalDir: DEFAULT_JOURNAL_DIR,
+    captureRunSummary: false,
+    summaryPreview: false,
+    appliedTaskIds: "",
+    heldTasks: "",
+    remainingAgentReview: null,
+    notable: "nominal",
+    runTimestamp: null,
     help: false,
   };
 
@@ -93,6 +133,24 @@ function parseArgs(argv) {
       args.liveCheck = true;
     } else if (arg === "--apply") {
       args.apply = true;
+    } else if (arg === "--resume") {
+      args.resumeTaskId = argv[++i];
+    } else if (arg === "--journal-dir") {
+      args.journalDir = argv[++i];
+    } else if (arg === "--capture-run-summary") {
+      args.captureRunSummary = true;
+    } else if (arg === "--summary-preview") {
+      args.summaryPreview = true;
+    } else if (arg === "--applied-task-ids") {
+      args.appliedTaskIds = argv[++i] || "";
+    } else if (arg === "--held-tasks") {
+      args.heldTasks = argv[++i] || "";
+    } else if (arg === "--remaining-agent-review") {
+      args.remainingAgentReview = argv[++i];
+    } else if (arg === "--notable") {
+      args.notable = argv[++i] || "nominal";
+    } else if (arg === "--run-timestamp") {
+      args.runTimestamp = argv[++i];
     } else if (arg === "--help" || arg === "-h") {
       args.help = true;
     } else {
@@ -103,14 +161,46 @@ function parseArgs(argv) {
   if (args.expect && !EXPECTED_STATUSES.has(args.expect)) {
     throw new Error(`Invalid --expect value: ${args.expect}`);
   }
-  if (args.liveCheck && args.apply) {
-    throw new Error("--live-check and --apply are mutually exclusive.");
+  if (
+    [args.liveCheck, args.apply, Boolean(args.resumeTaskId)].filter(Boolean)
+      .length > 1
+  ) {
+    throw new Error(
+      "--live-check, --apply, and --resume are mutually exclusive.",
+    );
   }
-  if ((args.liveCheck || args.apply) && (args.source || args.writeDrafts)) {
-    throw new Error("--live-check/--apply fetch live packets; they cannot combine with --fixture, --input, or --write-drafts.");
+  if (
+    args.captureRunSummary &&
+    (args.liveCheck || args.apply || args.resumeTaskId || args.source ||
+      args.writeDrafts || args.printSql)
+  ) {
+    throw new Error(
+      "--capture-run-summary cannot combine with task evaluation, --sql, or draft modes.",
+    );
+  }
+  if (
+    (args.liveCheck || args.apply || args.resumeTaskId) &&
+    (args.source || args.writeDrafts)
+  ) {
+    throw new Error(
+      "--live-check/--apply/--resume fetch live packets; they cannot combine with --fixture, --input, or --write-drafts.",
+    );
   }
   if ((args.liveCheck || args.apply) && !args.taskId) {
-    throw new Error("--live-check/--apply require --task-id (OE-8C runs single-task).");
+    throw new Error(
+      "--live-check/--apply require --task-id (OE-8C runs single-task).",
+    );
+  }
+  if (args.resumeTaskId && !isUuidish(args.resumeTaskId)) {
+    throw new Error("--resume requires a task id.");
+  }
+  if (args.captureRunSummary && args.remainingAgentReview === null) {
+    throw new Error("--capture-run-summary requires --remaining-agent-review.");
+  }
+  if (
+    args.captureRunSummary && !/^\d+$/.test(String(args.remainingAgentReview))
+  ) {
+    throw new Error("--remaining-agent-review must be a non-negative integer.");
   }
   return args;
 }
@@ -135,7 +225,12 @@ function normalizeInput(input) {
   if (input.task) {
     return {
       generated_at: input.generated_at || null,
-      tasks: [normalizeTask({ ...input.task, events: input.events || input.task.events })],
+      tasks: [
+        normalizeTask({
+          ...input.task,
+          events: input.events || input.task.events,
+        }),
+      ],
       actionItems: input.actionItems || input.action_items || [],
     };
   }
@@ -148,7 +243,8 @@ function normalizeTask(task) {
   return {
     ...task,
     project_slug: task.project_slug || task.projectSlug || null,
-    linked_action_item_id: task.linked_action_item_id || task.linkedActionItemId || null,
+    linked_action_item_id: task.linked_action_item_id ||
+      task.linkedActionItemId || null,
     explicit_approval: Boolean(task.explicit_approval ?? task.explicitApproval),
     events,
   };
@@ -167,7 +263,8 @@ function evaluate(input, registry, options = {}) {
     hold.push({
       task_id: options.taskId,
       reasons: ["TASK_NOT_FOUND"],
-      message: `No task with id ${options.taskId} exists in the supplied input.`,
+      message:
+        `No task with id ${options.taskId} exists in the supplied input.`,
     });
   }
 
@@ -186,7 +283,12 @@ function evaluate(input, registry, options = {}) {
   }
 
   const draftDate = draftDateFrom(data.generated_at);
-  const projects = buildProjectBatches(apply, registry, draftDate, data.generated_at);
+  const projects = buildProjectBatches(
+    apply,
+    registry,
+    draftDate,
+    data.generated_at,
+  );
   const status = finalStatus(apply, hold);
   return {
     status,
@@ -205,7 +307,9 @@ function evaluate(input, registry, options = {}) {
 function draftDateFrom(generatedAt) {
   // Prefer the evidence timestamp so the same input always yields the same
   // file name and bytes; fall back to today only when the input has no stamp.
-  const fromInput = typeof generatedAt === "string" ? generatedAt.slice(0, 10) : null;
+  const fromInput = typeof generatedAt === "string"
+    ? generatedAt.slice(0, 10)
+    : null;
   if (fromInput && /^\d{4}-\d{2}-\d{2}$/.test(fromInput)) return fromInput;
   return new Date().toISOString().slice(0, 10);
 }
@@ -220,20 +324,28 @@ function evaluateTask(task, registry, actionItems) {
   if (!route) {
     reasons.push("UNKNOWN_PROJECT_ROUTE");
   } else {
-    for (const [field, path] of Object.entries({
-      workspace_path: route.workspace_path,
-      tracker_path: route.tracker_path,
-      session_log_path: route.session_log_path,
-    })) {
-      if (!path || !existsSync(path)) reasons.push(`UNRESOLVED_${field.toUpperCase()}`);
+    for (
+      const [field, path] of Object.entries({
+        workspace_path: route.workspace_path,
+        tracker_path: route.tracker_path,
+        session_log_path: route.session_log_path,
+      })
+    ) {
+      if (!path || !existsSync(path)) {
+        reasons.push(`UNRESOLVED_${field.toUpperCase()}`);
+      }
     }
     if (!route.capture_tag) reasons.push("MISSING_CAPTURE_TAG");
   }
 
-  const doneEvents = task.events.filter((event) => event.event_type === "AGENT DONE");
-  if (doneEvents.length !== 1) reasons.push("AGENT_DONE_EVENT_COUNT");
-  const receiptText = doneEvents.length === 1 ? receiptFromEvent(doneEvents[0]) : "";
+  const doneEvents = task.events.filter((event) =>
+    event.event_type === "AGENT DONE"
+  );
+  if (doneEvents.length < 1) reasons.push("AGENT_DONE_EVENT_COUNT");
+  const latestDoneEvent = latestEvent(doneEvents);
+  const receiptText = latestDoneEvent ? receiptFromEvent(latestDoneEvent) : "";
   const receipt = parseReceipt(receiptText);
+  reasons.push(...receipt.reasons);
 
   // Review-note augmentation path: a human review note stored on the task row
   // (agent_tasks.review_reason) may supply sections the AGENT DONE receipt is
@@ -241,17 +353,41 @@ function evaluateTask(task, registry, actionItems) {
   // event stays authoritative for every section it already carries, and the
   // 8-section gate itself is unchanged: all 8 must be present somewhere.
   const augmentation = augmentFromReviewNote(receipt, task.review_reason);
+  reasons.push(...augmentation.reasons);
   if (augmentation.missing.length > 0) reasons.push("RECEIPT_MISSING_SECTION");
+  const followUpHeading = canonicalHeading("Follow-up recommendation");
+  const operator = parseOperatorAction(augmentation.sections[followUpHeading]);
+  reasons.push(...operator.reasons);
+  // A marker outside Follow-up recommendation holds the task instead of
+  // silently closing it to Agent Done — the operator step must never be lost
+  // to a placement mistake (Fix Session A decision, 2026-07-10).
+  const markerSources = [receiptText];
+  if (augmentation.augmented.length > 0) {
+    markerSources.push(String(task.review_reason || ""));
+  }
+  const totalMarkers = markerSources.reduce(
+    (count, text) => count + countOperatorMarkers(text),
+    0,
+  );
+  if (
+    totalMarkers > countOperatorMarkers(augmentation.sections[followUpHeading])
+  ) {
+    reasons.push("OPERATOR_MARKER_OUTSIDE_FOLLOW_UP");
+  }
 
-  if (reasons.length > 0) {
+  const uniqueReasons = [...new Set(reasons)];
+  if (uniqueReasons.length > 0) {
     return {
       applyable: false,
-      reasons,
-      message: holdMessage(reasons, augmentation),
+      reasons: uniqueReasons,
+      message: holdMessage(uniqueReasons, augmentation),
     };
   }
 
-  const linkedActionItem = findActionItem(actionItems, task.linked_action_item_id);
+  const linkedActionItem = findActionItem(
+    actionItems,
+    task.linked_action_item_id,
+  );
   return {
     applyable: true,
     reasons: [],
@@ -266,7 +402,13 @@ function evaluateTask(task, registry, actionItems) {
       linked_action_item_status: linkedActionItem?.status || null,
       receipt_sections: augmentation.sections,
       augmented_sections: augmentation.augmented,
-      augmentation_text: augmentation.augmented.length > 0 ? String(task.review_reason) : null,
+      augmentation_text: augmentation.augmented.length > 0
+        ? String(task.review_reason)
+        : null,
+      // parseReceipt keys sections by canonicalHeading() (snake_case), e.g.
+      // "Follow-up recommendation" -> "follow_up_recommendation". Use the same
+      // canonicalizer so the accessor can never drift from the parser.
+      operator: operator.operator,
       closeout_evidence: {
         dry_run_only: true,
         source: "oe8-closeout-controller",
@@ -279,10 +421,13 @@ function evaluateTask(task, registry, actionItems) {
 function augmentFromReviewNote(receipt, reviewReason) {
   const sections = { ...receipt.sections };
   const augmented = [];
+  const reasons = [...(receipt.reasons || [])];
   const note = typeof reviewReason === "string" ? reviewReason : "";
 
   if (receipt.missing.length > 0 && note.trim()) {
-    const noteSections = parseReceipt(note).sections;
+    const noteReceipt = parseReceipt(note);
+    reasons.push(...noteReceipt.reasons);
+    const noteSections = noteReceipt.sections;
     for (const heading of receipt.missing) {
       const candidate = String(noteSections[heading] || "").trim();
       if (candidate) {
@@ -295,7 +440,7 @@ function augmentFromReviewNote(receipt, reviewReason) {
   const missing = REQUIRED_RECEIPT_SECTIONS
     .map(canonicalHeading)
     .filter((heading) => !String(sections[heading] || "").trim());
-  return { sections, missing, augmented };
+  return { sections, missing, augmented, reasons: [...new Set(reasons)] };
 }
 
 function receiptFromEvent(event) {
@@ -311,8 +456,53 @@ function receiptFromEvent(event) {
   return "";
 }
 
-function parseReceipt(text) {
+export function extractOperatorAction(followUpText) {
+  return parseOperatorAction(followUpText).operator;
+}
+
+function parseOperatorAction(followUpText) {
+  // Explicit marker only — never fuzzy NLP. Line form:
+  //   OPERATOR-ACTION: <step> || OPERATOR-TARGET: <url-or-path>
+  // OPERATOR-TARGET (and the ||) are optional.
+  const lines = String(followUpText || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => /^OPERATOR-ACTION:/i.test(l));
+  if (lines.length === 0) return { operator: null, reasons: [] };
+  if (lines.length > 1) {
+    return { operator: null, reasons: ["OPERATOR_MARKER_COUNT"] };
+  }
+  const line = lines[0];
+  if (!line) return { operator: null, reasons: [] };
+  const body = line.replace(/^OPERATOR-ACTION:/i, "").trim();
+  const parts = body.split(/\s*\|\|\s*/);
+  if (parts.length > 2) {
+    return { operator: null, reasons: ["OPERATOR_MARKER_FORMAT"] };
+  }
+  const [actionPart, targetPart] = parts;
+  const operator_action = actionPart.trim();
+  if (!operator_action) return { operator: null, reasons: [] };
+  let operator_target = null;
+  if (targetPart) {
+    if (!/^OPERATOR-TARGET:/i.test(targetPart.trim())) {
+      return { operator: null, reasons: ["OPERATOR_TARGET_LABEL_MISSING"] };
+    }
+    operator_target = targetPart.replace(/^OPERATOR-TARGET:/i, "").trim() ||
+      null;
+    if (operator_target && !isAllowedOperatorTarget(operator_target)) {
+      return { operator: null, reasons: ["OPERATOR_TARGET_UNSAFE_SCHEME"] };
+    }
+  }
+  return { operator: { operator_action, operator_target }, reasons: [] };
+}
+
+export function parseReceipt(text) {
   const sections = {};
+  const seen = new Set();
+  const reasons = [];
+  if (String(text || "").includes("<!-- open-engine closeout")) {
+    reasons.push("RECEIPT_MARKER_INJECTION");
+  }
   // A heading may carry its content inline after the colon ("Limitations: none
   // beyond ...") — real receipts write both forms. The line-start anchor is
   // load-bearing: mid-sentence "Verification:" in prose must not open a section.
@@ -326,11 +516,15 @@ function parseReceipt(text) {
     const match = line.match(headingPattern);
     if (match) {
       current = canonicalHeading(match[1]);
+      if (seen.has(current)) reasons.push("RECEIPT_DUPLICATE_HEADING");
+      seen.add(current);
       sections[current] = match[2].trim();
       continue;
     }
     if (current) {
-      sections[current] = `${sections[current]}${sections[current] ? "\n" : ""}${line}`;
+      sections[current] = `${sections[current]}${
+        sections[current] ? "\n" : ""
+      }${line}`;
     }
   }
 
@@ -344,7 +538,35 @@ function parseReceipt(text) {
   const missing = REQUIRED_RECEIPT_SECTIONS
     .map(canonicalHeading)
     .filter((heading) => !String(sections[heading] || "").trim());
-  return { sections, missing };
+  return { sections, missing, reasons: [...new Set(reasons)] };
+}
+
+function latestEvent(events) {
+  if (!Array.isArray(events) || events.length === 0) return null;
+  return [...events].sort((a, b) =>
+    String(b.created_at || "").localeCompare(String(a.created_at || ""))
+  )[0];
+}
+
+function countOperatorMarkers(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .filter((line) => /^OPERATOR-ACTION:/i.test(line.trim()))
+    .length;
+}
+
+function isAllowedOperatorTarget(value) {
+  const target = String(value || "").trim();
+  if (!target) return true;
+  if (/^https?:\/\//i.test(target)) return true;
+  // Protocol-relative //host resolves to an external host in a browser, so it
+  // must be rejected before the absolute-path branch can accept it.
+  if (/^\/\//.test(target)) return false;
+  if (/^\/[^\0]+/.test(target)) return true;
+  if (
+    /^[A-Za-z0-9._/-]+$/.test(target) && !/^[a-z][a-z0-9+.-]*:/i.test(target)
+  ) return true;
+  return false;
 }
 
 function canonicalHeading(value) {
@@ -356,8 +578,24 @@ function escapeRegExp(value) {
 }
 
 function holdMessage(reasons, receipt) {
+  if (reasons.includes("RECEIPT_MARKER_INJECTION")) {
+    return "Receipt contains an open-engine closeout marker; held to prevent marker injection.";
+  }
+  if (reasons.includes("RECEIPT_DUPLICATE_HEADING")) {
+    return "Receipt contains duplicate canonical headings; held to prevent section overwrite.";
+  }
+  if (reasons.includes("OPERATOR_MARKER_OUTSIDE_FOLLOW_UP")) {
+    return "Receipt carries an OPERATOR-ACTION marker outside the Follow-up recommendation section; held so the operator step is not silently dropped. Move the marker into Follow-up recommendation and re-run.";
+  }
+  if (reasons.some((reason) => reason.startsWith("OPERATOR_"))) {
+    return `Receipt has an invalid operator marker: ${
+      reasons.filter((reason) => reason.startsWith("OPERATOR_")).join(", ")
+    }.`;
+  }
   if (reasons.includes("RECEIPT_MISSING_SECTION")) {
-    return `Receipt is missing required sections: ${receipt.missing.join(", ")}.`;
+    return `Receipt is missing required sections: ${
+      receipt.missing.join(", ")
+    }.`;
   }
   return `Task held by dry-run safety gates: ${reasons.join(", ")}.`;
 }
@@ -376,9 +614,15 @@ function buildProjectBatches(apply, registry, draftDate, generatedAt) {
 
   return [...grouped.entries()].map(([projectSlug, items]) => {
     const route = registry[projectSlug];
-    const trackerDraft = items.map((item) => item.receipt_sections.tracker_draft).join("\n\n");
-    const sessionLogDraft = items.map((item) => item.receipt_sections.session_log_draft).join("\n\n");
-    const captureDraft = items.map((item) => item.receipt_sections.brain_bank_capture_draft).join("\n\n");
+    const trackerDraft = items.map((item) =>
+      item.receipt_sections.tracker_draft
+    ).join("\n\n");
+    const sessionLogDraft = items.map((item) =>
+      item.receipt_sections.session_log_draft
+    ).join("\n\n");
+    const captureDraft = items.map((item) =>
+      item.receipt_sections.open_brain_capture_draft
+    ).join("\n\n");
 
     const batch = {
       project_slug: projectSlug,
@@ -389,7 +633,7 @@ function buildProjectBatches(apply, registry, draftDate, generatedAt) {
       tasks: items.map((item) => item.task_id),
       tracker_draft: trackerDraft,
       session_log_draft: sessionLogDraft,
-      brain_bank_capture_draft: captureDraft,
+      open_brain_capture_draft: captureDraft,
     };
     batch.pending_closeout = {
       file_name: `${draftDate}-${sanitizeSlug(projectSlug)}.md`,
@@ -400,12 +644,18 @@ function buildProjectBatches(apply, registry, draftDate, generatedAt) {
 }
 
 function sanitizeSlug(slug) {
-  return String(slug).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  return String(slug).toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(
+    /^-+|-+$/g,
+    "",
+  );
 }
 
 function renderPendingCloseoutDraft(batch, items, draftDate, generatedAt) {
   const taskLines = items.map(
-    (item) => `- \`${item.task_id}\` — ${item.title || "(untitled)"} [resolution: ${item.resolution}]`,
+    (item) =>
+      `- \`${item.task_id}\` — ${
+        item.title || "(untitled)"
+      } [resolution: ${item.resolution}]`,
   );
   return [
     `# Pending closeout draft — ${batch.project_slug}`,
@@ -439,7 +689,7 @@ function renderPendingCloseoutDraft(batch, items, draftDate, generatedAt) {
     "",
     "## Brain Bank capture draft",
     "",
-    batch.brain_bank_capture_draft,
+    batch.open_brain_capture_draft,
     "",
   ].join("\n");
 }
@@ -455,21 +705,32 @@ function writeDraftFiles(result, draftsDir) {
     if (existsSync(target)) {
       const existing = readFileSync(target, "utf8");
       if (existing === content) {
-        writes.push({ project_slug: batch.project_slug, path: target, action: "unchanged", bytes: Buffer.byteLength(content) });
+        writes.push({
+          project_slug: batch.project_slug,
+          path: target,
+          action: "unchanged",
+          bytes: Buffer.byteLength(content),
+        });
         continue;
       }
       conflicts.push({
         project_slug: batch.project_slug,
         path: target,
         reason: "DRAFT_CONFLICT",
-        message: "A draft with different content already exists at this path; not overwriting.",
+        message:
+          "A draft with different content already exists at this path; not overwriting.",
       });
       continue;
     }
 
     mkdirSync(draftsDir, { recursive: true });
     writeFileSync(target, content, "utf8");
-    writes.push({ project_slug: batch.project_slug, path: target, action: "written", bytes: Buffer.byteLength(content) });
+    writes.push({
+      project_slug: batch.project_slug,
+      path: target,
+      action: "written",
+      bytes: Buffer.byteLength(content),
+    });
   }
 
   return { writes, conflicts };
@@ -481,14 +742,76 @@ function finalStatus(apply, hold) {
   return "HELD";
 }
 
+function splitList(value) {
+  return String(value || "")
+    .split(/[,\n;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function splitHeldList(value) {
+  return String(value || "")
+    .split(/[\n;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function shortTaskId(value) {
+  return String(value || "").trim().slice(0, 8);
+}
+
+function parseHeldTasks(value) {
+  return splitHeldList(value).map((entry) => {
+    const match = entry.match(/^([^:]+):(.+)$/);
+    if (!match) {
+      return { id: shortTaskId(entry), reasons: "UNKNOWN_HOLD_REASON" };
+    }
+    return {
+      id: shortTaskId(match[1]),
+      reasons: match[2].trim().replace(/\s+/g, " "),
+    };
+  });
+}
+
+function bracketedList(items) {
+  return `[${items.join(", ")}]`;
+}
+
+function buildRunSummary(args) {
+  const timestamp = args.runTimestamp || new Date().toISOString();
+  if (Number.isNaN(Date.parse(timestamp))) {
+    throw new Error(
+      "--run-timestamp must be parseable as an ISO/UTC timestamp.",
+    );
+  }
+
+  const applied = splitList(args.appliedTaskIds).map(shortTaskId);
+  const held = parseHeldTasks(args.heldTasks);
+  const heldItems = held.map((item) => `${item.id}: ${item.reasons}`);
+  const remaining = Number.parseInt(args.remainingAgentReview, 10);
+  const notable = (String(args.notable || "nominal").trim() || "nominal")
+    .replace(/\.+$/, "");
+
+  return {
+    content: `OE-8D closeout run ${
+      new Date(timestamp).toISOString()
+    }: applied ${applied.length} ${
+      bracketedList(applied)
+    }, held ${held.length} ${
+      bracketedList(heldItems)
+    }, ${remaining} Agent Review rows remaining. ${notable}.`,
+    tags: ["open-engine", "closeout", "oe-8d"],
+  };
+}
+
 // --- OE-8C live modes ---------------------------------------------------
 
 function mcpConfigFromEnv() {
-  const url = process.env.BRAIN_BANK_MCP_URL;
-  const key = process.env.BRAIN_BANK_MCP_KEY;
+  const url = process.env.BB_MCP_URL;
+  const key = process.env.BB_MCP_KEY;
   if (!url || !key) {
     throw new Error(
-      "Live modes need BRAIN_BANK_MCP_URL and BRAIN_BANK_MCP_KEY in the environment (never stored in files).",
+      "Live modes need BB_MCP_URL and BB_MCP_KEY in the environment (never stored in files).",
     );
   }
   return { url, key };
@@ -498,20 +821,35 @@ let mcpRequestId = 0;
 
 async function mcpCall(config, name, toolArgs) {
   mcpRequestId += 1;
-  const res = await fetch(config.url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      "x-brain-key": config.key,
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: mcpRequestId,
-      method: "tools/call",
-      params: { name, arguments: toolArgs },
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(config.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "x-brain-key": config.key,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: mcpRequestId,
+        method: "tools/call",
+        params: { name, arguments: toolArgs },
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(
+        `MCP ${name} timed out after ${FETCH_TIMEOUT_MS / 1000}s`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
   const body = await res.text();
   if (!res.ok) {
     throw new Error(`MCP ${name} HTTP ${res.status}: ${body.slice(0, 300)}`);
@@ -551,7 +889,9 @@ function parseMcpBody(body) {
 function liveInputFromPacket(packet) {
   let obj = packet;
   if (typeof obj === "string") {
-    throw new Error(`get_agent_task returned non-JSON text: ${obj.slice(0, 200)}`);
+    throw new Error(
+      `get_agent_task returned non-JSON text: ${obj.slice(0, 200)}`,
+    );
   }
   const task = obj.task || obj;
   if (!task || !task.id) {
@@ -566,7 +906,9 @@ function liveInputFromPacket(packet) {
 }
 
 function closeoutMarker(batch, draftDate) {
-  return `<!-- open-engine closeout ${draftDate} tasks: ${batch.tasks.join(", ")} -->`;
+  return `<!-- open-engine closeout ${draftDate} tasks: ${
+    batch.tasks.join(", ")
+  } -->`;
 }
 
 function appendCloseoutBlock(path, heading, marker, draftContent) {
@@ -585,13 +927,19 @@ function appendCloseoutBlock(path, heading, marker, draftContent) {
     draftContent.trim(),
     "",
   ].join("\n");
-  writeFileSync(path, `${existing.replace(/\n*$/, "\n")}${block}`, "utf8");
+  appendFileSync(
+    path,
+    `${existing.endsWith("\n") ? "" : "\n"}${block}`,
+    "utf8",
+  );
   return { path, action: "appended", bytes: Buffer.byteLength(block) };
 }
 
 async function runLive(args, registry) {
   const config = mcpConfigFromEnv();
-  const packet = await mcpCall(config, "get_agent_task", { task_id: args.taskId });
+  const packet = await mcpCall(config, "get_agent_task", {
+    task_id: args.taskId,
+  });
   const input = liveInputFromPacket(packet);
   const result = evaluate(input, registry, { taskId: args.taskId });
   result.mode = args.apply ? "apply" : "live-check";
@@ -611,57 +959,215 @@ async function runLive(args, registry) {
       "Refusing to apply: evaluation is not APPLYABLE. Held tasks stay in Agent Review with the reasons above.",
     );
   }
+  if (args.expect && result.status !== args.expect) {
+    printResult(result);
+    throw new Error(`Expected ${args.expect}, got ${result.status}.`);
+  }
+
+  const journal = writeApplyJournal(args.journalDir, args.taskId, result);
+  result.journal = { path: journal.path, state: journal.state };
 
   // Ordering per the OE-8 contract: apply gate first (one AGENT APPLIED per
   // task), then one tracker/session-log write per project batch, then one
   // Brain Bank capture per project batch. The controller never runs git.
-  result.applied = [];
-  for (const item of result.apply) {
-    const applyResult = await mcpCall(config, "apply_agent_task_review", {
-      task_id: item.task_id,
-      applied_by: "closeout-controller",
-      resolution: "accepted",
-      resolve_linked_action_item: false,
-      // No note: apply_agent_task_review would overwrite review_reason with
-      // it. The augmentation is made durable on the immutable AGENT APPLIED
-      // event via closeout_evidence instead.
-      closeout_evidence: {
-        source: "oe8-closeout-controller",
-        mode: "oe8c-single-task",
-        required_sections_present: REQUIRED_RECEIPT_SECTIONS,
-        augmented_sections: item.augmented_sections,
-        review_note_augmentation: item.augmentation_text || undefined,
-      },
+  try {
+    result.applied = [];
+    for (const item of result.apply) {
+      const applyResult = await mcpCall(config, "apply_agent_task_review", {
+        task_id: item.task_id,
+        applied_by: "closeout-controller",
+        resolution: "accepted",
+        resolve_linked_action_item: false,
+        // When the receipt carried an OPERATOR-ACTION marker, route to Needs Operator
+        // (operator step preserved) instead of closing to Agent Done.
+        operator_action: item.operator?.operator_action ?? undefined,
+        operator_target: item.operator?.operator_target ?? undefined,
+        // No note: apply_agent_task_review would overwrite review_reason with
+        // it. The augmentation is made durable on the immutable AGENT APPLIED
+        // event via closeout_evidence instead.
+        closeout_evidence: {
+          source: "oe8-closeout-controller",
+          mode: "oe8c-single-task",
+          required_sections_present: REQUIRED_RECEIPT_SECTIONS,
+          augmented_sections: item.augmented_sections,
+          review_note_augmentation: item.augmentation_text || undefined,
+        },
+      });
+      result.applied.push({ task_id: item.task_id, apply_result: applyResult });
+      updateApplyJournal(journal.path, {
+        state: "board-applied",
+        applied: result.applied,
+      });
+    }
+    result.board_mutations = true;
+    await completeCloseoutFromJournal(config, journal.path, result);
+    updateApplyJournal(journal.path, {
+      state: "complete",
+      completed_at: new Date().toISOString(),
     });
-    result.applied.push({ task_id: item.task_id, apply_result: applyResult });
+  } finally {
+    printResult(result);
   }
-  result.board_mutations = true;
+}
 
-  result.closeout_writes = [];
-  result.captures = [];
-  for (const batch of result.projects) {
-    const marker = closeoutMarker(batch, result.draft_date);
-    result.closeout_writes.push(
-      appendCloseoutBlock(
-        batch.tracker_path,
-        `## Agent closeout — ${result.draft_date} (Open Engine OE-8C)`,
-        marker,
-        batch.tracker_draft,
-      ),
-      appendCloseoutBlock(
-        batch.session_log_path,
-        `## Agent closeout — ${result.draft_date} (Open Engine OE-8C)`,
-        marker,
-        batch.session_log_draft,
-      ),
+async function completeCloseoutFromJournal(config, journalPath, result = null) {
+  const journal = parseJson(journalPath);
+  const target = result || journal.result;
+  target.closeout_writes = target.closeout_writes || [];
+  target.captures = target.captures || [];
+  // Resume idempotence consults the journal's own progress instead of
+  // replaying blindly: file appends are marker-guarded, but captures are not,
+  // so any batch whose capture is already journaled is skipped explicitly
+  // rather than leaning on Brain Bank's SHA-256 dedup.
+  const capturedSlugs = new Set(
+    (journal.captures || []).map((capture) => capture.project_slug),
+  );
+
+  for (const batch of journal.result.projects) {
+    const marker = closeoutMarker(batch, journal.result.draft_date);
+    const trackerWrite = appendCloseoutBlock(
+      batch.tracker_path,
+      `## Agent closeout — ${journal.result.draft_date} (Open Engine OE-8C)`,
+      marker,
+      batch.tracker_draft,
     );
+    const sessionWrite = appendCloseoutBlock(
+      batch.session_log_path,
+      `## Agent closeout — ${journal.result.draft_date} (Open Engine OE-8C)`,
+      marker,
+      batch.session_log_draft,
+    );
+    target.closeout_writes.push(trackerWrite, sessionWrite);
+    updateApplyJournal(journalPath, {
+      state: "files-written",
+      closeout_writes: target.closeout_writes,
+    });
+
+    if (capturedSlugs.has(batch.project_slug)) {
+      target.captures.push({
+        project_slug: batch.project_slug,
+        capture_result: "skipped: capture already journaled for this batch",
+      });
+      continue;
+    }
     const capture = await mcpCall(config, "capture_thought", {
-      content: batch.brain_bank_capture_draft,
+      content: batch.open_brain_capture_draft,
       tags: [batch.capture_tag, "open_engine"],
     });
-    result.captures.push({ project_slug: batch.project_slug, capture_result: capture });
+    target.captures.push({
+      project_slug: batch.project_slug,
+      capture_result: capture,
+    });
+    updateApplyJournal(journalPath, {
+      state: "captures-written",
+      captures: target.captures,
+    });
+  }
+}
+
+async function resumeCloseout(args) {
+  const config = mcpConfigFromEnv();
+  const journalPath = journalPathFor(args.journalDir, args.resumeTaskId);
+  if (!existsSync(journalPath)) {
+    throw new Error(
+      `No closeout journal found for ${args.resumeTaskId}: ${journalPath}`,
+    );
+  }
+  const journalState = parseJson(journalPath).state;
+  if (journalState === "complete") {
+    printResult({
+      status: "ALREADY_COMPLETE",
+      mode: "resume",
+      dry_run: true,
+      board_mutations: false,
+      task_id: args.resumeTaskId,
+      journal: { path: journalPath, state: journalState },
+      message: "Journal state is complete; nothing to replay.",
+    });
+    return;
+  }
+  const packet = await mcpCall(config, "get_agent_task", {
+    task_id: args.resumeTaskId,
+  });
+  const input = liveInputFromPacket(packet);
+  const task = input.tasks[0];
+  const hasApplied = task.events.some((event) =>
+    event.event_type === "AGENT APPLIED"
+  );
+  if (!hasApplied) {
+    throw new Error(
+      `Refusing resume: task ${args.resumeTaskId} has no AGENT APPLIED event.`,
+    );
+  }
+  const result = {
+    status: "RESUME_READY",
+    mode: "resume",
+    dry_run: false,
+    board_mutations: false,
+    task_id: args.resumeTaskId,
+    journal: { path: journalPath },
+  };
+  try {
+    await completeCloseoutFromJournal(config, journalPath, result);
+    result.status = "RESUMED";
+    updateApplyJournal(journalPath, {
+      state: "complete",
+      resumed_at: new Date().toISOString(),
+    });
+  } finally {
+    printResult(result);
+  }
+}
+
+function journalPathFor(journalDir, taskId) {
+  return join(journalDir, `${taskId}.json`);
+}
+
+function writeApplyJournal(journalDir, taskId, result) {
+  mkdirSync(journalDir, { recursive: true });
+  const path = journalPathFor(journalDir, taskId);
+  const journal = {
+    version: 1,
+    state: "intent-written",
+    task_id: taskId,
+    created_at: new Date().toISOString(),
+    result,
+  };
+  writeFileSync(path, `${JSON.stringify(journal, null, 2)}\n`, "utf8");
+  return { path, state: journal.state };
+}
+
+function updateApplyJournal(path, patch) {
+  const current = parseJson(path);
+  const next = { ...current, ...patch, updated_at: new Date().toISOString() };
+  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  return next;
+}
+
+function isUuidish(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    String(value || ""),
+  );
+}
+
+async function captureRunSummary(args) {
+  const summary = buildRunSummary(args);
+  const result = {
+    status: "CAPTURE_READY",
+    mode: args.summaryPreview ? "summary-preview" : "capture-run-summary",
+    dry_run: Boolean(args.summaryPreview),
+    content: summary.content,
+    tags: summary.tags,
+  };
+
+  if (args.summaryPreview) {
+    printResult(result);
+    return;
   }
 
+  const config = mcpConfigFromEnv();
+  result.capture_result = await mcpCall(config, "capture_thought", summary);
+  result.status = "CAPTURED";
   printResult(result);
 }
 
@@ -727,6 +1233,14 @@ async function main() {
     printSql();
     return;
   }
+  if (args.captureRunSummary) {
+    await captureRunSummary(args);
+    return;
+  }
+  if (args.resumeTaskId) {
+    await resumeCloseout(args);
+    return;
+  }
   if (args.liveCheck || args.apply) {
     await runLive(args, loadRegistry(args.registry));
     return;
@@ -737,7 +1251,10 @@ async function main() {
 
   const registry = loadRegistry(args.registry);
   const input = parseJson(args.source);
-  const result = evaluate(input, registry, { taskId: args.taskId, writeDrafts: args.writeDrafts });
+  const result = evaluate(input, registry, {
+    taskId: args.taskId,
+    writeDrafts: args.writeDrafts,
+  });
 
   if (args.writeDrafts) {
     const report = writeDraftFiles(result, args.draftsDir);
@@ -746,7 +1263,9 @@ async function main() {
     result.draft_conflicts = report.conflicts;
     printResult(result);
     if (report.conflicts.length > 0) {
-      throw new Error(`Draft conflict: ${report.conflicts.map((c) => c.path).join(", ")}`);
+      throw new Error(
+        `Draft conflict: ${report.conflicts.map((c) => c.path).join(", ")}`,
+      );
     }
   } else {
     printResult(result);
@@ -757,7 +1276,14 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(`closeout-controller: ${(err).message}`);
-  process.exit(1);
-});
+// Main guard: run the CLI only when invoked directly, so the module is
+// importable from tests. process.argv[1] carries literal spaces (this repo
+// path has them); pathToFileURL matches import.meta.url's %20 encoding.
+if (
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main().catch((err) => {
+    console.error(`closeout-controller: ${err.message}`);
+    process.exit(1);
+  });
+}
