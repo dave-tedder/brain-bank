@@ -1,0 +1,15 @@
+-- OE-12 Phase 4 readiness watch, part 4.
+--
+-- log_agent_run() is SECURITY DEFINER and lives in `public`, so PostgREST
+-- advertises it at /rest/v1/rpc/log_agent_run and Postgres' default EXECUTE
+-- grant to PUBLIC makes it callable by anon and authenticated. That trips the
+-- SECURITY DEFINER / RPC-exposure advisors. Not practically exploitable -
+-- Postgres rejects direct invocation of a trigger function ("trigger functions
+-- can only be called as triggers") - but the grant is real and the acceptance
+-- bar is zero WARN findings.
+--
+-- Revoking EXECUTE does NOT disable the triggers: EXECUTE on a trigger
+-- function is checked at CREATE TRIGGER time, not when the trigger fires. Both
+-- agent_task_ledger_log_run_insert and agent_task_ledger_log_run_update keep
+-- logging their rows after this revoke.
+revoke execute on function public.log_agent_run() from public, anon, authenticated;
