@@ -31,6 +31,9 @@ jobs:
       - name: Verify queue-runner skill contract
         run: node skills/queue-runner/verify.mjs
 
+      - name: Run closeout-controller tests
+        run: node --test scripts/open-engine/closeout-controller.test.mjs
+
       - name: Install Node
         uses: actions/setup-node@v4
         with:
