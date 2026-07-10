@@ -36,13 +36,13 @@ Deno.test("resolve update rejects an over-long reason", () => {
 
 Deno.test("defer update sets deferred status, timestamp, and pause tag", () => {
   const update = buildDeferActionItemUpdate(
-    "paused-project:atlanta-invitational",
+    "paused-project:some-project",
     NOW,
   );
   assertEquals(update, {
     status: "deferred",
     deferred_at: NOW,
-    defer_reason: "paused-project:atlanta-invitational",
+    defer_reason: "paused-project:some-project",
   });
 });
 
@@ -64,8 +64,8 @@ Deno.test("restore selector accepts a lone id", () => {
 
 Deno.test("restore selector accepts a lone defer_reason", () => {
   assertEquals(
-    assertRestoreSelector({ defer_reason: " paused-project:atlanta " }),
-    { defer_reason: "paused-project:atlanta" },
+    assertRestoreSelector({ defer_reason: " paused-project:some-project " }),
+    { defer_reason: "paused-project:some-project" },
   );
 });
 
