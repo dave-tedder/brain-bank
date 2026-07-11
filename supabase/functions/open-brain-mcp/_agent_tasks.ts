@@ -62,6 +62,7 @@ export interface AgentTaskAccessRow {
   claimed_by: string | null;
   risk: AgentTaskRisk;
   explicit_approval: boolean;
+  claim_token?: string | null;
   status: AgentTaskStatus;
 }
 
@@ -99,6 +100,36 @@ export function assertAgentCanWriteTask(
   if (!canAgentWriteTask(task, agentCode)) {
     throw new Error(
       "Agent can only update tasks it has claimed or tasks assigned to its agent_code.",
+    );
+  }
+}
+
+// OE-15: run-side receipt actions that must present the current claim_token
+// while the task carries one. Resume-family actions (resume/unblock/answer)
+// are human-gated and mint a fresh token instead. This mirrors the SQL guard
+// in move_agent_task_status — SQL is the enforcement source of truth; this
+// pre-check exists for a clearer tool-level error message.
+export const CLAIM_TOKEN_GUARDED_ACTIONS = [
+  "update",
+  "complete",
+  "block",
+  "request-review",
+  "hold",
+  "fail",
+] as const;
+
+export function assertClaimTokenMatches(
+  task: AgentTaskAccessRow,
+  presentedToken: string | null | undefined,
+  action: AgentTaskToolAction,
+): void {
+  if (
+    !(CLAIM_TOKEN_GUARDED_ACTIONS as readonly string[]).includes(action)
+  ) return;
+  if (!task.claim_token) return;
+  if (!presentedToken || presentedToken !== task.claim_token) {
+    throw new Error(
+      "This task is held by a different run: pass the claim_token returned by the claim (or resume) call this run made. A run that does not hold the current claim cannot write receipts on it.",
     );
   }
 }

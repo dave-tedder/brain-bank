@@ -4,6 +4,7 @@ import {
   type AgentTaskAccessRow,
   assertAgentCanWriteTask,
   assertClaimAllowed,
+  assertClaimTokenMatches,
   assertIntakePromotionAllowed,
   assertPromotionCallerAllowed,
   assertResumeTransitionAllowed,
@@ -313,4 +314,60 @@ Deno.test("operator target allows http(s) schemes and rejects unsafe schemes", (
   assertEquals(operatorTargetHasAllowedScheme("data:text/html,test"), false);
   assertEquals(operatorTargetHasAllowedScheme("//evil.com/phish"), false);
   assertEquals(operatorTargetHasAllowedScheme("  //evil.com"), false);
+});
+
+Deno.test("claim token guard blocks run-side receipts without the current token", () => {
+  const task = {
+    agent_code: null,
+    claimed_by: "local-claude-code",
+    risk: "low" as const,
+    explicit_approval: false,
+    status: "Agent Working" as const,
+    claim_token: "11111111-1111-4111-8111-111111111111",
+  };
+
+  for (
+    const action of [
+      "update",
+      "complete",
+      "block",
+      "request-review",
+      "hold",
+      "fail",
+    ] as const
+  ) {
+    assertThrows(() => assertClaimTokenMatches(task, undefined, action));
+    assertThrows(() =>
+      assertClaimTokenMatches(
+        task,
+        "22222222-2222-4222-8222-222222222222",
+        action,
+      )
+    );
+    assertClaimTokenMatches(
+      task,
+      "11111111-1111-4111-8111-111111111111",
+      action,
+    );
+  }
+});
+
+Deno.test("claim token guard skips token-less claims and resume-family actions", () => {
+  const untokened = {
+    agent_code: null,
+    claimed_by: "local-claude-code",
+    risk: "low" as const,
+    explicit_approval: false,
+    status: "Agent Working" as const,
+    claim_token: null,
+  };
+  // Pre-migration claims carry no token and stay exempt.
+  assertClaimTokenMatches(untokened, undefined, "complete");
+
+  const tokened = { ...untokened, claim_token: "11111111-1111-4111-8111-111111111111" };
+  // Resume-family transitions are human-gated and mint a fresh token instead
+  // of presenting the old one.
+  for (const action of ["resume", "unblock", "answer"] as const) {
+    assertClaimTokenMatches(tokened, undefined, action);
+  }
 });

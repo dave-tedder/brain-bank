@@ -502,3 +502,47 @@ Deno.test("buildAgentTaskIntakeRecord accepts triage-agent source", () => {
   assertEquals(record.status, "Standing");
   assertEquals(record.explicit_approval, false);
 });
+
+Deno.test("intake preserves preferred_agent as a soft-affinity hint", () => {
+  const record = buildAgentTaskIntakeRecord({
+    ...baseInput,
+    preferred_agent: "  local-codex  ",
+  });
+  assertEquals(record.preferred_agent, "local-codex");
+});
+
+Deno.test("intake defaults preferred_agent to null and never hard-assigns from it", () => {
+  const record = buildAgentTaskIntakeRecord(baseInput);
+  assertEquals(record.preferred_agent, null);
+  assertEquals(record.agent_code, null);
+});
+
+Deno.test("action-item, thought, and follow-up intake pass preferred_agent through", () => {
+  const fromActionItem = buildActionItemPromotionIntakeRecord({
+    action_item: {
+      id: "33333333-3333-4333-8333-333333333333",
+      description: "Draft the follow-up email.",
+      status: "open",
+    },
+    preferred_agent: "local-claude-code",
+  });
+  assertEquals(fromActionItem.preferred_agent, "local-claude-code");
+  assertEquals(fromActionItem.agent_code, null);
+
+  const fromThought = buildThoughtIntakeRecord({
+    thought: {
+      id: "44444444-4444-4444-8444-444444444444",
+      content: "Session closeout capture.",
+    },
+    preferred_agent: "local-codex",
+  });
+  assertEquals(fromThought.preferred_agent, "local-codex");
+
+  const followUp = buildFollowUpTaskRecord({
+    parent_task_id: "55555555-5555-4555-8555-555555555555",
+    desired_outcome: "Verify the deployed fix.",
+    context: "Child follow-up test.",
+    preferred_agent: "local-codex",
+  });
+  assertEquals(followUp.preferred_agent, "local-codex");
+});

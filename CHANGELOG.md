@@ -8,6 +8,14 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Added
+
+- **Soft-affinity routing (`preferred_agent`).** Agent task drafts can carry an optional `preferred_agent` hint that gives one runtime first dibs at claim time without hard-assigning the task. It is a pure ordering key — claim order becomes hard-assigned-to-me, then preferred-to-me, then everything else — so a preferred task never starves and any eligible runtime can still claim any unassigned task. Free text (no enum/FK), so adding a new runtime needs no schema change. Exposed on all four intake tools (`create_agent_task_intake`, `_from_action_item`, `_from_thought`, `_follow_up`) and as an optional promote-time override on `promote_agent_task_intake`. Drafts stay born-unassigned by default (the OE-9 shared-pool model); `preferred_agent` reorders, it does not restrict.
+
+### Changed
+
+- **Breaking (schema + receipt contract): per-run claim ownership (`claim_token`).** When several executor runs share one `agent_code` (e.g. three parallel `claude-code` slots), an expire-and-reclaim cycle could previously let a stale run post a receipt on a task another run now holds — the guard only checked the shared `agent_code`. A new `agent_tasks.claim_token` uuid is minted at claim/resume and must be presented for run-side receipts (`complete` / `block` / `hold` / `fail` / `update`) while the claim carries one; the resume family (`resume` / `unblock` / `answer`) mints a fresh token instead. Claims made before this migration have a null token and stay exempt, so applying the migration and redeploying the Edge Function back-to-back strands no in-flight work. **Fork action:** apply `supabase/migrations/20260711_oe15_soft_affinity_claim_tokens.sql`, redeploy `open-brain-mcp`, and update any executor prompt to record the `claim_token` returned by its claim call and pass it on later receipts (the shipped queue-runner skill and executor routine prompt already do). `claim_token` is deliberately never returned by list/get reads or event payloads.
+
 ## [0.5.0] - 2026-07-10
 
 Brain Bank v0.5.0 adds the Open Engine human-facing layer: a briefing that turns the board into an operator cockpit, a draft-safe triage lane that proposes work from open action items, an advisory cross-runtime critic, an operations sentinel, an agent scorecard, and a query-backed readiness watch that gates the (still-opt-in) auto-promote work. Canonical state still only changes through the human-controlled OE-7/OE-8 apply layer; nothing here promotes or executes on its own.

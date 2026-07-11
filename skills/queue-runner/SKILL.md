@@ -22,6 +22,8 @@ Default runtime:
 
 If the user explicitly assigns a different runtime, use that `agent_code` only after the ledger confirms it exists. Never invent a new ledger identity during a heartbeat.
 
+Task drafts are born UNASSIGNED (`agent_code = NULL`) so any local executor can claim them (OE-9 shared-pool decision). Never stamp an `agent_code` on a draft by default; a hard `agent_code` is a capability or quality lock only. Routing preferences use `preferred_agent`, which reorders claims but never restricts them.
+
 ## Mandatory Preflight
 
 Before touching a task:
@@ -48,7 +50,7 @@ Follow this order exactly:
 5. Check human-hold and blocked tasks before new work.
 6. Resume exactly one ready hold or block if possible.
 7. Otherwise claim the oldest eligible `Agent Todo` task for this `agent_code`.
-8. Re-read the task after claim or resume.
+8. Re-read the task after claim or resume, and record the `claim_token` from the claim/resume response. Every later receipt on this task (`update`, `complete`, `block`, `request-review`, `hold`, `fail`) must pass that exact token; the board rejects receipts from a run that does not hold the current claim, even under the same `agent_code`.
 9. Do only the scoped work in the task packet.
 10. Post one receipt.
 11. Update the ledger.

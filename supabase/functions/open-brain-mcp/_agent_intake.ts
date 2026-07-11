@@ -23,6 +23,7 @@ export interface AgentTaskIntakeInput {
   boundaries: string;
   intake_source: AgentTaskIntakeSource;
   agent_code?: string | null;
+  preferred_agent?: string | null;
   project_slug?: string | null;
   priority?: "low" | "medium" | "high";
   risk?: AgentTaskRisk;
@@ -38,6 +39,7 @@ export interface AgentTaskIntakeRecord {
   label: "agent-instructions";
   status: "Standing";
   agent_code: string | null;
+  preferred_agent: string | null;
   project_slug: string | null;
   priority: "low" | "medium" | "high";
   risk: AgentTaskRisk;
@@ -66,6 +68,7 @@ export interface ActionItemPromotionRow {
 export interface ActionItemPromotionInput {
   action_item: ActionItemPromotionRow;
   agent_code?: string | null;
+  preferred_agent?: string | null;
   project_slug?: string | null;
   requested_by?: string | null;
 }
@@ -80,6 +83,7 @@ export interface ThoughtIntakeRow {
 export interface ThoughtIntakeInput {
   thought: ThoughtIntakeRow;
   agent_code?: string | null;
+  preferred_agent?: string | null;
   project_slug?: string | null;
   requested_by?: string | null;
 }
@@ -89,6 +93,7 @@ export interface FollowUpTaskInput {
   desired_outcome: string;
   context: string;
   agent_code?: string | null;
+  preferred_agent?: string | null;
   project_slug?: string | null;
   requested_by?: string | null;
   priority?: "low" | "medium" | "high";
@@ -190,6 +195,7 @@ export function buildAgentTaskIntakeRecord(
 
   const desiredOutcome = cleanText(input.desired_outcome, "desired_outcome");
   const agentCode = input.agent_code?.trim() || null;
+  const preferredAgent = input.preferred_agent?.trim() || null;
   const priority = input.priority && VALID_PRIORITIES.has(input.priority)
     ? input.priority
     : "medium";
@@ -204,6 +210,7 @@ export function buildAgentTaskIntakeRecord(
     label: "agent-instructions",
     status: "Standing",
     agent_code: agentCode,
+    preferred_agent: preferredAgent,
     project_slug: input.project_slug?.trim() || null,
     priority,
     risk,
@@ -318,6 +325,7 @@ export function buildActionItemPromotionIntakeRecord(
       "Manual draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, or mark the linked action item resolved from this intake step.",
     intake_source: "action-item-promotion",
     agent_code: input.agent_code,
+    preferred_agent: input.preferred_agent,
     project_slug: input.project_slug,
     priority: "medium",
     risk: "low",
@@ -388,6 +396,7 @@ export function buildThoughtIntakeRecord(
       "Manual draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, or mark related work complete from this intake step.",
     intake_source: thoughtIntakeSource(thought.metadata),
     agent_code: input.agent_code,
+    preferred_agent: input.preferred_agent,
     project_slug: input.project_slug,
     priority: "medium",
     risk: "low",
@@ -427,6 +436,7 @@ export function buildFollowUpTaskRecord(
       "Manual follow-up draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, resolve linked action items, or mark project records complete from this draft step.",
     intake_source: "agent-follow-up",
     agent_code: input.agent_code,
+    preferred_agent: input.preferred_agent,
     project_slug: input.project_slug,
     priority: input.priority ?? "medium",
     risk: input.risk ?? "low",

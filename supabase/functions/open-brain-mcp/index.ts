@@ -49,6 +49,7 @@ import {
   type AgentTaskStatus,
   type AgentTaskToolAction,
   assertAgentCanWriteTask,
+  assertClaimTokenMatches,
   assertClaimAllowed,
   assertIntakePromotionAllowed,
   assertPromotionCallerAllowed,
@@ -710,7 +711,11 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent";
+
+// Internal load for the receipt-guard path only: includes claim_token so
+// assertClaimTokenMatches can pre-check. Never use for list/get responses.
+const AGENT_TASK_LOAD_SELECT = `${AGENT_TASK_SELECT}, claim_token`;
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -736,7 +741,7 @@ async function loadAgentTaskForTool(taskId: string): Promise<
 > {
   const { data, error } = await supabase
     .from("agent_tasks")
-    .select(AGENT_TASK_SELECT)
+    .select(AGENT_TASK_LOAD_SELECT)
     .eq("id", taskId)
     .single();
   if (error) throw error;
@@ -748,10 +753,12 @@ async function moveAgentTaskViaTool(args: {
   agentCode: string;
   action: AgentTaskToolAction;
   reason?: string;
+  claimToken?: string;
 }) {
   const task = await loadAgentTaskForTool(args.taskId);
   if (!task) throw new Error(`Task not found: ${args.taskId}`);
   assertAgentCanWriteTask(task, args.agentCode);
+  assertClaimTokenMatches(task, args.claimToken ?? null, args.action);
   if (args.action === "update") {
     assertStatusHeartbeatAllowed(task);
     assertClaimAllowed(task);
@@ -774,6 +781,7 @@ async function moveAgentTaskViaTool(args: {
     p_event_type: receipt,
     p_agent_code: args.agentCode,
     p_reason: args.reason ?? null,
+    p_claim_token: args.claimToken ?? null,
   });
   if (error) throw error;
   return { receipt, task: data };
@@ -1896,6 +1904,9 @@ server.registerTool(
         "Allowed OE-6 intake source. Slack is intake-only; action-item promotion is manual-only.",
       ),
       agent_code: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
+      ),
       project_slug: z.string().min(1).optional(),
       priority: z.enum(["low", "medium", "high"]).optional(),
       risk: z.enum(["low", "medium", "high"]).optional(),
@@ -1916,6 +1927,7 @@ server.registerTool(
       boundaries: string;
       intake_source: AgentTaskIntakeSource;
       agent_code?: string;
+      preferred_agent?: string;
       project_slug?: string;
       priority?: "low" | "medium" | "high";
       risk?: AgentTaskRisk;
@@ -1928,6 +1940,7 @@ server.registerTool(
     logToolInvocation("create_agent_task_intake", {
       intake_source: args.intake_source,
       agent_code: args.agent_code,
+      preferred_agent: args.preferred_agent,
       project_slug: args.project_slug,
       priority: args.priority,
       risk: args.risk,
@@ -1965,21 +1978,27 @@ server.registerTool(
     inputSchema: {
       action_item_id: z.string().uuid(),
       agent_code: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
+      ),
       project_slug: z.string().min(1).optional(),
       requested_by: z.string().min(1).optional(),
     },
   },
   async (
-    { action_item_id, agent_code, project_slug, requested_by }: {
-      action_item_id: string;
-      agent_code?: string;
-      project_slug?: string;
-      requested_by?: string;
-    },
+    { action_item_id, agent_code, preferred_agent, project_slug, requested_by }:
+      {
+        action_item_id: string;
+        agent_code?: string;
+        preferred_agent?: string;
+        project_slug?: string;
+        requested_by?: string;
+      },
   ) => {
     logToolInvocation("create_agent_task_from_action_item", {
       action_item_id,
       agent_code,
+      preferred_agent,
       project_slug,
     }, "mcp");
     try {
@@ -2001,6 +2020,7 @@ server.registerTool(
       const record = buildActionItemPromotionIntakeRecord({
         action_item: actionItem,
         agent_code,
+        preferred_agent,
         project_slug,
         requested_by,
       });
@@ -2236,14 +2256,18 @@ server.registerTool(
     inputSchema: {
       thought_id: z.string().uuid(),
       agent_code: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
+      ),
       project_slug: z.string().min(1).optional(),
       requested_by: z.string().min(1).optional(),
     },
   },
   async (
-    { thought_id, agent_code, project_slug, requested_by }: {
+    { thought_id, agent_code, preferred_agent, project_slug, requested_by }: {
       thought_id: string;
       agent_code?: string;
+      preferred_agent?: string;
       project_slug?: string;
       requested_by?: string;
     },
@@ -2251,6 +2275,7 @@ server.registerTool(
     logToolInvocation("create_agent_task_from_thought", {
       thought_id,
       agent_code,
+      preferred_agent,
       project_slug,
     }, "mcp");
     try {
@@ -2272,6 +2297,7 @@ server.registerTool(
       const record = buildThoughtIntakeRecord({
         thought,
         agent_code,
+        preferred_agent,
         project_slug,
         requested_by,
       });
@@ -2309,18 +2335,23 @@ server.registerTool(
       task_id: z.string().uuid(),
       promoted_by: z.string().min(1).optional(),
       note: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Optional promote-time routing override; null leaves the intake-set preferred_agent untouched.",
+      ),
     },
   },
   async (
-    { task_id, promoted_by, note }: {
+    { task_id, promoted_by, note, preferred_agent }: {
       task_id: string;
       promoted_by?: string;
       note?: string;
+      preferred_agent?: string;
     },
   ) => {
     logToolInvocation("promote_agent_task_intake", {
       task_id,
       promoted_by,
+      preferred_agent,
     }, "mcp");
     try {
       const { data: ledgerRows, error: ledgerError } = await supabase
@@ -2340,6 +2371,7 @@ server.registerTool(
           p_task_id: task_id,
           p_promoted_by: promoted_by ?? null,
           p_note: note ?? null,
+          p_preferred_agent: preferred_agent ?? null,
         },
       );
       if (error) throw error;
@@ -2370,6 +2402,9 @@ server.registerTool(
       desired_outcome: z.string().min(1),
       context: z.string().min(1),
       agent_code: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
+      ),
       project_slug: z.string().min(1).optional(),
       requested_by: z.string().min(1).optional(),
       priority: z.enum(["low", "medium", "high"]).optional(),
@@ -2382,6 +2417,7 @@ server.registerTool(
       desired_outcome: string;
       context: string;
       agent_code?: string;
+      preferred_agent?: string;
       project_slug?: string;
       requested_by?: string;
       priority?: "low" | "medium" | "high";
@@ -2391,6 +2427,7 @@ server.registerTool(
     logToolInvocation("create_agent_task_follow_up", {
       parent_task_id: args.parent_task_id,
       agent_code: args.agent_code,
+      preferred_agent: args.preferred_agent,
       project_slug: args.project_slug,
       priority: args.priority,
       risk: args.risk,
@@ -2575,13 +2612,17 @@ server.registerTool(
       status_note: z.string().min(1).describe(
         "Short receipt note describing current progress or next checkpoint.",
       ),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, status_note }: {
+    { task_id, agent_code, status_note, claim_token }: {
       task_id: string;
       agent_code: string;
       status_note: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("update_agent_task", {
@@ -2596,6 +2637,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "update",
           reason: status_note,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -2616,13 +2658,17 @@ server.registerTool(
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
       result: z.string().min(1).describe("Completion receipt for Dave."),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, result }: {
+    { task_id, agent_code, result, claim_token }: {
       task_id: string;
       agent_code: string;
       result: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("complete_agent_task", { task_id, agent_code }, "mcp");
@@ -2633,6 +2679,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "complete",
           reason: result,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -2655,13 +2702,17 @@ server.registerTool(
       blocker: z.string().min(1).describe(
         "The exact blocker or question that needs human input.",
       ),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, blocker }: {
+    { task_id, agent_code, blocker, claim_token }: {
       task_id: string;
       agent_code: string;
       blocker: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("block_agent_task", { task_id, agent_code }, "mcp");
@@ -2672,6 +2723,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "block",
           reason: blocker,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -2692,13 +2744,17 @@ server.registerTool(
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
       review_note: z.string().min(1),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, review_note }: {
+    { task_id, agent_code, review_note, claim_token }: {
       task_id: string;
       agent_code: string;
       review_note: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("request_agent_review", { task_id, agent_code }, "mcp");
@@ -2709,6 +2765,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "request-review",
           reason: review_note,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -2980,7 +3037,7 @@ server.registerTool(
   {
     title: "Resume Agent Task",
     description:
-      "Resume a claimed or assigned Agent Needs Input or Agent Review task back to Agent Working with an AGENT RESUMED receipt.",
+      "Resume a claimed or assigned Agent Needs Input or Agent Review task back to Agent Working with an AGENT RESUMED receipt. The returned task carries a freshly minted claim_token; the resuming session must pass it on subsequent receipts.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
@@ -3019,7 +3076,7 @@ server.registerTool(
   {
     title: "Unblock Agent Task",
     description:
-      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT UNBLOCKED receipt.",
+      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT UNBLOCKED receipt. The returned task carries a freshly minted claim_token; the resuming session must pass it on subsequent receipts.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
@@ -3058,7 +3115,7 @@ server.registerTool(
   {
     title: "Answer Agent Task",
     description:
-      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT HUMAN ANSWERED receipt.",
+      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT HUMAN ANSWERED receipt. The returned task carries a freshly minted claim_token; the resuming session must pass it on subsequent receipts.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
@@ -3104,13 +3161,17 @@ server.registerTool(
       reason: z.string().min(1).describe(
         "Honest hold reason: what was validated, what was NOT executed, and who should pick the task up.",
       ),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, reason }: {
+    { task_id, agent_code, reason, claim_token }: {
       task_id: string;
       agent_code: string;
       reason: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("hold_agent_task", { task_id, agent_code }, "mcp");
@@ -3121,6 +3182,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "hold",
           reason,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -3143,13 +3205,17 @@ server.registerTool(
       reason: z.string().min(1).describe(
         "The failure reason to record on the task and event payload.",
       ),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, reason }: {
+    { task_id, agent_code, reason, claim_token }: {
       task_id: string;
       agent_code: string;
       reason: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("fail_agent_task", { task_id, agent_code }, "mcp");
@@ -3160,6 +3226,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "fail",
           reason,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
