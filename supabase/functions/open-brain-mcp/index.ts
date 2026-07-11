@@ -2330,7 +2330,7 @@ server.registerTool(
   {
     title: "Promote Agent Task Intake",
     description:
-      "Human-controlled promotion for one Standing intake draft. Moves it to Agent Todo so normal Queue Runner claim rules can see it. Does not grant explicit approval. promoted_by must name the human operator who approved the promotion — anonymous callers, registered agent codes, and automated-runtime identities are refused.",
+      "Human-controlled promotion for one Standing intake draft. Moves it to Agent Todo so normal Queue Runner claim rules can see it. Does not grant explicit approval. promoted_by must name the human operator who approved the promotion — anonymous callers, registered agent codes, and automated-runtime identities are refused. Side effect: for triage-authored drafts (intake_source=triage-agent), promoting the last still-Standing draft of a given ET creation day (with none of that day's triage drafts archived) also records a clean OE Phase-4 watch ruling for that day, so the readiness streak reflects the promote decision without a separate step. An existing ruling is never overridden.",
     inputSchema: {
       task_id: z.string().uuid(),
       promoted_by: z.string().min(1).optional(),
