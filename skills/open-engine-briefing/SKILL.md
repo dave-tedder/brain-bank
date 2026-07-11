@@ -66,6 +66,33 @@ if deferred.
   repo, not quoted here. (3) No file - quote the substantive draft inline in
   a fenced block (the pre-Phase-3 receipts and cloud-fallback receipts). Never
   quote a code change; never leave a standalone draft unreviewable.
+- SHOW TASK LINEAGE, do not scatter it. When an applied or Done task spawned
+  follow-up work (Standing drafts or Agent Todo cards created from its receipt
+  or in the same closeout), render those children UNDER the parent that
+  produced them, naming the link: "Yesterday's audit <parent-task-id> produced
+  these two follow-ups." The reader must never have to reassemble the
+  parent/child chain themselves. Detect lineage from the child's
+  context/sources naming a prior task id, a shared project_slug created in the
+  same window, or an AGENT FOLLOW-UP event. In particular, a batch of Standing
+  drafts in bucket D is almost always the harvest of the tasks that finished in
+  the same window; group them by their parent, not as a flat list.
+- NEVER POINT AT WORK THAT DOES NOT EXIST YET. Before linking a deliverable or
+  telling the operator to apply/use one, confirm it exists. A Needs Operator or
+  Agent Review card that depends on another task's output (a walkthrough, a
+  kit, a draft) is BLOCKED if that other task is still Standing or Agent Todo
+  and has not run. Say so plainly ("depends on <blocking-task-id>, which has
+  not executed yet, so no file exists") instead of handing the operator a dead
+  link or a file path that is not there. A `deliverables/` path only counts as
+  real after the producing task reached Agent Review/Done; a Standing draft
+  describing the work is the request, not the deliverable.
+- DO NOT RE-SURFACE SETTLED STEPS. A follow-up step MINED from an applied
+  task's receipt (the Phase-1 fallback) has no tracking card, so nothing
+  records when the operator does it, and it re-appears every run reading as
+  stale. Surface a mined step ONLY in the watermark window right after its task
+  was applied; after that, drop it. Genuine recurring outside-system steps
+  belong on a Needs Operator card (which IS closeable), not mined every
+  briefing. When unsure whether a mined step is already done, say it may
+  already be handled rather than presenting it as open work.
 - CRITIC VERDICT (advisory, when present). An independent cross-runtime critic
   (Codex reviews Claude-executed work and vice versa) may leave an advisory
   verdict on an Agent Review or Needs Operator task, stored on `critic_verdict` /
