@@ -7,6 +7,7 @@ import {
   DigestActionRow,
   renderOpenActionChecklist,
 } from "./action-checklist.ts";
+import { formatSentinelReport } from "./sentinel-report.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -44,6 +45,24 @@ async function loadCompileHealthWarning(): Promise<string | null> {
   } catch (err) {
     console.error("compile health check failed (non-fatal):", err);
     return "*Wiki compile health unavailable:* latest run could not be checked.";
+  }
+}
+
+async function loadSentinelReport(): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from("agent_task_ledger")
+      .select("last_heartbeat, last_queue_result")
+      .eq("agent_code", "sentinel")
+      .maybeSingle();
+    if (error) {
+      console.error("sentinel report query failed (non-fatal):", error);
+      return "*Ops sentinel unavailable:* ledger could not be checked.";
+    }
+    return formatSentinelReport(data, new Date().toISOString());
+  } catch (err) {
+    console.error("sentinel report failed (non-fatal):", err);
+    return "*Ops sentinel unavailable:* ledger could not be checked.";
   }
 }
 
@@ -1009,6 +1028,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const compileHealthWarning = await loadCompileHealthWarning();
     if (compileHealthWarning) {
       slackMessage += `\n\n---\n${compileHealthWarning}`;
+    }
+
+    // Ops sentinel verdict is advisory, same contract as compile health:
+    // warn, never block. Daily mode only.
+    if (mode === "daily") {
+      const sentinelReport = await loadSentinelReport();
+      if (sentinelReport) {
+        slackMessage += `\n${sentinelReport}`;
+      }
     }
 
     const slackResult = await postToSlack(SLACK_DIGEST_CHANNEL, slackMessage);

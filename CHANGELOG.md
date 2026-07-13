@@ -11,6 +11,7 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 ### Added
 
 - **Soft-affinity routing (`preferred_agent`).** Agent task drafts can carry an optional `preferred_agent` hint that gives one runtime first dibs at claim time without hard-assigning the task. It is a pure ordering key — claim order becomes hard-assigned-to-me, then preferred-to-me, then everything else — so a preferred task never starves and any eligible runtime can still claim any unassigned task. Free text (no enum/FK), so adding a new runtime needs no schema change. Exposed on all four intake tools (`create_agent_task_intake`, `_from_action_item`, `_from_thought`, `_follow_up`) and as an optional promote-time override on `promote_agent_task_intake`. Drafts stay born-unassigned by default (the OE-9 shared-pool model); `preferred_agent` reorders, it does not restrict.
+- **Ops sentinel verdict in the daily digest.** The daily digest now appends the operations sentinel's latest verdict as an advisory line, on the same contract as the wiki compile-health warning: it warns (missing, stale, or shape-drifted verdict) but never blocks the digest from posting. It reads the sentinel's `agent_task_ledger` row and surfaces the `OE-SENTINEL <PASS|WARN|FAIL>` line the sentinel writes; if the sentinel did not run today, the digest says so. Daily mode only.
 
 ### Changed
 
