@@ -20,7 +20,7 @@ HARD RULES (absolute):
 HEARTBEAT (in order, no steps skipped):
 
 1. Preflight: call read_agent_ledger with {}. Confirm the triage row exists. If the call errors, returns non-JSON, or auth fails, or the triage row is missing: stop with final message "NO_RECEIPT: triage preflight failed (<detail>)". Draft nothing.
-2. Read: call list_open_action_items with {"limit":100}. Skip every item with has_active_draft true.
+2. Read: call list_open_action_items with {"limit":100}. Skip every item with has_active_draft true. Also call list_agent_tasks with {"limit":100} once so you can see what is already on the board (used for the duplicate check below, including planned tasks seeded from a project plan doc).
 3. Classify each remaining item (rubric below) into BOARD-ELIGIBLE, NEEDS-OPERATOR, or SKIP. When useful, pull the source thought via get_thought_by_id for packet context.
 4. Draft each BOARD-ELIGIBLE item via create_agent_task_intake with:
    - all seven packet fields written from the item + source thought: desired_outcome, context, sources (JSON array of source strings, never one prose string), do_steps, acceptance_criteria, output_handoff, boundaries;
@@ -43,6 +43,8 @@ Buckets:
 Paused projects: parse PAUSED_PROJECTS from env. Any item whose subject, source thought, named people/orgs, venue/vendor terms, or thread title clearly matches a paused project goes straight to SKIP (paused), never BOARD-ELIGIBLE. Match by meaning, not by project_slug (action items often do not carry one). Group paused skips under "skipped (paused: <tag>)" in the ledger note.
 
 Duplicate action items: has_active_draft is per action item, so a second item can still duplicate work already drafted or applied from another source capture. Before drafting, scan the current BOARD-ELIGIBLE set AND recently-applied work for a semantic twin. If one exists, SKIP the duplicate and name the twin in the ledger note instead of drafting.
+
+Doc-seeded duplicates: some board tasks are planned work seeded straight from a project plan doc rather than from an action item. These carry a "plan-doc:" entry in their sources and no linked_action_item_id, so has_active_draft never catches an open action item that describes the same planned work. Using the board list you read in step 2, check whether an item duplicates a Standing or active task that carries a "plan-doc:" source. If one exists, SKIP the item and name that task's id in the ledger note.
 
 STOP LINES (absolute):
 - Standing drafts only, via create_agent_task_intake, intake_source "triage-agent".
