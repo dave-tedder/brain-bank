@@ -3,10 +3,12 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -77,7 +79,15 @@ APPLYABLE task whose receipt carries an OPERATOR-ACTION marker (a line
 recommendation) routes to Needs Operator with the operator step preserved;
 otherwise it closes to Agent Done as before. An OPERATOR-ACTION marker found
 anywhere OUTSIDE the Follow-up recommendation section holds the task
-(OPERATOR_MARKER_OUTSIDE_FOLLOW_UP) instead of silently dropping the step. Before --apply calls the board, it
+(OPERATOR_MARKER_OUTSIDE_FOLLOW_UP) instead of silently dropping the step. A
+task seeded from a project plan doc (a "plan-doc: <path>" entry in its sources)
+is reconciled at apply: the controller greps that plan-doc's folder for the
+task short-id tag [OE:<shortid>] and flips every carded line to done
+(checkbox [ ]->[x] and "carded <date>"->"done <apply-date>"), skipping session
+logs. If the tagged line cannot be located the task HOLDs
+(PLAN_DOC_LINE_NOT_FOUND) instead of applying, and an unresolvable plan-doc path
+HOLDs (PLAN_DOC_PATH_UNRESOLVED) — no apply without doc sync. Before --apply
+calls the board, it
 writes a local journal under docs/handoffs/pending-closeouts/journal/. If board
 apply succeeds but file/capture closeout fails, --resume <uuid> confirms the
 live task has an AGENT APPLIED event and replays the pending file/capture phase
@@ -246,11 +256,12 @@ function normalizeTask(task) {
     linked_action_item_id: task.linked_action_item_id ||
       task.linkedActionItemId || null,
     explicit_approval: Boolean(task.explicit_approval ?? task.explicitApproval),
+    sources: Array.isArray(task.sources) ? task.sources : [],
     events,
   };
 }
 
-function evaluate(input, registry, options = {}) {
+export function evaluate(input, registry, options = {}) {
   const data = normalizeInput(input);
   const selectedTasks = options.taskId
     ? data.tasks.filter((task) => task.id === options.taskId)
@@ -375,6 +386,13 @@ function evaluateTask(task, registry, actionItems) {
     reasons.push("OPERATOR_MARKER_OUTSIDE_FOLLOW_UP");
   }
 
+  // Plan-doc reconciliation gate (Session 335): a task seeded directly from a
+  // project plan doc carries a `plan-doc: <path>` source entry. Applying it
+  // must flip that doc's carded line to done, so the line's existence is a hard
+  // apply gate — the same gate-integrity behavior as a missing receipt section.
+  // The scan is read-only here; the actual flip runs only in the apply path.
+  const planDocFlip = evaluatePlanDocGate(task, route, reasons);
+
   const uniqueReasons = [...new Set(reasons)];
   if (uniqueReasons.length > 0) {
     return {
@@ -400,6 +418,9 @@ function evaluateTask(task, registry, actionItems) {
       resolve_linked_action_item: false,
       linked_action_item_id: task.linked_action_item_id,
       linked_action_item_status: linkedActionItem?.status || null,
+      // Set when the task carries a locatable plan-doc line; the apply path
+      // flips its checkbox + carded->done tag. Null for captured-work tasks.
+      plan_doc_flip: planDocFlip,
       receipt_sections: augmentation.sections,
       augmented_sections: augmentation.augmented,
       augmentation_text: augmentation.augmented.length > 0
@@ -441,6 +462,137 @@ function augmentFromReviewNote(receipt, reviewReason) {
     .map(canonicalHeading)
     .filter((heading) => !String(sections[heading] || "").trim());
   return { sections, missing, augmented, reasons: [...new Set(reasons)] };
+}
+
+// --- Plan-doc reconciliation (Session 335) ------------------------------
+//
+// Board tasks seeded straight from a project plan doc carry a machine-readable
+// back-reference in their sources array: "plan-doc: <path>". At closeout apply
+// the controller flips the doc's carded line to done, keeping the plan doc and
+// the board from drifting into two sources of truth. The line is located by
+// grepping the plan-doc's own folder for the task short-id tag [OE:<shortid>],
+// which flips every occurrence (an item is usually on both the plan-doc line
+// and the project tracker todo). Session logs are append-only history, never a
+// live checklist, so they are excluded from the flip.
+
+// SESSION-LOG.md / SESSION-LOG-ARCHIVE.md are durable history; flipping a tag
+// quoted there would corrupt the record, so the scan skips them.
+const SESSION_LOG_NAME = /^SESSION-LOG(-ARCHIVE)?\.md$/i;
+
+export function planDocRefs(sources) {
+  if (!Array.isArray(sources)) return [];
+  const refs = [];
+  for (const entry of sources) {
+    const match = String(entry ?? "").match(/^\s*plan-doc:\s*(.+?)\s*$/i);
+    if (match) refs.push(match[1]);
+  }
+  return refs;
+}
+
+export function resolvePlanDocPath(relPath, route) {
+  if (!relPath) return null;
+  if (isAbsolute(relPath)) return relPath;
+  // A stored plan-doc path is relative to the Projects root (e.g.
+  // "Projects/example-site/seo/PLAN.md"). Anchor it to the parent of
+  // the route's /Projects/ segment so it resolves regardless of how deep the
+  // workspace nests under Projects.
+  const workspace = route?.workspace_path || "";
+  const idx = workspace.indexOf("/Projects/");
+  if (idx === -1) return null;
+  return join(workspace.slice(0, idx), relPath);
+}
+
+export function flipDocLineText(line, shortId, doneDate) {
+  const sid = escapeRegExp(shortId);
+  const cardedTag = new RegExp(`OE:${sid}\\s+carded\\s+\\d{4}-\\d{2}-\\d{2}`);
+  if (!cardedTag.test(line)) return { changed: false, line };
+  let next = line.replace(cardedTag, `OE:${shortId} done ${doneDate}`);
+  // Flip a markdown list checkbox only on the tagged line, never the [OE:...]
+  // bracket. Heading lines have no checkbox and get the tag flip alone.
+  next = next.replace(/^(\s*[-*]\s+)\[ \]/, "$1[x]");
+  return { changed: next !== line, line: next };
+}
+
+function markdownFilesToScan(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries.filter((name) => {
+    if (!name.toLowerCase().endsWith(".md")) return false;
+    if (SESSION_LOG_NAME.test(name)) return false;
+    const full = join(dir, name);
+    try {
+      return statSync(full).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+export function scanPlanDocDir(dir, shortId) {
+  const occurrences = [];
+  if (!dir || !existsSync(dir)) return { found: false, occurrences };
+  const sid = escapeRegExp(shortId);
+  // Any tag state (carded/done/archived) counts as "found" for the apply gate.
+  const tagAnywhere = new RegExp(`OE:${sid}(?=[\\s\\]])`);
+  for (const name of markdownFilesToScan(dir)) {
+    const lines = readFileSync(join(dir, name), "utf8").split(/\r?\n/);
+    lines.forEach((text, i) => {
+      if (tagAnywhere.test(text)) {
+        occurrences.push({ file: name, line: i + 1, text });
+      }
+    });
+  }
+  return { found: occurrences.length > 0, occurrences };
+}
+
+export function applyDocFlip(dirs, shortId, doneDate) {
+  const files = [];
+  let flipped = 0;
+  for (const dir of dirs || []) {
+    if (!dir || !existsSync(dir)) continue;
+    for (const name of markdownFilesToScan(dir)) {
+      const full = join(dir, name);
+      const lines = readFileSync(full, "utf8").split(/\r?\n/);
+      let fileFlips = 0;
+      const nextLines = lines.map((line) => {
+        const result = flipDocLineText(line, shortId, doneDate);
+        if (result.changed) fileFlips += 1;
+        return result.line;
+      });
+      if (fileFlips > 0) {
+        writeFileSync(full, nextLines.join("\n"), "utf8");
+        files.push({ path: full, flipped: fileFlips });
+        flipped += fileFlips;
+      }
+    }
+  }
+  return { flipped, files };
+}
+
+// Read-only apply gate: if the task carries plan-doc source(s), confirm the
+// carded line is locatable so the apply can flip it. Pushes a hold reason (and
+// returns null) when the path cannot be resolved or the tag cannot be found;
+// returns the flip target ({short_id, dirs}) when the line exists.
+function evaluatePlanDocGate(task, route, reasons) {
+  const planDocs = planDocRefs(task.sources);
+  if (planDocs.length === 0) return null;
+  const shortId = shortTaskId(task.id);
+  const resolved = planDocs.map((relPath) => resolvePlanDocPath(relPath, route));
+  if (resolved.some((path) => !path)) {
+    reasons.push("PLAN_DOC_PATH_UNRESOLVED");
+    return null;
+  }
+  const dirs = [...new Set(resolved.map((path) => dirname(path)))];
+  const found = dirs.some((dir) => scanPlanDocDir(dir, shortId).found);
+  if (!found) {
+    reasons.push("PLAN_DOC_LINE_NOT_FOUND");
+    return null;
+  }
+  return { short_id: shortId, dirs };
 }
 
 function receiptFromEvent(event) {
@@ -597,6 +749,12 @@ function holdMessage(reasons, receipt) {
       receipt.missing.join(", ")
     }.`;
   }
+  if (reasons.includes("PLAN_DOC_PATH_UNRESOLVED")) {
+    return "Task carries a plan-doc source whose path cannot be resolved to a project folder; held so the doc line is not left un-synced. Fix the plan-doc source path and re-run.";
+  }
+  if (reasons.includes("PLAN_DOC_LINE_NOT_FOUND")) {
+    return "Task carries a plan-doc source but no [OE:<shortid>] carded line was found in that plan-doc folder; held so applying cannot silently skip the doc sync. Restore the tagged doc line (or flip it by hand) and re-run.";
+  }
   return `Task held by dry-run safety gates: ${reasons.join(", ")}.`;
 }
 
@@ -631,6 +789,9 @@ function buildProjectBatches(apply, registry, draftDate, generatedAt) {
       session_log_path: route.session_log_path,
       capture_tag: route.capture_tag,
       tasks: items.map((item) => item.task_id),
+      // Plan-doc lines to flip carded->done when this batch applies (one entry
+      // per plan-doc-seeded task; empty for captured-work batches).
+      plan_doc_flips: items.map((item) => item.plan_doc_flip).filter(Boolean),
       tracker_draft: trackerDraft,
       session_log_draft: sessionLogDraft,
       open_brain_capture_draft: captureDraft,
@@ -1015,6 +1176,7 @@ async function completeCloseoutFromJournal(config, journalPath, result = null) {
   const target = result || journal.result;
   target.closeout_writes = target.closeout_writes || [];
   target.captures = target.captures || [];
+  target.doc_flips = target.doc_flips || [];
   // Resume idempotence consults the journal's own progress instead of
   // replaying blindly: file appends are marker-guarded, but captures are not,
   // so any batch whose capture is already journaled is skipped explicitly
@@ -1042,6 +1204,25 @@ async function completeCloseoutFromJournal(config, journalPath, result = null) {
       state: "files-written",
       closeout_writes: target.closeout_writes,
     });
+
+    // Plan-doc sync (Session 335): flip each plan-doc-seeded task's carded line
+    // to done in its plan-doc folder. Idempotent — a re-run (or --resume) finds
+    // no carded tag left and flips nothing. The gate in evaluate() already
+    // proved the line exists, so this cannot silently no-op on a first apply.
+    for (const flip of batch.plan_doc_flips || []) {
+      const flipReport = applyDocFlip(
+        flip.dirs,
+        flip.short_id,
+        journal.result.draft_date,
+      );
+      target.doc_flips.push({ short_id: flip.short_id, ...flipReport });
+    }
+    if ((batch.plan_doc_flips || []).length > 0) {
+      updateApplyJournal(journalPath, {
+        state: "doc-flipped",
+        doc_flips: target.doc_flips,
+      });
+    }
 
     if (capturedSlugs.has(batch.project_slug)) {
       target.captures.push({

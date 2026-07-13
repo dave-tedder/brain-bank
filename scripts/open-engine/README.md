@@ -186,7 +186,17 @@ node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply
      registry. Appends are marker-guarded (`open-engine closeout <date>
      tasks: …`) so re-runs report `unchanged`; existing content is never
      rewritten.
-  3. One `capture_thought` per project batch, tagged with the route's
+  3. Plan-doc sync per plan-doc-seeded task in the batch. A task carrying a
+     `plan-doc: <path>` source entry has its plan-doc folder grepped for the
+     task short-id tag `[OE:<shortid>]`; every carded line is flipped
+     (`[ ]`->`[x]` where a checkbox is present, `carded <date>`->`done
+     <apply-date>`), across both the plan doc and the co-located tracker todo.
+     Session logs are skipped (append-only history). The gate refuses to apply
+     a plan-doc task whose tagged line cannot be located
+     (`PLAN_DOC_LINE_NOT_FOUND`) or whose path cannot be resolved
+     (`PLAN_DOC_PATH_UNRESOLVED`) — no apply without doc sync. The flip is
+     idempotent, so `--resume` replays it harmlessly.
+  4. One `capture_thought` per project batch, tagged with the route's
      `capture_tag` plus `open_engine`.
 - The controller never runs git. Committing closeout writes stays
   human/session-side (locked decision, Session 268).
