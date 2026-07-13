@@ -103,3 +103,16 @@ second draft still slips through and an executor burns a rep on redundant
 work. Before drafting, scan the current BOARD-ELIGIBLE set AND
 recently-applied work for a semantic twin; if one exists, SKIP the duplicate
 and name it in the ledger note instead of drafting.
+
+**Doc-seeded duplicates.** Some board tasks are planned work seeded straight
+from a project plan doc, not from an action item: their `sources` carry a
+`plan-doc: <path>` entry and their doc line is tagged `[OE:<shortid> …]` (the
+two-path provenance model — captured work links an action item; planned work
+carries one `plan-doc:` source). That path sets no `linked_action_item_id`, so
+`has_active_draft` never fires for it and an open action item describing the
+same planned work slips through. Extend the semantic-twin scan to the board's
+doc-seeded tasks: if an item duplicates a Standing/active task carrying a
+`plan-doc:` source (or a plan-doc line you can see is already `OE:`-tagged
+carded or done, not archived), SKIP it as a duplicate and name the short-id in
+the ledger note. An `archived` tag is deliberately re-cardable, so it does not
+suppress.
