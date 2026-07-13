@@ -31,7 +31,14 @@ if deferred.
   `update_agent_task` to set `agent_code` so the executor can claim (the
   promote path does not assign one); `capture_thought` for a settled fact (it
   auto-resolves the linked action item); archive settled Standing drafts. The
-  board should never lag what the operator already decided in chat.
+  board should never lag what the operator already decided in chat. When a
+  Standing draft being archived was seeded from a project plan doc (its
+  `sources` carry a `plan-doc:` entry and its doc line is tagged
+  `[OE:<shortid> …]`), the archive is not complete until that doc line's tag is
+  flipped to `[OE:<shortid> archived <date>]` (Edit the plan doc + any co-located
+  tracker line) so the line reads open again and can be re-carded deliberately.
+  This is the escape-hatch half of the closeout doc-sync (the apply path flips
+  carded→done; archiving flips carded→archived).
 - EVERY item the operator sees carries an explicit next action, including
   applied-and-filed ones. "Applied" means done on the board, NOT done for the
   operator: a research/draft task almost always leaves the operator a real next step
