@@ -121,8 +121,19 @@ Phase 4 row text: | <n> | <date> | natural/manual | <draft ids/count> | <mis-tie
 
 7. **Ledger + capture.** Only after the report is complete:
    - `write_agent_ledger` for `sentinel` with `last_successful_run` as the
-     current UTC datetime in `Z` form, `last_queue_result` as the compact
-     PASS/FAIL line, and notes only if there is something actionable.
+     current UTC datetime in `Z` form, and `last_queue_result` set to ONE
+     line in this exact shape — a contract, not a style choice, because the
+     daily digest's sentinel-report parser keys on the literal `OE-SENTINEL `
+     prefix (`supabase/functions/brain-digest/sentinel-report.ts`), so every
+     run of this lane must produce the same `last_queue_result` shape:
+     `OE-SENTINEL <PASS|WARN|FAIL> <date>: <detail>` (under 300 chars, name
+     every missed or warned lane). If a run's verdict is inconclusive, write
+     it as `WARN` and say "inconclusive" in `<detail>`, since the contract
+     vocabulary is only PASS/WARN/FAIL. Notes only if there is something
+     actionable.
+   - The Slack report in step 6 is NOT part of this contract and may stay in
+     its richer multi-line shape — only the ledger line above must match the
+     `OE-SENTINEL ` prefix and level vocabulary the digest reads.
    - `capture_thought` with tags `["open-engine","sentinel","oe-14"]`.
 
 ## Suggested Read-Only SQL Bundle
