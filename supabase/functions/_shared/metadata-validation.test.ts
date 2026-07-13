@@ -174,6 +174,62 @@ Deno.test("isOperationCommandCapture: suppresses explicit-time reschedule comman
   );
 });
 
+Deno.test("isOperationCommandCapture: suppresses appointment-booking dictation", () => {
+  // A booking dictation whose command sits in a later sentence, so the
+  // ^-anchored record-command patterns miss it; the appointment noun paired
+  // with a clock time is the booking signature.
+  assertEquals(
+    isOperationCommandCapture(
+      "New project for Jane Doe: quarterly planning. " +
+        "Add task, appointment: kickoff, on July 19 12pm-7pm",
+      "brain-channel",
+    ),
+    true,
+  );
+  // Simpler booking phrasings.
+  assertEquals(
+    isOperationCommandCapture(
+      "New appointment for Jane Doe on July 12 12pm-6pm",
+      "brain-channel",
+    ),
+    true,
+  );
+  assertEquals(
+    isOperationCommandCapture(
+      "New appointment, Sam Smith, April 12 12 PM to 7 PM",
+      "brain-channel",
+    ),
+    true,
+  );
+});
+
+Deno.test("isOperationCommandCapture: booking suppression stays tight", () => {
+  // No clock time -> not a booking dictation, real todo permits extraction.
+  assertEquals(
+    isOperationCommandCapture(
+      "Follow up with Jane Doe about her appointment reference materials",
+      "brain-channel",
+    ),
+    false,
+  );
+  // No booking verb reaching the appointment noun.
+  assertEquals(
+    isOperationCommandCapture(
+      "Confirm the deposit cleared before her appointment at 2pm",
+      "brain-channel",
+    ),
+    false,
+  );
+  // Booking dictation from a non-brain-channel source is untouched here.
+  assertEquals(
+    isOperationCommandCapture(
+      "New appointment for Jane Doe on July 12 12pm-6pm",
+      "slack",
+    ),
+    false,
+  );
+});
+
 Deno.test("isOperationCommandCapture: only applies to brain-channel source", () => {
   assertEquals(
     isOperationCommandCapture(

@@ -95,6 +95,26 @@ function isRescheduleCommand(text: string): boolean {
     RESCHEDULE_TIME_HINT_RE.test(text);
 }
 
+// A booking dictation sent through an automation channel to create a calendar
+// appointment (a downstream listener creates the real event). Shape: a
+// create/add/book/new verb reaching an appointment noun within the same
+// sentence, paired with a concrete clock time (the booking's start/end range).
+// These are captures that spawn a real calendar entry, not deliverable todos -
+// but the metadata extractor reads "add ... appointment" as an action item and
+// triage then drafts a phantom "prep" task. The clock-time requirement keeps
+// this tight: a real todo that merely mentions an appointment ("follow up about
+// the appointment") carries no booking time and is untouched. The ^-anchored
+// record-command patterns below miss it when the booking phrase is not the
+// first sentence, and the appointment-guard treats a future date as a
+// keep-signal, so this is the layer that catches it.
+const APPOINTMENT_BOOKING_PHRASE_RE =
+  /\b(?:new|add|book(?:ed|ing)?|create)\b[^.?!]*\b(?:appointment|appt)\b/i;
+
+function isAppointmentBookingCapture(text: string): boolean {
+  return APPOINTMENT_BOOKING_PHRASE_RE.test(text) &&
+    RESCHEDULE_TIME_HINT_RE.test(text);
+}
+
 // Operation commands sent through automation channels tell downstream systems
 // to create/update business records. They are captures, not operator todos.
 // Keep this narrower than MECHANICAL_CAPTURE_PREFIXES so auto-resolve LAYER 0
@@ -108,7 +128,7 @@ export function isOperationCommandCapture(
   const text = content.trim().replace(/\s+/g, " ");
   if (!text) return false;
 
-  return isRescheduleCommand(text) || [
+  return isRescheduleCommand(text) || isAppointmentBookingCapture(text) || [
     /^new\s+client\b/i,
     /^new\s+project\b/i,
     /^add\s+appointment\b/i,
