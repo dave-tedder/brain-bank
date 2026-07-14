@@ -51,6 +51,23 @@ if deferred.
      judgment, no `agent_code`, OMIT `title` (the intake builder generates
      `[agent instructions][unassigned][task] <outcome>` automatically;
      hand-built titles just risk drifting from the board format);
+   - **`project_slug` — set it whenever the item clearly belongs to a project.**
+     Action items carry no project field, so infer the slug from the item's
+     subject and its source thought, the same way you already infer paused
+     projects. The ONLY valid values are the route keys in your closeout
+     registry (`scripts/open-engine/project-closeout-registry.json`; see
+     `project-closeout-registry.example.json` for the shape). Read those keys
+     and pick from them.
+     If NOTHING clearly matches, LEAVE IT UNSET. Never invent a slug and never
+     force a rough fit — a wrong slug appends a closeout receipt to the wrong
+     project's tracker and session log, which is worse than leaving it null.
+     WHY THIS MATTERS: a task with a null `project_slug` can never be applied.
+     The closeout controller routes strictly by slug and holds anything it
+     cannot resolve (`MISSING_PROJECT_SLUG` / `UNKNOWN_PROJECT_ROUTE`). A
+     triage lane that sets no slug will produce tasks that get executed and
+     reviewed and then pile up in Agent Review forever, finished but
+     structurally unappliable, with nothing in the logs explaining why.
+     Setting the slug here is what lets finished work land.
    - boundaries always include: "Exit through one honest receipt. No sends,
      no canonical-file edits, no git."
 5. **Report.** `write_agent_ledger` for `triage`:
