@@ -108,6 +108,14 @@ paths (same pattern as `integrations/*/config.json`). Missing or unresolved
 routes hold the task; the controller never guesses from the current working
 directory.
 
+Because the registry is gitignored, it does NOT exist in a fresh git worktree —
+only in the main checkout. Running closeout from a worktree therefore dies with
+`ENOENT: ... project-closeout-registry.json` before it can route anything. Run
+closeout from the main checkout (which is where the scheduled lanes run), or
+pass an absolute path to the main checkout's `closeout-run.sh`. This is working
+as intended, not a bug: the registry points at real project trackers outside
+this repo, and a worktree has no business writing to them under a stale route.
+
 ### OE-8B draft writer (`--write-drafts`)
 
 `--write-drafts` writes one pending-closeout draft per APPLYABLE project batch
