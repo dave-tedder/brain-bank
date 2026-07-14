@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Fixed
+
+- **Drift-audit hardening sweep (upstream parity).** A file-by-file diff against the upstream engine restored hardening this repo had partially missed: all four key-gated Edge Functions now authenticate through the shared constant-time `authenticateAccessKey` helper (previously plain string compares); `classify-edges` clamps `max_cost_usd` to [0, 2.00] and bounds every numeric param (previously an unbounded caller-controlled OpenRouter spend); MCP REST `limit` params are clamped; 405 method guards restored on `classify-edges`, `compile-pages`, and `brain-digest`; the Slack webhook now **fails closed** when `SLACK_SIGNING_SECRET` is unset (500 instead of silently processing unauthenticated posts — set the secret if your ingest suddenly 500s after upgrading); `compactObject` again preserves explicit `null` clears (with its test restored). Also fixed three repo-internal bugs: triage read attendees from a `business_events` column that doesn't exist (now reads `metadata.attendees`), `compile-pages` queried the dropped `client_sessions` table, and the task-smoke script's default URL pointed at a nonexistent function slug. New migration `20260713_resolve_project_slug_revoke_anon.sql` revokes the leftover anon EXECUTE on `resolve_project_slug`.
+
 ### Added
 
 - **Soft-affinity routing (`preferred_agent`).** Agent task drafts can carry an optional `preferred_agent` hint that gives one runtime first dibs at claim time without hard-assigning the task. It is a pure ordering key — claim order becomes hard-assigned-to-me, then preferred-to-me, then everything else — so a preferred task never starves and any eligible runtime can still claim any unassigned task. Free text (no enum/FK), so adding a new runtime needs no schema change. Exposed on all four intake tools (`create_agent_task_intake`, `_from_action_item`, `_from_thought`, `_follow_up`) and as an optional promote-time override on `promote_agent_task_intake`. Drafts stay born-unassigned by default (the OE-9 shared-pool model); `preferred_agent` reorders, it does not restrict.
