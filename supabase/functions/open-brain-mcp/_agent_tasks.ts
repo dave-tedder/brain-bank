@@ -261,7 +261,7 @@ export function receiptForAppliedStatus(
 export function compactObject<T extends Record<string, unknown>>(value: T): T {
   const copy: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (entry !== undefined && entry !== null && entry !== "") {
+    if (entry !== undefined && entry !== "") {
       copy[key] = entry;
     }
   }

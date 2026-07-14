@@ -12,6 +12,7 @@ import {
   assertStatusHeartbeatAllowed,
   assertWorkingExitAllowed,
   canAgentWriteTask,
+  compactObject,
   isAgentTaskRisk,
   isLedgerAutomationState,
   isReviewResolution,
@@ -299,6 +300,18 @@ Deno.test("apply receipt follows returned task status", () => {
   assertEquals(
     receiptForAppliedStatus("Needs Operator"),
     "AGENT NEEDS OPERATOR",
+  );
+});
+
+Deno.test("compactObject preserves explicit null clears", () => {
+  assertEquals(
+    compactObject({
+      keep: "value",
+      clear: null,
+      dropUndefined: undefined,
+      dropEmpty: "",
+    } as Record<string, unknown>),
+    { keep: "value", clear: null },
   );
 });
 
