@@ -85,12 +85,15 @@ async function postToSlack(
     const d = await r.json();
     if (!d.ok) {
       console.error("Slack post error:", d.error);
-      return { ok: false, error: String(d.error || "unknown") };
+      return { ok: false, error: String(d.error ?? `http_${r.status}`) };
     }
     return { ok: true };
   } catch (err) {
     console.error("Slack post error:", err);
-    return { ok: false, error: "fetch_failed" };
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
