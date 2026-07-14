@@ -525,29 +525,11 @@ async function compilePage(
     });
     if (newThoughts.length === 0) return { updated: false };
 
-    // For client pages, also pull session history and events
+    // For client pages, also pull profile data. (Session history lived in
+    // the client_sessions table, dropped by migration 0011 — the schema has
+    // no such table, so a fresh deploy would hit a missing relation here.)
     let supplementalContext = "";
     if (page.page_type === "client" && page.source_entity_id) {
-      const { data: sessions } = await supabase
-        .from("client_sessions")
-        .select(
-          "session_date, status, piece_description, placement, style, duration_hours, notes",
-        )
-        .eq("client_id", page.source_entity_id)
-        .order("session_date", { ascending: false })
-        .limit(20);
-      if (sessions?.length) {
-        supplementalContext += "\n\nSession history:\n" + sessions.map((s) => {
-          const parts = [`${s.session_date} (${s.status})`];
-          if (s.piece_description) parts.push(s.piece_description);
-          if (s.placement) parts.push(`on ${s.placement}`);
-          if (s.style) parts.push(`[${s.style}]`);
-          if (s.duration_hours) parts.push(`${s.duration_hours}h`);
-          if (s.notes) parts.push(`Notes: ${s.notes}`);
-          return "- " + parts.join(" | ");
-        }).join("\n");
-      }
-
       // Client profile data
       const { data: client } = await supabase
         .from("clients")
