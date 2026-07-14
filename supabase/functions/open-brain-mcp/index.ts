@@ -3836,6 +3836,11 @@ server.registerTool(
   },
 );
 
+// NOTE: upstream also ships a log_session tool that inserts into a
+// client_sessions table. It is deliberately not ported here: migration
+// 0011 drops client_sessions as deprecated, so the tool would fail on
+// every fresh deploy from this repo's migrations.
+
 // --- Content Pipeline Extension MCP Tools ---
 
 server.registerTool(
