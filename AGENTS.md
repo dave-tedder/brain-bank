@@ -56,8 +56,16 @@ brain-bank/
 - **Secrets:** every secret is an env var read via `Deno.env.get()` (Edge Functions) or `process.env.*` (dashboard). Never hardcoded. `.env.example` is the canonical inventory.
 - **Profile customization:** operator-specific vocabulary, personas, and calendar filters live in `profile.json` (gitignored). The repo ships `profile.example.json` with neutral defaults.
 - **Mirror invariant:** the auto-resolve pipeline lives in both `supabase/functions/ingest-thought/index.ts` and `supabase/functions/open-brain-mcp/index.ts`. Any change to the LAYER 2 prompt block, `MECHANICAL_CAPTURE_PREFIXES`, the stemmer, `jaccardTokens`, `quoteOverlap`, or the LOG_TRUNC / RESTATEMENT_THRESHOLD / QUOTE_OVERLAP_THRESHOLD constants must be behavior-identical in both files.
+- **SHA-256 content fingerprinting** dedups all capture paths. Dedup runs before embedding/metadata API calls (cheap rejection).
+- **Async via `EdgeRuntime.waitUntil()`** to avoid Slack's 3-second timeout.
+- **Metadata always returns 7 standard fields:** `people`, `action_items`, `dates_mentioned`, `topics`, `type`, `project`, `priority`, `source`.
+- **Edge Function logs URL-encode** — when debugging auth, look for `%60` (backtick), `%20` (space), `%22` (quote) appended to keys.
 - **Branching:** `main` = tagged stable releases only. `dev` = active work. Feature branches cut from `dev`. Tags drive releases (`v0.1.0`, etc.); friends pin to tags, not to `main`.
 - **Session logs:** Codex-authored sessions should update the relevant session log/tracker surfaces before closeout, just as Claude-authored sessions did. If a repo has no local tracker files, record the session in the controlling Open Brain tracker/session log.
+
+## Five capture paths — verify each independently
+
+`processCaptureMessage` (Slack capture channel), `processCaptureThreadReply` (Slack thread replies), `processBrainMessage` (Slack brain channel) in `ingest-thought/index.ts`; `handleRestCapture` (REST `/capture`) and `capture_thought` (MCP tool) in `open-brain-mcp/index.ts`. Both files have parallel `extractMetadata()`, `checkAutoResolve()`, `extractAndStoreActionItems()`, `postCaptureHook()` — any fix must be mirrored. Verification must exercise at least one path per file.
 
 ## Where to find what
 
