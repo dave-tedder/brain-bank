@@ -33,10 +33,10 @@ PRs that touch live behavior should describe the test plan: what you ran, what y
 These are the same conventions documented in [AGENTS.md](AGENTS.md) at the repo root.
 
 - **Commit per task.** Each finished task is its own commit and a rollback point. Do not batch unrelated changes into one commit. Cosmetic sweeps (typo fixes, single-line tweaks across multiple files) can share one commit if they are clearly one task.
-- **Migrations.** Schema changes live in `supabase/migrations/` as `<NNNN>_snake_case_description.sql`. Write the file first, apply it (via the Supabase CLI or Supabase MCP), then commit.
+- **Migrations.** New schema changes live in `supabase/migrations/` as `YYYYMMDD_snake_case_description.sql` (the numbered `0000`–`0016` files are the frozen baseline; do not add to that series). Write the file first, apply it (via the Supabase CLI or Supabase MCP), then commit.
 - **Secrets.** Every secret is an env var read via `Deno.env.get()` (Edge Functions) or `process.env.*` (dashboard). Never hardcoded. `.env.example` is the canonical inventory; new secrets must land there with a "where to find" pointer and a "WHY" line.
 - **Profile customization.** Operator-specific vocabulary, personas, and calendar filters live in `profile.json` (gitignored). The repo ships `profile.example.json` with neutral defaults. Do not commit operator-specific strings to source.
-- **Mirror invariants.** Two Edge Functions (`ingest-thought` and `open-brain-mcp`) share parallel implementations of `checkAutoResolve`, `extractMetadata`, the `MECHANICAL_CAPTURE_PREFIXES` block, and the LAYER 0-3 auto-resolve guards. Any change to one must land in lockstep in the other. The audit log at `docs/superpowers/specs/2026-04-20-auto-resolve-byte-identity-audit.md` has the full inventory.
+- **Mirror invariants.** Two Edge Functions (`ingest-thought` and `open-brain-mcp`) share parallel implementations of `checkAutoResolve`, `extractMetadata`, the `MECHANICAL_CAPTURE_PREFIXES` block, and the LAYER 0-3 auto-resolve guards. Any change to one must land in lockstep in the other.
 
 ## Verification Before You Push
 
@@ -58,7 +58,7 @@ claude plugin validate .
 
 If you change Edge Function code, also redeploy to a throwaway Supabase project and exercise the changed code path before opening the PR. "Type-check passes" is not the same as "the function still works." See [docs/deploy-from-scratch.md](docs/deploy-from-scratch.md) for the throwaway-project recipe.
 
-If you change the auto-resolve pipeline (LAYER 0-3 guards, the LLM prompt block, or the mirror invariants), also run the byte-identity check at `tests/_shared/byte_identity_*` if relevant, and document the test plan explicitly in the PR.
+If you change the auto-resolve pipeline (LAYER 0-3 guards, the LLM prompt block, or the mirror invariants), verify the change landed identically in both mirrored files and document the test plan explicitly in the PR.
 
 ## Code Style
 
