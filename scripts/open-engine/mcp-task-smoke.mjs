@@ -8,7 +8,7 @@ const PROJECT_REF = process.env.SUPABASE_PROJECT_REF || "your-project-ref";
 const SUPABASE_URL = process.env.SUPABASE_URL ||
   `https://${PROJECT_REF}.supabase.co`;
 const MCP_URL = process.env.BB_MCP_URL ||
-  `${SUPABASE_URL}/functions/v1/brain-bank-mcp`;
+  `${SUPABASE_URL}/functions/v1/open-brain-mcp`;
 const AGENT_CODE = process.env.OE_SMOKE_AGENT_CODE || "codex";
 const RUN_ID = process.env.OE_SMOKE_RUN_ID ||
   new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
