@@ -12,7 +12,7 @@ Personal semantic memory system. Captures thoughts from multiple sources (Slack,
 - **Compute:** Supabase Edge Functions (Deno runtime, no build step)
 - **Scheduling:** pg_cron + pg_net via the `public.call_edge_function()` vault wrapper
 - **Embeddings:** OpenRouter → OpenAI text-embedding-3-small (1536 dims)
-- **Metadata + auto-resolve:** OpenRouter → gpt-4o-mini + gpt-4.1-mini
+- **Metadata + auto-resolve:** OpenRouter → gpt-4o-mini (metadata) + anthropic/claude-sonnet-4.6 (auto-resolve LAYER 2)
 - **Digest synthesis:** OpenRouter → Claude Sonnet
 - **Dashboard:** Next.js 15 + React 19 + Tailwind 4, deployed on Railway
 - **Capture sources:** Slack (signed webhook), MCP, REST, Gmail (Apps Script), Calendar (Apps Script), Apple Notes (Shortcut), voice (Siri Shortcut), Notion (Claude Code routine), ChatGPT GPT
