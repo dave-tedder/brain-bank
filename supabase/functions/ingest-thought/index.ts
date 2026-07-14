@@ -1114,14 +1114,19 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const rawBody = await req.text();
 
-    if (SLACK_SIGNING_SECRET) {
-      const timestamp = req.headers.get("x-slack-request-timestamp");
-      const signature = req.headers.get("x-slack-signature");
-      const valid = await verifySlackSignature(rawBody, timestamp, signature);
-      if (!valid) {
-        console.error("HMAC verification failed");
-        return new Response("Unauthorized", { status: 401 });
-      }
+    if (!SLACK_SIGNING_SECRET) {
+      console.error("SLACK_SIGNING_SECRET is required for ingest-thought");
+      return new Response("Slack signing secret not configured", {
+        status: 500,
+      });
+    }
+
+    const timestamp = req.headers.get("x-slack-request-timestamp");
+    const signature = req.headers.get("x-slack-signature");
+    const valid = await verifySlackSignature(rawBody, timestamp, signature);
+    if (!valid) {
+      console.error("HMAC verification failed");
+      return new Response("Unauthorized", { status: 401 });
     }
 
     const body = JSON.parse(rawBody);
