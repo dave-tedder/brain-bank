@@ -29,10 +29,14 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { callOpenRouter, computeCost } from "../_shared/openrouter.ts";
+import {
+  authenticateAccessKey,
+  clampFloat,
+  clampInt,
+} from "../_shared/access-key.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -298,21 +302,34 @@ async function insertEdge(
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
-    const provided = req.headers.get("x-brain-key");
-    if (!provided || provided !== MCP_ACCESS_KEY) {
+    if (req.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+    const auth = authenticateAccessKey(req.headers, {
+      allowBearer: false,
+    });
+    if (!auth.ok) {
       return new Response("Unauthorized", { status: 401 });
     }
 
     const mode = (url.searchParams.get("mode") || "incremental") as
       | "backfill"
       | "incremental";
-    const minOverlap = Math.max(1, parseInt(url.searchParams.get("min_overlap") || "2"));
-    const limit = Math.min(500, parseInt(url.searchParams.get("limit") || "100"));
-    const sinceDays = Math.max(1, parseInt(url.searchParams.get("since_days") || "8"));
+    const minOverlap = clampInt(url.searchParams.get("min_overlap"), 2, 1, 10);
+    const limit = clampInt(url.searchParams.get("limit"), 100, 1, 300);
+    const sinceDays = clampInt(url.searchParams.get("since_days"), 8, 1, 30);
     const dryRun = (url.searchParams.get("dry_run") || "true") !== "false";
-    const maxCostUsd = parseFloat(url.searchParams.get("max_cost_usd") || "1.00");
-    const minConfidence = parseFloat(
-      url.searchParams.get("min_confidence") || "0.7",
+    const maxCostUsd = clampFloat(
+      url.searchParams.get("max_cost_usd"),
+      1.00,
+      0,
+      2.00,
+    );
+    const minConfidence = clampFloat(
+      url.searchParams.get("min_confidence"),
+      0.7,
+      0,
+      1,
     );
 
     const candidates = await sampleCandidatePairs(mode, minOverlap, sinceDays, limit);

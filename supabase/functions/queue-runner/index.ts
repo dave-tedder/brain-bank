@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { authenticateAccessKey } from "../_shared/access-key.ts";
 import {
   runQueueRunnerHeartbeat,
   type SlackClient,
@@ -122,8 +123,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     if (req.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
-    const provided = req.headers.get("x-brain-key");
-    if (!provided || provided !== MCP_ACCESS_KEY) {
+    const auth = authenticateAccessKey(req.headers, { allowBearer: false });
+    if (!auth.ok) {
       return new Response("Unauthorized", { status: 401 });
     }
 

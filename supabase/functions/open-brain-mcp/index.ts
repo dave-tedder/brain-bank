@@ -16,7 +16,7 @@ import {
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
-import { timingSafeEqualStr } from "../_shared/access-key.ts";
+import { clampInt, timingSafeEqualStr } from "../_shared/access-key.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
@@ -803,7 +803,7 @@ function tooLong(value: unknown, max: number): boolean {
 async function handleRestSearch(url: URL): Promise<Response> {
   const query = url.searchParams.get("query");
   if (!query) return jsonResponse({ error: "query parameter required" }, 400);
-  const limit = parseInt(url.searchParams.get("limit") || "10");
+  const limit = clampInt(url.searchParams.get("limit"), 10, 1, 50);
   const threshold = parseFloat(url.searchParams.get("threshold") || "0.5");
   try {
     const qEmb = await getEmbedding(query);
@@ -839,7 +839,7 @@ async function handleRestSearch(url: URL): Promise<Response> {
 }
 
 async function handleRestList(url: URL): Promise<Response> {
-  const limit = parseInt(url.searchParams.get("limit") || "10");
+  const limit = clampInt(url.searchParams.get("limit"), 10, 1, 100);
   const type = url.searchParams.get("type");
   const topic = url.searchParams.get("topic");
   const person = url.searchParams.get("person");
@@ -5046,7 +5046,7 @@ async function handleRestPages(url: URL): Promise<Response> {
     const slug = url.searchParams.get("slug");
     const type = url.searchParams.get("type");
     const query = url.searchParams.get("query");
-    const limit = parseInt(url.searchParams.get("limit") || "20");
+    const limit = clampInt(url.searchParams.get("limit"), 20, 1, 100);
 
     if (slug) {
       logToolInvocation("get_compiled_page", { slug }, "rest");

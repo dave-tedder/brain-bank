@@ -3,6 +3,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { loadProfile } from "../_shared/profile.ts";
 import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import { authenticateAccessKey } from "../_shared/access-key.ts";
 import {
   DigestActionRow,
   renderOpenActionChecklist,
@@ -864,8 +865,13 @@ async function pushInsightsToNotion(
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
-    const provided = req.headers.get("x-brain-key");
-    if (!provided || provided !== MCP_ACCESS_KEY) {
+    if (req.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+    const auth = authenticateAccessKey(req.headers, {
+      allowBearer: false,
+    });
+    if (!auth.ok) {
       return new Response("Unauthorized", { status: 401 });
     }
 

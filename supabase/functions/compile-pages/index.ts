@@ -17,10 +17,10 @@ import { partitionQuarantine, selectPagesToCompile } from "./_selection.ts";
 import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import { loadProfile } from "../_shared/profile.ts";
+import { authenticateAccessKey, clampInt } from "../_shared/access-key.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const FUNCTION_SLUG = "compile-pages";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -1246,12 +1246,19 @@ async function runLint(
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
-    const provided = req.headers.get("x-brain-key");
-    if (!provided || provided !== MCP_ACCESS_KEY) {
+    const auth = authenticateAccessKey(req.headers, {
+      allowBearer: false,
+    });
+    if (!auth.ok) {
       return new Response("Unauthorized", { status: 401 });
     }
 
     const mode = url.searchParams.get("mode") || "compile"; // "compile", "lint", or "index"
+    if (
+      (mode === "compile" || mode === "index") && req.method !== "POST"
+    ) {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
     const targetSlug = url.searchParams.get("slug");
     const invoker = url.searchParams.get("invoker") || "pg_cron";
     const indexMode = parseIndexCompileMode(
@@ -1312,11 +1319,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Prioritize: never-compiled first, then oldest last_compiled.
     // Min is 0, not 1: batch=0 is the documented "no compile work" request
     // (brain-digest's weekly lint fetch uses it to read lint results without
-    // burning an LLM compile lane). Absent/invalid batch defaults to 15.
-    const batchParam = parseInt(url.searchParams.get("batch") || "15");
-    const maxCompilePerRun = Number.isNaN(batchParam)
-      ? 15
-      : Math.min(Math.max(batchParam, 0), 25);
+    // burning an LLM compile lane). Absent/invalid batch still defaults to 15.
+    const maxCompilePerRun = clampInt(url.searchParams.get("batch"), 15, 0, 25);
     const requestedModel = url.searchParams.get("model");
     const requestedIntake = parseInt(url.searchParams.get("intake") || "0");
     const maintenanceModel = targetSlug ? requestedModel : null;
