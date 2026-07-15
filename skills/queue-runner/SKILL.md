@@ -24,6 +24,8 @@ If the user explicitly assigns a different runtime, use that `agent_code` only a
 
 Task drafts are born UNASSIGNED (`agent_code = NULL`) so any local executor can claim them (OE-9 shared-pool decision). Never stamp an `agent_code` on a draft by default; a hard `agent_code` is a capability or quality lock only. Routing preferences use `preferred_agent`, which reorders claims but never restricts them.
 
+**C2 hard runtime constraint.** A task flagged `requires_local = true` (LOCAL RUNTIME ONLY: needs git + local files) is claimable ONLY by a claim that asserts `runtime_local: true` on `claim_next_agent_task` / `claim_specific_agent_task`. A scheduled/cloud heartbeat MUST NOT pass `runtime_local` — omit it (defaults false), so local-only tasks are invisible to the heartbeat by design and can never be mis-claimed. Only an attended local session working a specific known-local task passes `runtime_local: true`. This is distinct from `preferred_agent`: `requires_local` is a HARD filter, `preferred_agent` only reorders. Ops corrections that need to set `requires_local`, `project_slug`, `sources`, or operator fields, move a terminal task to Needs Operator, or release a stuck claim use `admin_amend_agent_task` (human/ops only — never from a heartbeat).
+
 ## Mandatory Preflight
 
 Before touching a task:

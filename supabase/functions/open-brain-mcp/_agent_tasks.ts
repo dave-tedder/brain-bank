@@ -268,6 +268,26 @@ export function compactObject<T extends Record<string, unknown>>(value: T): T {
   return copy as T;
 }
 
+// C2 hard runtime constraint. Project slugs that are entirely LOCAL RUNTIME ONLY:
+// intake defaults requires_local=true for these so a task is protected the moment
+// it is drafted, without threading an explicit flag through every builder. The
+// column is still per-task and an explicit value always wins. Ships empty — a
+// fork adds its own local-only slugs here.
+export const KNOWN_LOCAL_PROJECT_SLUGS = [] as const;
+
+// Resolve the requires_local value at intake time. An explicit boolean (from the
+// human/triage caller) always wins; otherwise a known-local project defaults to
+// true, everything else to false. Overridable: pass explicit=false to force a
+// known-local project's task onto the shared pool.
+export function resolveRequiresLocal(
+  explicit: boolean | null | undefined,
+  projectSlug: string | null | undefined,
+): boolean {
+  if (typeof explicit === "boolean") return explicit;
+  const slug = (projectSlug ?? "").trim().toLowerCase();
+  return (KNOWN_LOCAL_PROJECT_SLUGS as readonly string[]).includes(slug);
+}
+
 export function operatorTargetHasAllowedScheme(value: string): boolean {
   const trimmed = value.trim();
   // Protocol-relative //host resolves to an external host in a browser, so it

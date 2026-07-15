@@ -19,6 +19,7 @@ import {
   operatorTargetHasAllowedScheme,
   receiptForAppliedStatus,
   receiptForTaskTool,
+  resolveRequiresLocal,
 } from "./_agent_tasks.ts";
 
 const baseTask: AgentTaskAccessRow = {
@@ -383,4 +384,20 @@ Deno.test("claim token guard skips token-less claims and resume-family actions",
   for (const action of ["resume", "unblock", "answer"] as const) {
     assertClaimTokenMatches(tokened, undefined, action);
   }
+});
+
+Deno.test("resolveRequiresLocal: explicit boolean always wins", () => {
+  // Explicit true forces local for any project.
+  assertEquals(resolveRequiresLocal(true, "some-project"), true);
+  // Explicit false forces the shared pool for any project.
+  assertEquals(resolveRequiresLocal(false, "some-project"), false);
+});
+
+Deno.test("resolveRequiresLocal: default derives from the known-local list", () => {
+  // KNOWN_LOCAL_PROJECT_SLUGS ships empty, so every project defaults to the
+  // shared pool; a fork that adds a slug there flips its default to true.
+  assertEquals(resolveRequiresLocal(undefined, "some-project"), false);
+  assertEquals(resolveRequiresLocal(null, "Some-Project"), false);
+  assertEquals(resolveRequiresLocal(undefined, null), false);
+  assertEquals(resolveRequiresLocal(undefined, ""), false);
 });

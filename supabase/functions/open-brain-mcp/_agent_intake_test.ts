@@ -546,3 +546,49 @@ Deno.test("action-item, thought, and follow-up intake pass preferred_agent throu
   });
   assertEquals(followUp.preferred_agent, "local-codex");
 });
+
+Deno.test("intake defaults requires_local false and honors the explicit flag", () => {
+  // Default: no explicit flag, empty known-local list -> shared pool.
+  assertEquals(buildAgentTaskIntakeRecord(baseInput).requires_local, false);
+  // Explicit true wins.
+  assertEquals(
+    buildAgentTaskIntakeRecord({ ...baseInput, requires_local: true })
+      .requires_local,
+    true,
+  );
+  // An unlisted project still defaults to the shared pool.
+  assertEquals(
+    buildAgentTaskIntakeRecord({ ...baseInput, project_slug: "some-project" })
+      .requires_local,
+    false,
+  );
+  // Explicit true wins even with a project set.
+  assertEquals(
+    buildAgentTaskIntakeRecord({
+      ...baseInput,
+      project_slug: "some-project",
+      requires_local: true,
+    }).requires_local,
+    true,
+  );
+});
+
+Deno.test("action-item/thought/follow-up intake carry the requires_local default", () => {
+  const fromActionItem = buildActionItemPromotionIntakeRecord({
+    action_item: {
+      id: "66666666-6666-4666-8666-666666666666",
+      description: "Some project maintenance.",
+      status: "open",
+    },
+    project_slug: "some-project",
+  });
+  assertEquals(fromActionItem.requires_local, false);
+
+  const fromThought = buildThoughtIntakeRecord({
+    thought: {
+      id: "77777777-7777-4777-8777-777777777777",
+      content: "A capture, no project.",
+    },
+  });
+  assertEquals(fromThought.requires_local, false);
+});

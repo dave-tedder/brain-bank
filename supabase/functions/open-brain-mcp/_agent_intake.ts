@@ -1,4 +1,8 @@
-import { type AgentTaskRisk, isAgentTaskRisk } from "./_agent_tasks.ts";
+import {
+  type AgentTaskRisk,
+  isAgentTaskRisk,
+  resolveRequiresLocal,
+} from "./_agent_tasks.ts";
 
 export const AGENT_TASK_INTAKE_SOURCES = [
   "dashboard-button",
@@ -24,6 +28,7 @@ export interface AgentTaskIntakeInput {
   intake_source: AgentTaskIntakeSource;
   agent_code?: string | null;
   preferred_agent?: string | null;
+  requires_local?: boolean | null;
   project_slug?: string | null;
   priority?: "low" | "medium" | "high";
   risk?: AgentTaskRisk;
@@ -40,6 +45,7 @@ export interface AgentTaskIntakeRecord {
   status: "Standing";
   agent_code: string | null;
   preferred_agent: string | null;
+  requires_local: boolean;
   project_slug: string | null;
   priority: "low" | "medium" | "high";
   risk: AgentTaskRisk;
@@ -196,6 +202,8 @@ export function buildAgentTaskIntakeRecord(
   const desiredOutcome = cleanText(input.desired_outcome, "desired_outcome");
   const agentCode = input.agent_code?.trim() || null;
   const preferredAgent = input.preferred_agent?.trim() || null;
+  const projectSlug = input.project_slug?.trim() || null;
+  const requiresLocal = resolveRequiresLocal(input.requires_local, projectSlug);
   const priority = input.priority && VALID_PRIORITIES.has(input.priority)
     ? input.priority
     : "medium";
@@ -211,7 +219,8 @@ export function buildAgentTaskIntakeRecord(
     status: "Standing",
     agent_code: agentCode,
     preferred_agent: preferredAgent,
-    project_slug: input.project_slug?.trim() || null,
+    requires_local: requiresLocal,
+    project_slug: projectSlug,
     priority,
     risk,
     requested_by: input.requested_by?.trim() || null,

@@ -711,7 +711,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local";
 
 // Internal load for the receipt-guard path only: includes claim_token so
 // assertClaimTokenMatches can pre-check. Never use for list/get responses.
@@ -1907,6 +1907,9 @@ server.registerTool(
       preferred_agent: z.string().min(1).optional().describe(
         "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
       ),
+      requires_local: z.boolean().optional().describe(
+        "HARD runtime constraint: true = only an attended local (git-capable) runtime may claim this task. Distinct from preferred_agent (soft). Leave unset to default from the project (known-local project slugs -> true, else false).",
+      ),
       project_slug: z.string().min(1).optional(),
       priority: z.enum(["low", "medium", "high"]).optional(),
       risk: z.enum(["low", "medium", "high"]).optional(),
@@ -1928,6 +1931,7 @@ server.registerTool(
       intake_source: AgentTaskIntakeSource;
       agent_code?: string;
       preferred_agent?: string;
+      requires_local?: boolean;
       project_slug?: string;
       priority?: "low" | "medium" | "high";
       risk?: AgentTaskRisk;
@@ -2493,12 +2497,16 @@ server.registerTool(
       max_risk: z.enum(["low", "medium", "high"]).optional().describe(
         "Highest task risk this claim may select. Defaults to medium for manual callers; scheduled OE-5 runners pass low.",
       ),
+      runtime_local: z.boolean().optional().describe(
+        "Assert that this is an attended local (git-capable) runtime. Only such a claim may select a requires_local task. Defaults false: scheduled/cloud lanes omit it and never grab local-only work.",
+      ),
     },
   },
   async (
-    { agent_code, max_risk }: {
+    { agent_code, max_risk, runtime_local }: {
       agent_code: string;
       max_risk?: AgentTaskRisk;
+      runtime_local?: boolean;
     },
   ) => {
     const effectiveMaxRisk = isAgentTaskRisk(max_risk || "")
@@ -2507,11 +2515,13 @@ server.registerTool(
     logToolInvocation("claim_next_agent_task", {
       agent_code,
       max_risk: effectiveMaxRisk,
+      runtime_local: runtime_local === true,
     }, "mcp");
     try {
       const { data, error } = await supabase.rpc("claim_next_agent_task", {
         p_agent_code: agent_code,
         p_max_risk: effectiveMaxRisk,
+        p_runtime_local: runtime_local === true,
       });
       if (error) throw error;
       const tasks = Array.isArray(data) ? data : data ? [data] : [];
@@ -2549,13 +2559,17 @@ server.registerTool(
       max_risk: z.enum(["low", "medium", "high"]).optional().describe(
         "Highest task risk this claim may accept. Defaults to medium.",
       ),
+      runtime_local: z.boolean().optional().describe(
+        "Assert that this is an attended local (git-capable) runtime. Required to claim a requires_local task; a non-local claim is refused with a clear error. Defaults false.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, max_risk }: {
+    { task_id, agent_code, max_risk, runtime_local }: {
       task_id: string;
       agent_code: string;
       max_risk?: AgentTaskRisk;
+      runtime_local?: boolean;
     },
   ) => {
     const effectiveMaxRisk = isAgentTaskRisk(max_risk || "")
@@ -2565,6 +2579,7 @@ server.registerTool(
       task_id,
       agent_code,
       max_risk: effectiveMaxRisk,
+      runtime_local: runtime_local === true,
     }, "mcp");
     try {
       const { data, error } = await supabase.rpc(
@@ -2573,6 +2588,7 @@ server.registerTool(
           p_task_id: task_id,
           p_agent_code: agent_code,
           p_max_risk: effectiveMaxRisk,
+          p_runtime_local: runtime_local === true,
         },
       );
       if (error) throw error;
@@ -2973,6 +2989,95 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error rerouting Needs Operator task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "admin_amend_agent_task",
+  {
+    title: "Admin Amend Agent Task",
+    description:
+      "Ops-correction escape hatch (C3). One honest verb for board fixes that otherwise need raw SQL: set project_slug, append sources, set operator_action/operator_target, set requires_local, move a terminal Agent Done or Agent Review task back onto the Needs Operator desk, and/or release a stuck claim (the folded handoff). Never touches attempt_count, never writes a false AGENT FAILED, never edits an existing event. Writes exactly one honest audit event (AGENT NEEDS OPERATOR when moving to the desk, else AGENT STATUS). Human/ops use only — not for executor lanes.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      reason: z.string().min(1).describe(
+        "Why this correction is being made. Recorded in the audit event.",
+      ),
+      actor: z.string().min(1).optional().describe(
+        "Who is running the correction (e.g. 'operator via ops session').",
+      ),
+      set_project_slug: z.string().min(1).optional(),
+      add_sources: z.array(z.unknown()).optional().describe(
+        "Source entries to append; entries already present are skipped.",
+      ),
+      set_operator_action: z.string().min(1).optional(),
+      set_operator_target: z.string().min(1).optional(),
+      set_requires_local: z.boolean().optional().describe(
+        "Set the C2 hard runtime constraint on this task.",
+      ),
+      move_to_needs_operator: z.boolean().optional().describe(
+        "Move an Agent Done or Agent Review task to Needs Operator. Requires an operator_action (existing or set in this call).",
+      ),
+      release_claim: z.boolean().optional().describe(
+        "Clear claimed_by/claim_token/claim_expires_at without a status change or a false AGENT FAILED — the honest cross-runtime handoff.",
+      ),
+    },
+  },
+  async (
+    {
+      task_id,
+      reason,
+      actor,
+      set_project_slug,
+      add_sources,
+      set_operator_action,
+      set_operator_target,
+      set_requires_local,
+      move_to_needs_operator,
+      release_claim,
+    }: {
+      task_id: string;
+      reason: string;
+      actor?: string;
+      set_project_slug?: string;
+      add_sources?: unknown[];
+      set_operator_action?: string;
+      set_operator_target?: string;
+      set_requires_local?: boolean;
+      move_to_needs_operator?: boolean;
+      release_claim?: boolean;
+    },
+  ) => {
+    logToolInvocation("admin_amend_agent_task", {
+      task_id,
+      move_to_needs_operator: move_to_needs_operator === true,
+      release_claim: release_claim === true,
+    }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc("admin_amend_agent_task", {
+        p_task_id: task_id,
+        p_reason: reason,
+        p_actor: actor ?? null,
+        p_set_project_slug: set_project_slug ?? null,
+        p_add_sources: add_sources ?? null,
+        p_set_operator_action: set_operator_action ?? null,
+        p_set_operator_target: set_operator_target ?? null,
+        p_set_requires_local: typeof set_requires_local === "boolean"
+          ? set_requires_local
+          : null,
+        p_move_to_needs_operator: move_to_needs_operator === true,
+        p_release_claim: release_claim === true,
+      });
+      if (error) throw error;
+      return textToolResponse({
+        receipt: move_to_needs_operator ? "AGENT NEEDS OPERATOR" : "AGENT STATUS",
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error amending agent task: ${(err as Error).message}`,
       );
     }
   },
