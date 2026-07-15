@@ -59,12 +59,31 @@ the full draft inline in "Work summary" and records "Touched files or records:
 None written (cloud runtime — draft inline above)". No task is ever
 unreviewable.
 
-OPERATOR STEP MARKER: when accepting the work leaves the operator a personal
-outside-system step (claim a listing and paste, make a call, confirm a fact),
+OPERATOR STEP MARKER: when accepting the work leaves the operator a step outside
+the system (claim a listing and paste, make a call, confirm a fact) — OR leaves a
+file you staged that a human must still install —
 add this line inside "Follow-up recommendation:":
   OPERATOR-ACTION: <one-line step> || OPERATOR-TARGET: <url-or-path>
-(OPERATOR-TARGET and the || are optional.) The closeout-controller reads this
-verbatim to route the task to the Needs Operator desk. No marker => terminal task,
+(OPERATOR-TARGET and the || are optional.) THE MARKER MUST STAND ALONE ON ITS
+OWN LINE. The controller only reads a marker at the START of a line, so a marker
+tacked onto the end of a prose sentence is invisible to it and the operator step
+is silently lost on apply. Write your prose, end the line, then put the marker on
+a line by itself.
+
+MANDATORY WHENEVER YOU STAGE A DELIVERABLE: if you wrote any file under
+deliverables/, the task is NOT terminal — the staged file does nothing until a
+human installs it. Emit exactly:
+  OPERATOR-ACTION: install <the deliverables/ path you wrote> || OPERATOR-TARGET: <absolute path or URL the file must be installed to>
+Stamp the install target at completion time; you already know it (it is the file
+you were asked to modify, or the page/post/repo the draft is for). If the target
+is genuinely unknowable, say what you do know in the target slot rather than
+dropping the marker.
+
+The closeout-controller reads this verbatim to route the task to the Needs
+Operator desk. It HOLDS any receipt that names a deliverables/ file but carries
+no marker (DELIVERABLE_WITHOUT_OPERATOR_ACTION), and any receipt whose marker is
+mid-line (OPERATOR_MARKER_NOT_LINE_ANCHORED) — held and visible, never
+applied-and-lost. No deliverable and no operator step => terminal task,
 closes to Agent Done. The marker is valid ONLY inside "Follow-up
 recommendation:" — a marker in any other section holds the task
 (OPERATOR_MARKER_OUTSIDE_FOLLOW_UP) instead of closing it, so the step is

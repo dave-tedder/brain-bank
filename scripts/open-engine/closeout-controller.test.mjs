@@ -19,6 +19,7 @@ import {
   flipDocLineText,
   parseReceipt,
   planDocRefs,
+  receiptNamesDeliverable,
   resolvePlanDocPath,
   scanPlanDocDir,
 } from "./closeout-controller.mjs";
@@ -373,6 +374,173 @@ test("evaluate HOLDs a plan-doc task whose tagged line is missing", () => {
     });
     assert.equal(result.status, "HELD");
     assert.ok(result.hold[0].reasons.includes("PLAN_DOC_LINE_NOT_FOUND"));
+  });
+});
+
+// --- operator-install enforcement (Session 344) -----------------------------
+//
+// Write-safe executors never edit project files in place: they stage a revised
+// file under deliverables/ that a human must install. Before this gate, such a
+// task could close to Agent Done with no operator step recorded anywhere, so
+// the staged file sat uninstalled and invisible to sentinel/digest/briefing
+// (the Session 343 strand). A receipt that names a staged deliverable and
+// carries no operator marker now HOLDs.
+
+function deliverableTask(receiptLines, reviewReason = null) {
+  const id = "5f0d1a77-e270-44dc-b414-d75e00080ae4";
+  return {
+    generated_at: "2026-07-15T12:00:00.000Z",
+    tasks: [{
+      id,
+      title: "write-safe deliverable task",
+      status: "Agent Review",
+      risk: "low",
+      project_slug: "tmp-proj",
+      explicit_approval: false,
+      linked_action_item_id: null,
+      review_reason: reviewReason,
+      sources: [],
+      events: [{
+        task_id: id,
+        event_type: "AGENT DONE",
+        agent_code: "claude-code",
+        payload: {
+          reason: receiptLines.join("\n"),
+          status: "Agent Review",
+          from_status: "Agent Working",
+        },
+        created_at: "2026-07-15T11:00:00.000Z",
+      }],
+    }],
+    actionItems: [],
+  };
+}
+
+function receiptWith(touched, followUp) {
+  return [
+    "Work summary: staged the revised file",
+    "Verification: read it back",
+    `Touched files or records: ${touched}`,
+    "Limitations: none",
+    "Tracker draft: - [x] staged the revised file",
+    "Session-log draft: staged the revised file",
+    "Brain Bank capture draft: staged the revised file",
+    `Follow-up recommendation: ${followUp}`,
+  ];
+}
+
+test("receiptNamesDeliverable detects a staged deliverable path", () => {
+  assert.equal(
+    receiptNamesDeliverable(
+      "Touched files or records:\ndeliverables/example-seo/aggregator-audit-2026-07-11.md",
+    ),
+    true,
+  );
+});
+
+test("receiptNamesDeliverable ignores a bare deliverables/ mention with no file", () => {
+  // Prose like "this lane is write-safe so nothing went outside deliverables/"
+  // must not trip the gate — only a named file is evidence of a staged file.
+  assert.equal(
+    receiptNamesDeliverable("Limitations: nothing was written under deliverables/"),
+    false,
+  );
+  assert.equal(receiptNamesDeliverable("Touched files or records: none"), false);
+  assert.equal(receiptNamesDeliverable(""), false);
+  assert.equal(receiptNamesDeliverable(null), false);
+});
+
+test("evaluate HOLDs a deliverable receipt with no operator marker", () => {
+  withTempCopy((dir) => {
+    const input = deliverableTask(receiptWith(
+      "deliverables/example-website/post-1-founding.md",
+      "none",
+    ));
+    const result = evaluate(input, tmpRegistry(dir), {
+      taskId: input.tasks[0].id,
+    });
+    assert.equal(result.status, "HELD");
+    assert.ok(
+      result.hold[0].reasons.includes("DELIVERABLE_WITHOUT_OPERATOR_ACTION"),
+      JSON.stringify(result.hold[0].reasons),
+    );
+    assert.match(result.hold[0].message, /staged a deliverable/i);
+  });
+});
+
+test("evaluate APPLYABLE for a deliverable receipt carrying an install marker", () => {
+  withTempCopy((dir) => {
+    const input = deliverableTask(receiptWith(
+      "deliverables/example-website/post-1-founding.md",
+      "OPERATOR-ACTION: install deliverables/example-website/post-1-founding.md || OPERATOR-TARGET: /tmp/drafts/post-1-founding.md",
+    ));
+    const result = evaluate(input, tmpRegistry(dir), {
+      taskId: input.tasks[0].id,
+    });
+    assert.equal(result.status, "APPLYABLE", JSON.stringify(result.hold));
+    assert.equal(
+      result.apply[0].operator.operator_action,
+      "install deliverables/example-website/post-1-founding.md",
+    );
+  });
+});
+
+test("evaluate leaves a no-deliverable receipt APPLYABLE without a marker", () => {
+  withTempCopy((dir) => {
+    const input = deliverableTask(receiptWith("none", "none"));
+    const result = evaluate(input, tmpRegistry(dir), {
+      taskId: input.tasks[0].id,
+    });
+    assert.equal(result.status, "APPLYABLE", JSON.stringify(result.hold));
+  });
+});
+
+test("evaluate reads the install marker through review-note augmentation", () => {
+  withTempCopy((dir) => {
+    // Receipt is missing Follow-up recommendation; the review note supplies it,
+    // marker included. The augmented section is what the gate must read.
+    const partial = receiptWith(
+      "deliverables/example-seo/title-meta-rewrites.md",
+      "",
+    ).slice(0, 7);
+    const input = deliverableTask(
+      partial,
+      "Follow-up recommendation: OPERATOR-ACTION: install deliverables/example-seo/title-meta-rewrites.md || OPERATOR-TARGET: https://example.com/wp-admin",
+    );
+    const result = evaluate(input, tmpRegistry(dir), {
+      taskId: input.tasks[0].id,
+    });
+    assert.equal(result.status, "APPLYABLE", JSON.stringify(result.hold));
+  });
+});
+
+test("evaluate HOLDs a marker appended mid-line to prose", () => {
+  withTempCopy((dir) => {
+    // Shape of a receipt that strands a task: a real marker, but tacked onto the
+    // end of a sentence, so the line-anchored parser never saw it and the task
+    // applied with its operator step dropped.
+    const input = deliverableTask(receiptWith(
+      "deliverables/example-seo/aggregator-audit-2026-07-11.md",
+      "Review the report, then decide which directory to pursue first. OPERATOR-ACTION: check whether the directory accepts a guest-spot listing || OPERATOR-TARGET: https://example.com",
+    ));
+    const result = evaluate(input, tmpRegistry(dir), {
+      taskId: input.tasks[0].id,
+    });
+    assert.equal(result.status, "HELD");
+    assert.ok(
+      result.hold[0].reasons.includes("OPERATOR_MARKER_NOT_LINE_ANCHORED"),
+      JSON.stringify(result.hold[0].reasons),
+    );
+  });
+});
+
+test("evaluate does not trip the line-anchor gate on a clean receipt", () => {
+  withTempCopy((dir) => {
+    const input = deliverableTask(receiptWith("none", "no operator step needed"));
+    const result = evaluate(input, tmpRegistry(dir), {
+      taskId: input.tasks[0].id,
+    });
+    assert.equal(result.status, "APPLYABLE", JSON.stringify(result.hold));
   });
 });
 

@@ -386,6 +386,30 @@ function evaluateTask(task, registry, actionItems) {
     reasons.push("OPERATOR_MARKER_OUTSIDE_FOLLOW_UP");
   }
 
+  // Operator-install gate (Session 344): the write-safe policy means an executor
+  // never installs its own output — it stages a file under deliverables/ that a
+  // human must move. Applying such a task with no operator step recorded closes
+  // it to Agent Done while the staged file sits uninstalled and untracked (the
+  // Session 343 strand). Evidence of a staged deliverable therefore makes the
+  // operator marker mandatory. Fails closed: a HOLD is recoverable, a strand is
+  // invisible.
+  const stagedDeliverable = markerSources.some(receiptNamesDeliverable);
+  if (stagedDeliverable && !operator.operator) {
+    reasons.push("DELIVERABLE_WITHOUT_OPERATOR_ACTION");
+  }
+
+  // A marker appended mid-line to a prose sentence ("...decide first.
+  // OPERATOR-ACTION: call the vendor ...") is invisible to the line-anchored
+  // parser, so the task applies with its operator step silently dropped. The
+  // parser stays strict (the anchor is what makes marker injection detectable);
+  // the malformed marker becomes a visible HOLD instead of a silent loss.
+  if (
+    !operator.operator &&
+    /OPERATOR-ACTION:\s*\S/i.test(augmentation.sections[followUpHeading] || "")
+  ) {
+    reasons.push("OPERATOR_MARKER_NOT_LINE_ANCHORED");
+  }
+
   // Plan-doc reconciliation gate (Session 335): a task seeded directly from a
   // project plan doc carries a `plan-doc: <path>` source entry. Applying it
   // must flip that doc's carded line to done, so the line's existence is a hard
@@ -612,6 +636,16 @@ export function extractOperatorAction(followUpText) {
   return parseOperatorAction(followUpText).operator;
 }
 
+// A named file under deliverables/ is the receipt's own evidence that the run
+// staged a file it did not install. A bare "deliverables/" mention in prose is
+// not: only a path with a file extension counts, so a receipt that says nothing
+// was written outside deliverables/ stays clean.
+const DELIVERABLE_PATH = /(?:^|[\s`"'(<[])deliverables\/[A-Za-z0-9._/-]+\.[A-Za-z0-9]{1,8}\b/;
+
+export function receiptNamesDeliverable(text) {
+  return DELIVERABLE_PATH.test(String(text || ""));
+}
+
 function parseOperatorAction(followUpText) {
   // Explicit marker only — never fuzzy NLP. Line form:
   //   OPERATOR-ACTION: <step> || OPERATOR-TARGET: <url-or-path>
@@ -738,6 +772,12 @@ function holdMessage(reasons, receipt) {
   }
   if (reasons.includes("OPERATOR_MARKER_OUTSIDE_FOLLOW_UP")) {
     return "Receipt carries an OPERATOR-ACTION marker outside the Follow-up recommendation section; held so the operator step is not silently dropped. Move the marker into Follow-up recommendation and re-run.";
+  }
+  if (reasons.includes("OPERATOR_MARKER_NOT_LINE_ANCHORED")) {
+    return "Receipt's Follow-up recommendation contains an OPERATOR-ACTION marker that is not on its own line (it is appended to a prose sentence), so the parser cannot read it; held so the operator step is not silently dropped. Put the marker on its own line and re-run.";
+  }
+  if (reasons.includes("DELIVERABLE_WITHOUT_OPERATOR_ACTION")) {
+    return "Receipt shows the run staged a deliverable under deliverables/ but carries no OPERATOR-ACTION marker; held so the install step is not lost. Add 'OPERATOR-ACTION: install <deliverable-path> || OPERATOR-TARGET: <install target>' to Follow-up recommendation and re-run.";
   }
   if (reasons.some((reason) => reason.startsWith("OPERATOR_"))) {
     return `Receipt has an invalid operator marker: ${

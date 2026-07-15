@@ -134,13 +134,23 @@ DELIVERABLES-TO-FILE (local runtime): when the task produces a client-facing sta
 
 CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk leaves the full draft inline in "Work summary" and records `Touched files or records: None written (cloud runtime — draft inline above)`. No task is ever unreviewable.
 
-OPERATOR STEP MARKER: when accepting the work leaves the operator a personal outside-system step (claim a listing and paste, make a call, confirm a fact), add this line inside "Follow-up recommendation:":
+OPERATOR STEP MARKER: when accepting the work leaves the operator a step outside the system (claim a listing and paste, make a call, confirm a fact) — OR leaves a file you staged that a human must still install — add this line inside "Follow-up recommendation:":
 
 ```text
 OPERATOR-ACTION: <one-line step> || OPERATOR-TARGET: <url-or-path>
 ```
 
-(OPERATOR-TARGET and the `||` are optional.) The closeout-controller reads this verbatim to route the task to the Needs Operator desk. No marker => terminal task, closes to Agent Done. The marker is valid ONLY inside "Follow-up recommendation:" — a marker in any other section holds the task (`OPERATOR_MARKER_OUTSIDE_FOLLOW_UP`) instead of closing it, so the step is never silently lost.
+(OPERATOR-TARGET and the `||` are optional.) **The marker must stand alone on its own line.** The controller only reads a marker at the START of a line, so a marker tacked onto the end of a prose sentence is invisible to it and the operator step is silently lost on apply. Write the prose, end the line, then put the marker on a line by itself.
+
+**Mandatory whenever the run stages a deliverable:** if the run wrote any file under `deliverables/` (see DELIVERABLES-TO-FILE), the task is NOT terminal — the staged file does nothing until a human installs it. Emit exactly:
+
+```text
+OPERATOR-ACTION: install <the deliverables/ path written> || OPERATOR-TARGET: <absolute path or URL the file must be installed to>
+```
+
+Stamp the install target at completion time; the run already knows it (it is the file the packet asked to modify, or the page/post/repo the draft is for). If the target is genuinely unknowable, name what is known in the target slot rather than dropping the marker.
+
+The closeout-controller reads the marker verbatim to route the task to the Needs Operator desk. It HOLDS any receipt that names a `deliverables/` file but carries no marker (`DELIVERABLE_WITHOUT_OPERATOR_ACTION`), and any receipt whose marker is mid-line (`OPERATOR_MARKER_NOT_LINE_ANCHORED`) — held and visible, never applied-and-lost. No deliverable and no operator step => terminal task, closes to Agent Done. The marker is valid ONLY inside "Follow-up recommendation:" — a marker in any other section holds the task (`OPERATOR_MARKER_OUTSIDE_FOLLOW_UP`) instead of closing it, so the step is never silently lost.
 
 VOICE RULES for any drafted client-facing or operator-voice content inside a task
 (blog drafts, emails, titles/metas): no em dashes; never use the words
