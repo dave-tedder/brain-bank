@@ -49,6 +49,7 @@ import {
   type AgentTaskStatus,
   type AgentTaskToolAction,
   assertAgentCanWriteTask,
+  assertAutoPromotionCallerAllowed,
   assertClaimTokenMatches,
   assertClaimAllowed,
   assertIntakePromotionAllowed,
@@ -2390,6 +2391,66 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error promoting agent task intake: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "auto_promote_agent_task_intake",
+  {
+    title: "Auto-Promote Agent Task Intake (OE-12 Phase 4)",
+    description:
+      "Guarded autonomous promotion (OE-12 Phase 4). Triage's stage-4 action: move ONE same-run Standing draft to Agent Todo without a human promote click, and only if it passes every server-side allowlist condition (low risk, explicit_approval false, Standing and not archived, intake_source=triage-agent, linked to an action item, full packet, requires_local=false) and the daily UTC-day cap is not exceeded. Callable only with caller_agent_code='triage' (enforced here and in SQL; both fail closed). On success emits an UNASSIGNED Agent Todo row (shared claim pool) and exactly one AGENT STATUS event authored by triage-auto, so the promotion is distinguishable from a human promote and never dirties the readiness watch (which keys DIRTY on triage authorship). Any failed condition refuses and leaves the draft Standing — record it in the run summary, never retry in-run. Never grants explicit approval; never touches attempt_count or claim state. NOT a substitute for promote_agent_task_intake (the human path).",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      caller_agent_code: z.literal("triage").describe(
+        "Must be 'triage'. Self-attested on the shared key; also enforced in SQL.",
+      ),
+      allowlist_category: z.number().int().min(1).max(4).describe(
+        "The allowlist J category: 1 read-only research/lookup -> report, 2 content/email/copy draft (created, never sent), 3 local documentation draft (no tracker/session-log/git), 4 read-only verification/audit -> report.",
+      ),
+      rationale: z.string().min(1).describe(
+        "One sentence: why this draft is safe to auto-promote in its category. Recorded in the audit event; never blank.",
+      ),
+    },
+  },
+  async (
+    { task_id, caller_agent_code, allowlist_category, rationale }: {
+      task_id: string;
+      caller_agent_code: string;
+      allowlist_category: number;
+      rationale: string;
+    },
+  ) => {
+    logToolInvocation("auto_promote_agent_task_intake", {
+      task_id,
+      caller_agent_code,
+      allowlist_category,
+    }, "mcp");
+    try {
+      assertAutoPromotionCallerAllowed(caller_agent_code);
+      const { data, error } = await supabase.rpc(
+        "auto_promote_agent_task_intake",
+        {
+          p_task_id: task_id,
+          p_caller_agent_code: caller_agent_code,
+          p_allowlist_category: allowlist_category,
+          p_rationale: rationale,
+        },
+      );
+      if (error) throw error;
+      return textToolResponse({
+        receipt: "INTAKE_AUTO_PROMOTED",
+        audit_event_written: true,
+        audit_event_author: "triage-auto",
+        explicit_approval_granted: false,
+        allowlist_category,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error auto-promoting agent task intake: ${(err as Error).message}`,
       );
     }
   },

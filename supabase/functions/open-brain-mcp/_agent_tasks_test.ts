@@ -3,6 +3,7 @@ import {
   AGENT_TASK_RECEIPTS,
   type AgentTaskAccessRow,
   assertAgentCanWriteTask,
+  assertAutoPromotionCallerAllowed,
   assertClaimAllowed,
   assertClaimTokenMatches,
   assertIntakePromotionAllowed,
@@ -140,6 +141,38 @@ Deno.test("promotion caller guard passes human attributions", () => {
   assertPromotionCallerAllowed("Jane Doe (Session 12, Claude Code)", codes);
   assertPromotionCallerAllowed("Jane via Codex parent session", codes);
   assertPromotionCallerAllowed("Jane", []);
+});
+
+// OE-12 Phase 4 auto-promote: the INVERSE guard. Only 'triage' passes;
+// everything the human-promote guard accepts (human names) is rejected here,
+// and vice versa.
+Deno.test("auto-promote caller guard passes only triage", () => {
+  assertAutoPromotionCallerAllowed("triage");
+  assertAutoPromotionCallerAllowed("  triage  ");
+});
+
+Deno.test("auto-promote caller guard rejects everything else", () => {
+  for (
+    const value of [
+      undefined,
+      null,
+      "",
+      "   ",
+      "triage-auto",
+      "local-codex",
+      "local-claude-code",
+      "Jane",
+      "Jane Doe",
+      "queue-runner",
+      "TRIAGE",
+    ]
+  ) {
+    assertThrows(
+      () => assertAutoPromotionCallerAllowed(value),
+      Error,
+      "only by agent_code 'triage'",
+    );
+  }
 });
 
 Deno.test("review apply guard only allows Agent Review tasks", () => {

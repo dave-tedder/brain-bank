@@ -190,6 +190,26 @@ export function assertPromotionCallerAllowed(
   }
 }
 
+// OE-12 Phase 4 auto-promote is the INVERSE of the human promote check: it is
+// the one path where an agent runtime IS the allowed caller — but ONLY the
+// triage identity, and only as the tool-layer echo of the SQL's condition G.
+// The SQL enforces the same string; both fail closed, so a dishonest key still
+// cannot widen the caller set. This is deliberately NOT a substitute for
+// assertPromotionCallerAllowed (the human path) — the two guards protect
+// opposite lanes.
+export function assertAutoPromotionCallerAllowed(
+  callerAgentCode: string | null | undefined,
+): void {
+  const value = typeof callerAgentCode === "string" ? callerAgentCode.trim() : "";
+  if (value !== "triage") {
+    throw new Error(
+      `auto_promote_agent_task_intake is callable only by agent_code 'triage'; got '${
+        value || "<none>"
+      }'. Auto-promote is the triage stage-4 action, not a general promote path.`,
+    );
+  }
+}
+
 export function assertReviewApplyAllowed(task: AgentTaskAccessRow): void {
   if (task.status !== "Agent Review") {
     throw new Error("AGENT APPLIED requires Agent Review.");
