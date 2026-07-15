@@ -3,15 +3,22 @@
 //
 // Google Apps Script that captures Gmail threads into Brain Bank.
 // Paste this into a new Apps Script project at script.google.com,
-// fill in the two constants below, save, authorize, and set up an
-// hourly time-driven trigger on processEmails().
+// set BRAIN_BANK_URL + BRAIN_KEY in Project Settings > Script
+// Properties, save, authorize, and set up an hourly time-driven
+// trigger on processEmails().
 //
 // Full walkthrough: docs/capture-sources/gmail-bridge.md
 // ============================================================
 
-// Replace both values below with yours.
-var BRAIN_BANK_URL = 'https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp/capture';
-var BRAIN_KEY = 'YOUR_BRAIN_KEY';
+// BRAIN_BANK_URL and BRAIN_KEY live in Project Settings > Script
+// Properties, not in this file, so rotating your key is a one-field
+// update instead of a code edit. A hardcoded key silently fails the
+// moment you rotate MCP_ACCESS_KEY in Supabase and forget to re-paste
+// it here. Set both properties before the first run (see the setup
+// doc, Step 3).
+var _props = PropertiesService.getScriptProperties();
+var BRAIN_BANK_URL = _props.getProperty('BRAIN_BANK_URL');
+var BRAIN_KEY = _props.getProperty('BRAIN_KEY');
 
 // Label names (must match the labels you created in Gmail).
 var LABEL_CAPTURE = 'brain-capture';
@@ -258,6 +265,9 @@ function captureToBrainBank(content) {
 // ============================================================
 function processEmails() {
   try {
+    if (!BRAIN_BANK_URL || !BRAIN_KEY) {
+      throw new Error('Missing Script Property BRAIN_BANK_URL or BRAIN_KEY. Set both in Project Settings > Script Properties.');
+    }
     var processedLabel = ensureLabel(LABEL_PROCESSED);
     var skippedLabel = ensureLabel(LABEL_SKIPPED);
     var captureLabel = ensureLabel(LABEL_CAPTURE);

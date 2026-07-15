@@ -4,7 +4,14 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const source = await readFile(new URL('./script.gs', import.meta.url), 'utf8');
-const context = vm.createContext({});
+// Stub the Apps Script PropertiesService global the script reads at load time
+// (BRAIN_BANK_URL + BRAIN_KEY live in Script Properties, not the script body).
+// shouldSkip() does not touch config, so returning null for both is fine here.
+const context = vm.createContext({
+  PropertiesService: {
+    getScriptProperties: () => ({ getProperty: () => null }),
+  },
+});
 vm.runInContext(source, context, { filename: 'script.gs' });
 
 const cases = [
