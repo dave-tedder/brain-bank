@@ -27,7 +27,7 @@
 -- claimer; across multiple-agent retries this attributes the task to the final
 -- claimer -- acceptable at current volume, revisit if cross-agent retries grow.
 --
--- Judgment call (resolved Session 292, Dave's call): AGENT BLOCKED DOES count as
+-- Judgment call (resolved Session 292, operator's call): AGENT BLOCKED DOES count as
 -- a setback. The metric answers the Phase 4 gate question "can this task type run
 -- unattended to completion?" -- a task that blocked and needed unblocking did not,
 -- same as an AGENT HUMAN HOLD. Locked now at zero retroactive churn (0 live tasks

@@ -36,7 +36,7 @@ Deno.test("buildSlackTaskIntakeRecord builds a conservative Standing draft", () 
   const record = buildSlackTaskIntakeRecord({
     body: "chase the aggregator directory layer",
     thoughtId: "11111111-2222-3333-4444-555555555555",
-    projectSlug: "dave-website",
+    projectSlug: "example-website",
   });
   assertEquals(record.status, "Standing");
   assertEquals(record.explicit_approval, false);
@@ -44,7 +44,7 @@ Deno.test("buildSlackTaskIntakeRecord builds a conservative Standing draft", () 
   assertEquals(record.risk, "low");
   assertEquals(record.priority, "medium");
   assertEquals(record.agent_code, null);
-  assertEquals(record.project_slug, "dave-website");
+  assertEquals(record.project_slug, "example-website");
   assertEquals(
     record.source_thought_id,
     "11111111-2222-3333-4444-555555555555",

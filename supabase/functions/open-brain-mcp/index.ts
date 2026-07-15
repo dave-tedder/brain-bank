@@ -2734,7 +2734,7 @@ server.registerTool(
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
-      result: z.string().min(1).describe("Completion receipt for Dave."),
+      result: z.string().min(1).describe("Completion receipt for the operator."),
       claim_token: z.string().uuid().optional().describe(
         "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
       ),
@@ -2816,7 +2816,7 @@ server.registerTool(
   {
     title: "Request Agent Review",
     description:
-      "Move a claimed or assigned task to Agent Review with an AGENT DONE receipt when the runtime needs Dave to inspect the result.",
+      "Move a claimed or assigned task to Agent Review with an AGENT DONE receipt when the runtime needs the operator to inspect the result.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
