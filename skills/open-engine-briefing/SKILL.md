@@ -15,6 +15,141 @@ Tool names below are bare; the MCP server prefix varies by runtime
 (`mcp__brain-bank__*`, UUID-prefixed connector, etc.). Load via ToolSearch
 if deferred.
 
+## STEP 0 — MCP PREFLIGHT (MANDATORY, BEFORE ANYTHING ELSE)
+
+Run this before reading the board, the packet, or any deliverable. It is a
+procedure, not advice. Do not skip it because the tools "look fine".
+
+1. List every MCP this run may need. Always the Brain Bank board tools. Plus any
+   the task names: WordPress servers, Notion, or any other integration.
+2. ToolSearch each one, then make a CHEAP LIVE CALL to confirm it answers:
+   `mcp__<server>__mcp_ping` for the WordPress servers; any read verb for others.
+3. If ToolSearch returns "No matching deferred tools found", that is **NOT**
+   evidence of absence. Desktop-configured MCP servers connect ASYNCHRONOUSLY and
+   routinely surface minutes into a session with no action taken. Wait, then
+   re-run ToolSearch. **Retry up to 3 times.**
+4. Only a LIVE CALL that still fails after 3 retries may be reported as
+   unavailable. Report it; do not fix it.
+
+Because the pings are cheap and the connect window is short, fire them first and
+then read the packet. By the time you need a tool it is warm, and the
+false-negative window never opens.
+
+### Forbidden while diagnosing a "missing" MCP
+
+- Do NOT run `claude mcp list`. It lists ONLY Code-registered servers and never
+  lists Desktop servers. Its output is not evidence of anything.
+- Do NOT read `~/.claude.json`, `claude_desktop_config.json`, or check for a
+  project `.mcp.json`. Those describe **registration**. Registration is not
+  **reachability**. A Desktop server is genuinely reachable from a Code session.
+- Do NOT run `claude mcp add` or `claude mcp remove`. The servers are already
+  live; you would duplicate working servers. A PreToolUse hook can block this
+  (see `scripts/hooks/block-mcp-registration.sh`).
+- Do NOT build a causal story about WHY the MCP is missing. If you catch yourself
+  explaining why, that IS the tell. Stop and re-run ToolSearch.
+
+**The rule is about the KIND of evidence, not the specific command.** No static
+artifact (CLI listing, JSON config, worktree state, missing `.mcp.json`) can prove
+an MCP is unavailable. Only a live call can, and only after the retries above.
+
+This exists because the misdiagnosis recurred in two separate sessions on the
+same day **while a memory note describing it was in context**, each time
+reasoning confidently from a different artifact. Treat any "the MCP isn't here"
+conclusion as a red flag about your own reasoning first.
+
+## STEP 0.6 — PRIOR-ART RECALL (MANDATORY BEFORE ANY DIAGNOSIS)
+
+Before forming ANY theory about a symptom, block, failure, or "X is
+broken/blocked/missing" claim (from a packet, a probe you just ran, or your own
+observation):
+
+1. `search_thoughts` the symptom in Brain Bank. Query with the concrete nouns:
+   the domain, the tool, the error ("crawler 403 CDN <domain>", not "website
+   problem"). Limit 5.
+2. If a prior capture DIAGNOSES, CORRECTS, or WITHDRAWS the same finding, that
+   capture outranks your fresh reasoning. Follow its method. A withdrawal
+   reverses the burden of proof: you need NEW evidence of a kind the withdrawal
+   did not already discredit before re-raising the alarm.
+3. The recall applies to the PACKET'S premise too. A packet can encode a false
+   alarm and send several sessions chasing it across weeks.
+4. Only after the search comes up empty may you investigate from scratch.
+
+This exists because a bot-blocking false alarm was diagnosed and formally
+withdrawn in the brain, then re-derived from scratch twice afterward, with the
+withdrawal sitting in the brain the whole time. Confidence in a freshly built
+causal story is the tell, exactly as in STEP 0.
+
+## STEP 0.5 — DISCOVERY BEFORE DIALOGUE
+
+Front-load. Every mid-run question costs the operator a context switch. The goal
+is ONE consolidated decision gate, then uninterrupted execution.
+
+1. Read the packet/deliverable END TO END, including the bottom. Limitations,
+   re-target logs, and flagged questions live there and change the work.
+2. VERIFY every resource the packet names, before using it. Paths (against the
+   canonical map: `search_thoughts "PROJECT PATH MAP"`), internal link targets,
+   post IDs, folders, media. A packet that names a resource with no verified
+   path is a PACKET BUG: resolve it, use the real thing, and say so in the
+   receipt. Never spider the disk hunting for it.
+3. RESOLVE WHAT YOU CAN before escalating. Distinguish:
+   - "I don't know" -> YOUR problem. Go find out.
+   - "The operator must choose" -> THEIR problem. Escalate it.
+   A fact already published on the operator's own website, or already captured
+   in the brain, is NOT a decision. Look before you ask. A prior agent escalated
+   the operator's own travel cadence as an open question while two of their live
+   pages stated it.
+4. BUILD THE ARTIFACT BEFORE ASKING. If the operator must choose between things,
+   produce the thing to choose from first: contact sheets with pick IDs, a
+   before/after diff, an option table. One round trip, not three.
+5. ENUMERATE EVERY decision that genuinely needs the operator, then present them
+   in ONE block. Do not trickle.
+6. FACT-APPLICATION INTAKES: when a task applies a confirmed fact (a name, a
+   date, an address) to content, the packet's acceptance_criteria must enumerate
+   EVERY artifact that carries the fact: local markdown draft, CMS post/page,
+   schema meta. A drafts-only scope must NAME the live artifact it deliberately
+   does not touch, so the untouched half shows on the receipt instead of
+   drifting silently. A drafts-only task once closed Agent Done correctly while
+   the live CMS draft kept the stale value for days, and a second confirmed fact
+   from the same operator confirmation had no application task at all and
+   reached zero artifacts until an attended session noticed.
+
+What is NOT an interruption to be optimized away: choices that are genuinely the
+operator's. Publishing public content, selecting client-facing photos, spending
+money, asserting facts about their business. Batch these; never skip them.
+
+## RISK RATING RUBRIC (for any intake you create)
+
+Risk = **BLAST RADIUS OF THE AGENT'S ACTIONS.** NOT sensitivity of the subject.
+
+- `low` — draft-and-propose. Research -> report; content/copy drafted but never
+  sent; local documentation draft; read-only verification -> report. Touches
+  nothing live. Worst case: a proposal the operator rejects.
+- `medium` — mutates something real but reversible.
+- `high` — irreversible, public, or financial.
+
+**CRITICAL:** scheduled OE-5 runners pass `max_risk=low` to
+`claim_next_agent_task`. A task rated `medium` or `high` is INVISIBLE to every
+scheduled lane. It sits in Agent Todo forever: not blocked, not failed, not
+flagged, never claimed. Promoting it looks identical to queuing it and silently
+does nothing. Only an attended manual claim (default `max_risk=medium`) sees it.
+
+So: rate draft-and-propose work `low`, even when the SUBJECT feels weighty. Put
+subject-matter caution in `boundaries`, which travels with the packet regardless
+of the risk field. An image-sourcing task was once rated `medium` because the
+topic touched copyright; the task could only ever write a proposal, and the
+rating quietly made it unrunnable.
+
+**Risk is FROZEN at intake.** No verb amends it (`admin_amend_agent_task` covers
+project_slug, add_sources, operator_action, operator_target, requires_local
+only). A mis-rated task must be RECREATED at the right risk and the old one
+superseded via `admin_amend_agent_task` with a DO-NOT-WORK reason plus an
+`add_sources` pointer. Do NOT use `block_agent_task` for this: it requires a
+claimed/assigned task and would write a false AGENT BLOCKED receipt under an
+agent code with no run behind it.
+
+Also always set `project_slug` on intake. The closeout controller routes strictly
+by slug and holds anything it cannot resolve.
+
 ## Hard rules
 
 - READ-ONLY while rendering the briefing. The only writes in the briefing run:

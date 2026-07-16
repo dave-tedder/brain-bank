@@ -2380,12 +2380,34 @@ server.registerTool(
         },
       );
       if (error) throw error;
+      // Scheduled OE-5 runners pass max_risk=low to claim_next_agent_task, so a
+      // task promoted at medium/high is invisible to every scheduled lane and
+      // silently sits in Agent Todo. Risk is frozen at intake, so the only fix
+      // is to recreate. Surface this at promote time rather than letting the
+      // operator discover it when the work never happens.
+      const promotedRisk = (data as { risk?: string } | null)?.risk ?? null;
+      const claimGatingWarning = promotedRisk && promotedRisk !== "low"
+        ? `risk=${promotedRisk}. Scheduled runners pass max_risk=low, so NO scheduled lane can claim this task; it will sit in Agent Todo until an attended manual run claims it (manual callers default to max_risk=medium). Risk is frozen at intake and no verb amends it. If this should run unattended, recreate the intake at risk=low and supersede this one via admin_amend_agent_task.`
+        : null;
+      // A verbatim action-item promotion is a review-me stub, not an executable
+      // packet: its do_steps are the intake template and its acceptance criteria
+      // is human review. Promoted into the claim pool it burns a scheduled rep
+      // (claim -> validate -> AGENT HUMAN HOLD) and strands in Agent Needs Input
+      // (a real instance sat stranded 11 days). Warn at promote time.
+      const promotedIntakeSource = (data as { intake_source?: string } | null)?.intake_source ?? null;
+      const promotedDoSteps = (data as { do_steps?: string } | null)?.do_steps ?? "";
+      const intakeShapeWarning = promotedIntakeSource === "action-item-promotion" &&
+          promotedDoSteps.startsWith("Review the linked action item")
+        ? `This row is a verbatim action-item stub, not an executable packet: its do_steps are still the intake template ("Review the linked action item, expand this draft..."). A scheduled lane WILL claim it, hold it to Agent Needs Input, and burn the rep. Expand it into a real packet before promoting, or promote knowingly for attended human review only.`
+        : null;
       return textToolResponse({
         receipt: "INTAKE_PROMOTED",
         // The S3 hardening batch made the SQL function write an AGENT STATUS
         // promotion audit event (verified Session 265); the flag predated it.
         audit_event_written: true,
         explicit_approval_granted: false,
+        ...(claimGatingWarning ? { claim_gating_warning: claimGatingWarning } : {}),
+        ...(intakeShapeWarning ? { intake_shape_warning: intakeShapeWarning } : {}),
         task: data,
       });
     } catch (err: unknown) {

@@ -354,6 +354,21 @@ function evaluateTask(task, registry, actionItems) {
   );
   if (doneEvents.length < 1) reasons.push("AGENT_DONE_EVENT_COUNT");
   const latestDoneEvent = latestEvent(doneEvents);
+  // Post-DONE ops-amend corrections are invisible to the receipt build (it
+  // reads only the latest AGENT DONE; review-note augmentation fills only
+  // missing sections). If an ops-amend is NEWER than the receipt about to be
+  // applied, the tracker draft may be stale — hold for a human instead of
+  // silently applying it. Author fix: post a superseding AGENT DONE that folds
+  // the corrections in, then re-run.
+  if (latestDoneEvent) {
+    const doneAt = new Date(latestDoneEvent.created_at).getTime();
+    const hasNewerOpsAmend = task.events.some((event) =>
+      event.event_type === "AGENT STATUS" &&
+      event.payload?.action === "ops-amend" &&
+      new Date(event.created_at).getTime() > doneAt
+    );
+    if (hasNewerOpsAmend) reasons.push("OPS_AMEND_NEWER_THAN_DONE");
+  }
   const receiptText = latestDoneEvent ? receiptFromEvent(latestDoneEvent) : "";
   const receipt = parseReceipt(receiptText);
   reasons.push(...receipt.reasons);
@@ -788,6 +803,9 @@ function holdMessage(reasons, receipt) {
     return `Receipt is missing required sections: ${
       receipt.missing.join(", ")
     }.`;
+  }
+  if (reasons.includes("OPS_AMEND_NEWER_THAN_DONE")) {
+    return "A human correction (ops-amend) was posted after the AGENT DONE this apply would use; its Tracker/Session-log drafts may be stale. Post a superseding AGENT DONE folding the corrections in, then re-run.";
   }
   if (reasons.includes("PLAN_DOC_PATH_UNRESOLVED")) {
     return "Task carries a plan-doc source whose path cannot be resolved to a project folder; held so the doc line is not left un-synced. Fix the plan-doc source path and re-run.";

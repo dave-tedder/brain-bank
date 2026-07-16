@@ -12,6 +12,70 @@ This skill does not create cron jobs, scheduled runners, background loops, Slack
 
 This skill is behavioral guidance for the agent running the heartbeat. It is not an enforcement boundary by itself. Real enforcement must stay in the SQL helpers, MCP task tools, and runtime tests so a scheduled or misbehaving runtime cannot bypass risk and transition guards by ignoring prose.
 
+## STEP 0 — MCP PREFLIGHT (MANDATORY, BEFORE ANYTHING ELSE)
+
+Run this before reading the board, the packet, or any deliverable. It is a
+procedure, not advice. Do not skip it because the tools "look fine".
+
+1. List every MCP this run may need. Always the Brain Bank board tools. Plus any
+   the task names: WordPress servers, Notion, or any other integration.
+2. ToolSearch each one, then make a CHEAP LIVE CALL to confirm it answers:
+   `mcp__<server>__mcp_ping` for the WordPress servers; any read verb for others.
+3. If ToolSearch returns "No matching deferred tools found", that is **NOT**
+   evidence of absence. Desktop-configured MCP servers connect ASYNCHRONOUSLY and
+   routinely surface minutes into a session with no action taken. Wait, then
+   re-run ToolSearch. **Retry up to 3 times.**
+4. Only a LIVE CALL that still fails after 3 retries may be reported as
+   unavailable. Report it; do not fix it.
+
+Because the pings are cheap and the connect window is short, fire them first and
+then read the packet. By the time you need a tool it is warm, and the
+false-negative window never opens.
+
+### Forbidden while diagnosing a "missing" MCP
+
+- Do NOT run `claude mcp list`. It lists ONLY Code-registered servers and never
+  lists Desktop servers. Its output is not evidence of anything.
+- Do NOT read `~/.claude.json`, `claude_desktop_config.json`, or check for a
+  project `.mcp.json`. Those describe **registration**. Registration is not
+  **reachability**. A Desktop server is genuinely reachable from a Code session.
+- Do NOT run `claude mcp add` or `claude mcp remove`. The servers are already
+  live; you would duplicate working servers. A PreToolUse hook can block this
+  (see `scripts/hooks/block-mcp-registration.sh`).
+- Do NOT build a causal story about WHY the MCP is missing. If you catch yourself
+  explaining why, that IS the tell. Stop and re-run ToolSearch.
+
+**The rule is about the KIND of evidence, not the specific command.** No static
+artifact (CLI listing, JSON config, worktree state, missing `.mcp.json`) can prove
+an MCP is unavailable. Only a live call can, and only after the retries above.
+
+This exists because the misdiagnosis recurred in two separate sessions on the
+same day **while a memory note describing it was in context**, each time
+reasoning confidently from a different artifact. Treat any "the MCP isn't here"
+conclusion as a red flag about your own reasoning first.
+
+## STEP 0.6 — PRIOR-ART RECALL (MANDATORY BEFORE ANY DIAGNOSIS)
+
+Before forming ANY theory about a symptom, block, failure, or "X is
+broken/blocked/missing" claim (from a packet, a probe you just ran, or your own
+observation):
+
+1. `search_thoughts` the symptom in Brain Bank. Query with the concrete nouns:
+   the domain, the tool, the error ("crawler 403 CDN <domain>", not "website
+   problem"). Limit 5.
+2. If a prior capture DIAGNOSES, CORRECTS, or WITHDRAWS the same finding, that
+   capture outranks your fresh reasoning. Follow its method. A withdrawal
+   reverses the burden of proof: you need NEW evidence of a kind the withdrawal
+   did not already discredit before re-raising the alarm.
+3. The recall applies to the PACKET'S premise too. A packet can encode a false
+   alarm and send several sessions chasing it across weeks.
+4. Only after the search comes up empty may you investigate from scratch.
+
+This exists because a bot-blocking false alarm was diagnosed and formally
+withdrawn in the brain, then re-derived from scratch twice afterward, with the
+withdrawal sitting in the brain the whole time. Confidence in a freshly built
+causal story is the tell, exactly as in STEP 0.
+
 ## Runtime Identity
 
 Default runtime:
@@ -98,7 +162,7 @@ Use exactly one task receipt for the heartbeat result:
 
 - `AGENT STATUS` for a progress heartbeat while still working.
 - `AGENT DONE` through `complete_agent_task` or `request_agent_review` only when the task packet's acceptance criteria are met and the scoped task is ready for review. This moves the task to `Agent Review`, not final done.
-- `AGENT HUMAN HOLD` through `hold_agent_task` when the packet validates but this heartbeat has no executor for the work. The task moves to `Agent Needs Input` for a human or local runtime.
+- `AGENT HUMAN HOLD` through `hold_agent_task` when the packet validates but this heartbeat has no executor for the work (say WHICH runner: "the scheduled queue-runner Edge Function performs claim-and-hold only". Local executor lanes DO execute; never write a receipt sentence that reads as a claim about the whole scheduled grid). The task moves to `Agent Needs Input` for a human or local runtime.
 - `AGENT BLOCKED` through `block_agent_task` when work cannot safely continue.
 - `AGENT FAILED` through `fail_agent_task` when a post-claim step fails. The task returns to `Agent Todo` with `attempt_count` incremented and the claim cleared.
 - `AGENT FOLLOW-UP` only when recording a follow-up is the scoped output and the tool path supports it.
@@ -162,7 +226,7 @@ craft-first tone, no hype.
 
 ## Scheduled Path: Claim-and-Hold
 
-The scheduled `queue-runner` Edge Function follows this same heartbeat with one hard difference: it has no executor, so it never writes `AGENT DONE`. Its claim-and-hold contract is: claim through the guarded MCP path, validate the packet, then post `AGENT HUMAN HOLD` with an honest 8-section hold receipt draft. Post-claim failures write `AGENT FAILED` on the claimed task instead of stranding it in `Agent Working`. The scheduled path reports held/blocked work in its summary; it never resumes held work itself.
+The scheduled `queue-runner` Edge Function follows this same heartbeat with one hard difference: the queue-runner Edge Function itself has no executor, so it never writes `AGENT DONE`. Its claim-and-hold contract is: claim through the guarded MCP path, validate the packet, then post `AGENT HUMAN HOLD` with an honest 8-section hold receipt draft. Post-claim failures write `AGENT FAILED` on the claimed task instead of stranding it in `Agent Working`. The scheduled path reports held/blocked work in its summary; it never resumes held work itself. Hold receipts must name the queue-runner specifically and state the packet-specific reason for the hold (e.g. "this intake draft's acceptance criteria require human review"). A receipt phrase like "the scheduled path has no executor" reads as a global capability claim and has already misled an attended session into reporting that scheduled lanes cannot execute content work at all.
 
 ## Ledger Update
 
