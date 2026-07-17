@@ -25,7 +25,38 @@ The routine prompt is constructed inside the claude.ai/code/routines UI per the 
 
 ## Setup
 
-See [`docs/capture-sources/notion-sync.md`](../../docs/capture-sources/notion-sync.md) for the full walkthrough. The short version: create a Notion internal integration and get its token, share each database you want synced with that integration, grab each database ID, open claude.ai/code/routines and create a new routine, paste the prompt template from the guide, fill in three secrets and your database IDs, save, run once manually to test, check the thoughts table.
+See [`docs/capture-sources/notion-sync.md`](../../docs/capture-sources/notion-sync.md) for the full walkthrough. The short version: create a Notion internal integration and get its token, share each database you want synced with that integration, grab each database ID, open claude.ai/code/routines and create a new routine, paste the prompt template from the guide, **put your three secrets on the cloud environment rather than in the prompt** (see below), fill in your database IDs, save, run once manually to test, check the thoughts table.
+
+## Credentials: put them on the environment, never in the prompt
+
+The routine needs three secrets: your Notion integration token, your Brain Bank function URL, and your Brain Bank key. **Do not paste any of them into the routine prompt text.** Set them as environment variables on the cloud environment the routine runs in, and have the prompt read `$NOTION_TOKEN`, `$BRAIN_BASE`, and `$BRAIN_KEY`.
+
+Env vars are **not** per-routine: they live on the cloud **environment**, which every routine using that environment shares. In the routine's edit modal, click the environment picker, then the gear, then "Update cloud environment", and add them in `.env` format. Changes apply to new sessions only.
+
+Three reasons this matters more than it looks:
+
+- **A prompt is not a secret store.** It is plain text you will read, copy, screenshot, and paste into support threads.
+- **It makes the prompt un-editable in practice.** Once secrets are inline, every later edit to the prompt means handling those secrets again. A real deployment sat for months with a needed fix blocked purely because pushing the prompt meant re-pasting a live token.
+- **Rotation becomes a one-field edit** on the environment instead of a prompt rewrite.
+
+Have the prompt **fail fast** rather than fail quiet:
+
+```
+If NOTION_TOKEN, BRAIN_BASE, or BRAIN_KEY is missing or empty, STOP before
+syncing anything and report which one is missing. A partial sync is worse than
+no sync, because a half-written day looks like a complete one.
+```
+
+## Filter test and internal rows out of client auto-creation
+
+If you use the walkthrough's Advanced section to chain `/client` calls, add a skip rule for entries that are not real people: test submissions from form testing, and your own admin or internal addresses. Each one that gets through becomes a client record, then an auto-created wiki page, then recurring compile spend on a page about nobody.
+
+Two things worth knowing before you write that rule:
+
+- **Deduplication hides the true count.** `/client` dedups by name, so many junk submissions can collapse into a handful of junk clients. Fixing "6 junk clients" can mean filtering fifteen or more submissions.
+- **An archived status is not a junk marker.** Real, handled clients get archived too. Filter on the name and email shape (exact test names, placeholder domains like `test.com` / `example.com`, your own internal addresses), not on workflow status.
+
+When genuinely unsure whether an entry is a real person, **create the client**: a missing real client is worse than one junk row, and junk is cheap to remove. Report the skip count in your run summary so the skip is visible rather than silent.
 
 ## Good use cases
 

@@ -247,8 +247,28 @@ by slug and holds anything it cannot resolve.
   sits in, it only informs the eye. Within bucket A, a flagged medium/high
   Agent Review sorts above a clean or unreviewed one so flagged work surfaces
   first.
+- CLAIMABILITY SPLIT. Agent Todo is NOT one thing, and rendering it as one is a
+  lie the operator acts on. Every scheduled lane claims with `max_risk=low`, so
+  `risk` is what decides whether a row moves without them:
+  - `risk = low` => it is genuinely queued. Render under "What happens next
+    without you" as happening on the next scheduled run.
+  - `risk = medium` or `high` => NO scheduled lane will EVER claim it. Render it
+    in bucket C, worded as needing an attended session (not as queued work), WITH
+    the Goal Prompt the generator already produces. Say plainly that nothing is
+    coming for it on its own.
+  NEVER emit "the executors will claim these" (or any equivalent) over a set that
+  contains a medium or high row. Check the risk of every Agent Todo row before
+  writing that sentence, not after.
+  Why this is a hard rule: a real briefing put Agent Todo rows in bucket C and
+  told the operator the overnight executors would claim them. That was true of
+  the low rows and FALSE of a medium that had been sitting in the same column for
+  days. A stranded medium therefore read as handled on the one surface the
+  operator actually reads, which is worse than not mentioning it at all.
+  `claim_gating_warning` covers the promote MOMENT; this rule covers the ongoing
+  state after it, and the sentinel's stranded count is the backstop for when a
+  render forgets anyway.
 - THE NEEDS OPERATOR DESK IS ALWAYS SHOWN. Every task in the Needs Operator column
-  renders under bucket B ("Your hands") on EVERY run, regardless of the
+  renders under bucket B ("Needs you present") on EVERY run, regardless of the
   watermark window, until operator closes it. Each card shows its stored
   operator_action as the one step and operator_target as the link. Closing
   is complete_operator_action (or the dashboard "Mark done"); until then it
@@ -365,26 +385,48 @@ on conflict (agent_code) do nothing;
      + short-id. Its receipt draft shows inline per the EMBED rule. Order within
      this bucket by the advisory critic verdict: a flagged medium/high Agent
      Review sorts above a clean or unreviewed one (per the CRITIC VERDICT rule).
-   - **B. Your hands** - operator personally acts on an outside system (claim a
-     listing and paste, make a call, confirm a fact, send a drafted email). No
-     Claude session needed. Action: the one concrete step + the exact target
-     (URL, phone, address, or file path). Driven by the Needs Operator column: every
-     Needs Operator card renders here every run (see the always-shown hard rule),
-     showing its stored operator_action + operator_target. Any item not yet
-     routed to Needs Operator is still mined from applied / Agent Review receipts
-     whose Follow-up recommendation hands operator a personal step (the Phase 1
-     fallback). This is the bucket that used to vanish; it renders every run
-     until cleared.
+   - **B. Needs you present** - the item cannot move without the operator, but
+     that does NOT mean the operator has to do it themselves. TAG every card in
+     this bucket as one of two kinds, and never leave a card untagged:
+     - `[hands-only]` - only the operator can do this: make the call, confirm a
+       fact only they know, pick images by eye, sign something, click a button in
+       an account no agent can reach. Action: the one concrete step + the exact
+       target (URL, phone, address, or file path).
+     - `[session-spawnable]` - this is agent work that merely needs the operator
+       PRESENT, for a credential, an approval, or a live-surface write (publish
+       the posts, drive their logged-in dashboard, install a deliverable into a
+       live file). Action: the one concrete step AND a paste-ready Goal Prompt,
+       exactly like bucket C. They spawn a session from the briefing and supervise.
+     Driven by the Needs Operator column: every Needs Operator card renders here
+     every run (see the always-shown hard rule), showing its stored
+     operator_action + operator_target. Any item not yet routed to Needs Operator
+     is still mined from applied / Agent Review receipts whose Follow-up
+     recommendation hands operator a personal step (the Phase 1 fallback). This is
+     the bucket that used to vanish; it renders every run until cleared.
+     The old framing here was "No Claude session needed." That is retired: it was
+     FALSE in practice, because operators routinely spawn a session straight from
+     the briefing to clear a Needs Operator card. The real axis is not
+     operator-vs-agent, it is hands-only vs session-spawnable-with-the-operator.
+     When a card is genuinely ambiguous, tag it `[session-spawnable]`. The errors
+     are not symmetric: mis-tagging hands-only work as spawnable wastes one
+     session, but mis-tagging spawnable work as hands-only silently pushes
+     agent-executable work back onto the operator's hands, which is the entire
+     thing Open Engine exists to prevent.
    - **C. Fresh Claude session** - local-runtime work (write a post, run
-     LOCAL-runtime drafts). Action: a paste-ready Goal Prompt (generator
-     below). Link: the board view + short-id.
+     LOCAL-runtime drafts), PLUS every Agent Todo row that no scheduled lane can
+     ever claim (see the CLAIMABILITY SPLIT rule). Action: a paste-ready Goal
+     Prompt (generator below). Link: the board view + short-id.
    - **D. Promote from Standing** - an intake promotion decision. Action:
      promote or archive the Standing draft. Link: the standing board view.
    Paused-project items are excluded per the hard rule and shown only as the
    one-line suppressed count.
 4. **What happens next without you.** The scheduled lanes' next runs
    (executors, queue runner, closeout controller, triage), so silence reads
-   as normal instead of broken.
+   as normal instead of broken. Name ONLY the low-risk Agent Todo rows as
+   happening on the next scheduled run (per the CLAIMABILITY SPLIT rule). Never
+   describe Agent Todo as a whole here: the moment one medium sits in that
+   column, "the executors will claim these" becomes a false promise about a row
+   nothing is coming for.
 
 ## Goal Prompt Generator (separate-chat items)
 
@@ -426,15 +468,21 @@ kind (no CDN scripts, fonts, or remote images; inline all CSS):
   Needs Operator, Agent Done), each a stack of compact task cards (id short-hash,
   title, risk). This is orientation, not the action list.
 - **What needs you** as the primary section: a card list in the same
-  four-bucket order as the markdown (A board decisions, B your hands, C fresh
-  Claude session, D promote from Standing), with any held questions floated to
-  the top. Each card carries its ONE action inline AND its link as a real
-  `<a href>` (the status-filtered board view, or the external/file work
+  four-bucket order as the markdown (A board decisions, B needs you present,
+  C fresh Claude session, D promote from Standing), with any held questions
+  floated to the top. Each card carries its ONE action inline AND its link as a
+  real `<a href>` (the status-filtered board view, or the external/file work
   product), plus its reviewer verdict tag when present. Bucket C items put the
   Goal Prompt in a `<pre>` block with a short "copy this into a fresh session"
-  note above it. Bucket B items whose deliverable is only in the receipt embed
-  the draft excerpt in a `<pre>` block. Paused-project items appear only as the
-  one-line suppressed count, not as cards.
+  note above it. Bucket B cards show their `[hands-only]` / `[session-spawnable]`
+  tag on the card, and every `[session-spawnable]` card gets the same `<pre>`
+  Goal Prompt treatment as bucket C. Bucket B items whose deliverable is only in
+  the receipt embed the draft excerpt in a `<pre>` block. Paused-project items
+  appear only as the one-line suppressed count, not as cards.
+- In the board-state column view, tag each Agent Todo card with whether a lane
+  can claim it (low = claimable on the next scheduled run, medium/high = needs an
+  attended session), so the orientation view cannot imply the column is uniformly
+  queued either.
 - Wide content (any Goal Prompt, long titles) scrolls inside its own
   `overflow-x: auto` container; the page body never scrolls sideways.
 - Keep it private / default-unshared (operator board state is not public).
