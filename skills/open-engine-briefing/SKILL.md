@@ -79,6 +79,35 @@ withdrawn in the brain, then re-derived from scratch twice afterward, with the
 withdrawal sitting in the brain the whole time. Confidence in a freshly built
 causal story is the tell, exactly as in STEP 0.
 
+## STEP 0.7 — PRIOR-BRIEFING RECALL (BEFORE RENDERING "WHAT NEEDS YOU")
+
+The briefing has memory: every run ends in a capture_thought tagged
+["open-engine","briefing"] carrying the full rendered map. Read it back.
+Before rendering, search_thoughts for the last 1-2 briefing captures (tag
+"briefing"; bounded — never walk the full history) and thread them in:
+
+1. AGE every waiting item. An item in "What needs you" that also appeared in
+   the prior briefing and is still waiting renders with "carried N briefings".
+   Aging is a signal the operator should see, not a fresh line each run.
+2. TRACK SPAWN-OUTS. For a bucket-C / [session-spawnable] item whose Goal
+   Prompt was already issued in a prior briefing:
+   - its task has since moved (claimed / working / done) => render as
+     "in flight, likely spawned (goal prompt issued <YYYY-MM-DD>)", NOT as
+     needing the operator;
+   - it has NOT moved after 2+ briefings => flag "goal prompt issued
+     <YYYY-MM-DD>, task has not moved — did the spawn happen?". Inference,
+     not proof: phrase it as the question, never as an assertion.
+3. COLLAPSE DUPLICATES. Two waiting items pointing at the same task id,
+   action item, or deliverable merge into one line that says it merged them.
+4. EMIT THE DELTA. One line in or directly under the Board pulse: what is new
+   since the last briefing, what cleared, what still waits.
+This step is READ-ONLY and adds zero writes; the end-of-run capture (unchanged)
+is what makes the next run's recall possible. It is also where the "DO NOT
+RE-SURFACE SETTLED STEPS" check runs: a mined step that appeared in a prior
+briefing and has no tracking card is dropped once outside its watermark window.
+If no prior capture is found (first run, or captures purged), say so in the
+Board pulse and render without annotations rather than guessing.
+
 ## STEP 0.5 — DISCOVERY BEFORE DIALOGUE
 
 Front-load. Every mid-run question costs the operator a context switch. The goal
@@ -280,6 +309,9 @@ by slug and holds anything it cannot resolve.
   single "Paused (suppressed): <project> - N items held until unpaused" line.
   Do not itemize paused work as if it needs the operator now.
 - Operator-facing voice: no em dashes, no banned words, natural prose.
+- Date discipline in the rendered map and the end-of-run capture: every
+  relative date term is immediately followed by the absolute date, e.g.
+  "tonight (2026-07-18)". The capture is durable text read by later runs.
 - Never render a confident briefing over partial reads. If a tool fails, say
   exactly what could not be read.
 - If the render fails, do NOT advance the watermark (re-covering a window is
@@ -366,6 +398,8 @@ on conflict (agent_code) do nothing;
 ## Session Operating Map structure
 
 1. **Board pulse.** One line: window covered, counts by status, health flags.
+   Plus the STEP 0.7 delta line: new since last briefing / cleared / still
+   waiting.
 2. **What happened.** Grouped, plain language: finished and filed; finished
    awaiting your review; held with a question; failed or retried; new drafts
    created; promoted on its own. Held items use Delegate-and-Verify framing:
