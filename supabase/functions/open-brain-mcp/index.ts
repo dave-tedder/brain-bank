@@ -67,6 +67,13 @@ import {
   receiptForAppliedStatus,
   receiptForTaskTool,
 } from "./_agent_tasks.ts";
+import {
+  DELIVERABLE_MAX_BYTES,
+  DELIVERABLES_BUCKET,
+  deliverableContentType,
+  validateDeliverableContent,
+  validateDeliverablePath,
+} from "./_deliverables.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -3570,6 +3577,136 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error writing agent ledger: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "put_deliverable",
+  {
+    title: "Put Deliverable (cloud on-ramp)",
+    description:
+      "Store one executor deliverable in the private 'deliverables' storage bucket. Cloud-runtime lanes use this instead of a local deliverables/ file write; the closeout sweep later syncs bucket objects into the repo, so git stays the single durable store. Path is <project-slug>/<task-shortid>-<name>.<md|html|txt|json|csv>. Objects are immutable: writing an existing path is refused — pick a new task-scoped filename. Text content only, 512 KB cap. Not for code diffs, not for secrets, not a general file store.",
+    inputSchema: {
+      path: z.string().min(1).describe(
+        "<project-slug>/<task-shortid>-<name>.<ext> — same shape as a local deliverables/ path, without the deliverables/ prefix.",
+      ),
+      content: z.string().min(1).describe("Full text content of the deliverable."),
+    },
+  },
+  async ({ path, content }: { path: string; content: string }) => {
+    logToolInvocation("put_deliverable", { path }, "mcp");
+    try {
+      const cleanPath = validateDeliverablePath(path);
+      const cleanContent = validateDeliverableContent(content);
+      const { error } = await supabase.storage
+        .from(DELIVERABLES_BUCKET)
+        .upload(cleanPath, new Blob([cleanContent]), {
+          contentType: deliverableContentType(cleanPath),
+          upsert: false,
+        });
+      if (error) {
+        const exists = /exists|duplicate/i.test(error.message ?? "");
+        throw new Error(
+          exists
+            ? `DELIVERABLE_EXISTS: '${cleanPath}' is already stored and objects are immutable. Write a new task-scoped filename (e.g. bump a -v2 suffix) instead of overwriting.`
+            : error.message,
+        );
+      }
+      return textToolResponse({
+        receipt: "DELIVERABLE_STORED",
+        path: cleanPath,
+        bytes: new TextEncoder().encode(cleanContent).length,
+        durable_note:
+          "Bucket object stored. The closeout sweep commits it to the repo; record this path in the receipt as deliverables/<path> @ BUCKET.",
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error storing deliverable: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "get_deliverable",
+  {
+    title: "Get Deliverable",
+    description:
+      "Fetch one deliverable's full text from the private 'deliverables' storage bucket by <project-slug>/<filename> path. Used by critic lanes to read an artifact the repo does not have yet, and by the closeout sweep.",
+    inputSchema: {
+      path: z.string().min(1),
+    },
+  },
+  async ({ path }: { path: string }) => {
+    logToolInvocation("get_deliverable", { path }, "mcp");
+    try {
+      const cleanPath = validateDeliverablePath(path);
+      const { data, error } = await supabase.storage
+        .from(DELIVERABLES_BUCKET)
+        .download(cleanPath);
+      if (error) throw new Error(error.message);
+      const content = await data.text();
+      return textToolResponse({ path: cleanPath, content });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error fetching deliverable: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "list_deliverables",
+  {
+    title: "List Deliverables",
+    description:
+      "List objects in the private 'deliverables' storage bucket, optionally under one <project-slug>/ prefix. Returns paths, sizes, and timestamps. Used by the closeout sweep to find cloud-written artifacts not yet committed to the repo.",
+    inputSchema: {
+      prefix: z.string().optional().describe(
+        "Optional project-slug folder to list; omit to list every folder.",
+      ),
+    },
+  },
+  async ({ prefix }: { prefix?: string }) => {
+    logToolInvocation("list_deliverables", { prefix }, "mcp");
+    try {
+      const objects: {
+        path: string;
+        bytes: number | null;
+        updated_at: string | null;
+      }[] = [];
+      const folders: string[] = [];
+      if (prefix?.trim()) {
+        folders.push(prefix.trim().replace(/\/+$/, ""));
+      } else {
+        const { data: rootEntries, error: rootError } = await supabase.storage
+          .from(DELIVERABLES_BUCKET)
+          .list("", { limit: 200 });
+        if (rootError) throw new Error(rootError.message);
+        for (const entry of rootEntries ?? []) {
+          if (!entry.id) folders.push(entry.name); // folders have no object id
+        }
+      }
+      for (const folder of folders) {
+        const { data: entries, error } = await supabase.storage
+          .from(DELIVERABLES_BUCKET)
+          .list(folder, { limit: 500 });
+        if (error) throw new Error(error.message);
+        for (const entry of entries ?? []) {
+          if (!entry.id) continue; // skip nested folders
+          objects.push({
+            path: `${folder}/${entry.name}`,
+            bytes: (entry.metadata as { size?: number } | null)?.size ?? null,
+            updated_at: entry.updated_at ?? null,
+          });
+        }
+      }
+      return textToolResponse({ count: objects.length, objects });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error listing deliverables: ${(err as Error).message}`,
       );
     }
   },
