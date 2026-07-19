@@ -6,10 +6,13 @@ import {
   assertNoActiveActionItemDraft,
   assertNoActiveThoughtDraft,
   assertNoDuplicateOpenFollowUp,
+  assertPromotablePacketShape,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
   buildFollowUpTaskRecord,
   buildThoughtIntakeRecord,
+  FOLLOW_UP_TEMPLATE_BOUNDARIES,
+  FOLLOW_UP_TEMPLATE_DO_STEPS,
 } from "./_agent_intake.ts";
 
 const baseInput = {
@@ -591,4 +594,93 @@ Deno.test("action-item/thought/follow-up intake carry the requires_local default
     },
   });
   assertEquals(fromThought.requires_local, false);
+});
+
+// --------------------------------------------------------------------------
+// GAP B — executable follow-up packet params + template promote guard
+// (spec 2026-07-19 §5.2 + §5.3, decision D3 = REFUSE with override).
+// --------------------------------------------------------------------------
+
+const followUpBase = {
+  parent_task_id: "3f2f2f2f-0000-4000-8000-000000000001",
+  desired_outcome: "Fix the flagged em dashes in the staged claim kit.",
+  context: "Parent produced the kit; critic flagged voice issues.",
+};
+
+Deno.test("follow-up without overrides still gets the Standing template", () => {
+  const record = buildFollowUpTaskRecord(followUpBase);
+  assertEquals(record.do_steps, FOLLOW_UP_TEMPLATE_DO_STEPS);
+  assertEquals(record.boundaries, FOLLOW_UP_TEMPLATE_BOUNDARIES);
+  assertEquals(record.intake_source, "agent-follow-up");
+});
+
+Deno.test("follow-up with full execution overrides is born executable", () => {
+  const record = buildFollowUpTaskRecord({
+    ...followUpBase,
+    do_steps: "Remove every em dash; fix the credential over-claims listed.",
+    acceptance_criteria:
+      "Both critic flags cleared in a revised deliverable; address unchanged.",
+    boundaries:
+      "Write-safe: stage a revised copy under deliverables/ only; never send.",
+  });
+  assertEquals(
+    record.do_steps,
+    "Remove every em dash; fix the credential over-claims listed.",
+  );
+  assert(!record.boundaries.startsWith("Manual follow-up draft only."));
+  // output_handoff falls back to the template when omitted
+  assert(record.output_handoff.length > 0);
+});
+
+Deno.test("follow-up with partial execution overrides throws (all-or-none)", () => {
+  assertThrows(
+    () =>
+      buildFollowUpTaskRecord({
+        ...followUpBase,
+        do_steps: "Remove every em dash.",
+        // acceptance_criteria and boundaries missing -> incoherent packet
+      }),
+    Error,
+    "together",
+  );
+});
+
+Deno.test("promote guard refuses a template-bodied follow-up", () => {
+  assertThrows(
+    () =>
+      assertPromotablePacketShape(
+        {
+          intake_source: "agent-follow-up",
+          do_steps: FOLLOW_UP_TEMPLATE_DO_STEPS,
+        },
+        false,
+      ),
+    Error,
+    "PROMOTION_REFUSED_TEMPLATE_BODY",
+  );
+});
+
+Deno.test("promote guard honors allow_template_body override", () => {
+  assertPromotablePacketShape(
+    { intake_source: "agent-follow-up", do_steps: FOLLOW_UP_TEMPLATE_DO_STEPS },
+    true,
+  ); // must not throw
+});
+
+Deno.test("promote guard passes an execution-shaped follow-up", () => {
+  assertPromotablePacketShape(
+    { intake_source: "agent-follow-up", do_steps: "Remove every em dash." },
+    false,
+  ); // must not throw
+});
+
+Deno.test("promote guard leaves action-item stubs alone (warn-only stays)", () => {
+  assertPromotablePacketShape(
+    {
+      intake_source: "action-item-promotion",
+      do_steps:
+        "Review the linked action item, expand this draft into a complete task packet if it is still worth doing, then use the normal human promotion path when ready.",
+    },
+    false,
+  ); // must not throw — D3 refuses only the follow-up template
 });

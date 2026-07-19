@@ -36,10 +36,12 @@ import {
   assertNoActiveActionItemDraft,
   assertNoActiveThoughtDraft,
   assertNoDuplicateOpenFollowUp,
+  assertPromotablePacketShape,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
   buildFollowUpTaskRecord,
   buildThoughtIntakeRecord,
+  THOUGHT_TEMPLATE_PREFIX,
 } from "./_agent_intake.ts";
 import {
   AGENT_TASK_STATUSES,
@@ -2343,14 +2345,21 @@ server.registerTool(
       preferred_agent: z.string().min(1).optional().describe(
         "Optional promote-time routing override; null leaves the intake-set preferred_agent untouched.",
       ),
+      allow_template_body: z.boolean().optional().describe(
+        "Override for the follow-up template refusal: promote a template-bodied " +
+          "follow-up stub anyway, knowingly, for attended human review only. " +
+          "Without it, promoting an unmodified follow-up draft is refused because " +
+          "it guarantees a PACKET_INVALID bounce.",
+      ),
     },
   },
   async (
-    { task_id, promoted_by, note, preferred_agent }: {
+    { task_id, promoted_by, note, preferred_agent, allow_template_body }: {
       task_id: string;
       promoted_by?: string;
       note?: string;
       preferred_agent?: string;
+      allow_template_body?: boolean;
     },
   ) => {
     logToolInvocation("promote_agent_task_intake", {
@@ -2370,6 +2379,10 @@ server.registerTool(
       const task = await loadAgentTaskForTool(task_id);
       if (!task) throw new Error(`Task not found: ${task_id}`);
       assertIntakePromotionAllowed(task);
+      assertPromotablePacketShape(
+        task as { intake_source?: string | null; do_steps?: string | null },
+        allow_template_body ?? false,
+      );
       const { data, error } = await supabase.rpc(
         "promote_agent_task_intake",
         {
@@ -2396,10 +2409,21 @@ server.registerTool(
       // (a real instance sat stranded 11 days). Warn at promote time.
       const promotedIntakeSource = (data as { intake_source?: string } | null)?.intake_source ?? null;
       const promotedDoSteps = (data as { do_steps?: string } | null)?.do_steps ?? "";
-      const intakeShapeWarning = promotedIntakeSource === "action-item-promotion" &&
-          promotedDoSteps.startsWith("Review the linked action item")
-        ? `This row is a verbatim action-item stub, not an executable packet: its do_steps are still the intake template ("Review the linked action item, expand this draft..."). A scheduled lane WILL claim it, hold it to Agent Needs Input, and burn the rep. Expand it into a real packet before promoting, or promote knowingly for attended human review only.`
-        : null;
+      let intakeShapeWarning: string | null = null;
+      if (
+        promotedIntakeSource === "action-item-promotion" &&
+        promotedDoSteps.startsWith("Review the linked action item")
+      ) {
+        intakeShapeWarning =
+          `This row is a verbatim action-item stub, not an executable packet: its do_steps are still the intake template ("Review the linked action item, expand this draft..."). A scheduled lane WILL claim it, hold it to Agent Needs Input, and burn the rep. Expand it into a real packet before promoting, or promote knowingly for attended human review only.`;
+      } else if (
+        (promotedIntakeSource === "brain-bank-capture" ||
+          promotedIntakeSource === "session-log-closeout") &&
+        promotedDoSteps.startsWith(THOUGHT_TEMPLATE_PREFIX)
+      ) {
+        intakeShapeWarning =
+          `This row is a verbatim thought-intake stub, not an executable packet: its do_steps are still the intake template ("Review the source thought..."). A scheduled lane WILL claim it and hold it to Agent Needs Input. Expand it into a real packet before promoting, or promote knowingly for attended human review only.`;
+      }
       return textToolResponse({
         receipt: "INTAKE_PROMOTED",
         // The S3 hardening batch made the SQL function write an AGENT STATUS
