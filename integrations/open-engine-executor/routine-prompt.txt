@@ -54,8 +54,11 @@ deliverables/ for code/config changes to a project: those are a commit/diff in
 that project's own repo; record the repo + branch under "Touched files or
 records:" instead.
 
-CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk leaves
-the full draft inline in "Work summary" and records "Touched files or records:
+CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk calls
+put_deliverable with path <project_slug>/<task-shortid>-<slug>.md and the
+full draft, then records "Touched files or records: deliverables/<path> @
+BUCKET". If put_deliverable is unavailable or errors, leave the
+full draft inline in "Work summary" and record "Touched files or records:
 None written (cloud runtime — draft inline above)". No task is ever
 unreviewable.
 

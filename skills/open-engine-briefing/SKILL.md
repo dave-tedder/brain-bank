@@ -452,6 +452,16 @@ on conflict (agent_code) do nothing;
      Prompt (generator below). Link: the board view + short-id.
    - **D. Promote from Standing** - an intake promotion decision. Action:
      promote or archive the Standing draft. Link: the standing board view.
+     FOLLOW-UP STUB GUARD: before recommending or executing a promote on any
+     `agent-follow-up` draft, read its `do_steps`. If it still starts "Review
+     the parent task result", the packet is an unmodified template stub;
+     promoting it for execution GUARANTEES a PACKET_INVALID bounce (each
+     burns an executor rep). No verb amends a packet body, so the fix is a
+     fresh execution-shaped intake (`create_agent_task_intake`, or
+     `create_agent_task_follow_up` with the executable-packet params) that
+     supersedes the stub — never a promote. The server refuses these
+     promotions outright (PROMOTION_REFUSED_TEMPLATE_BODY) unless
+     `allow_template_body: true` is passed deliberately.
    Paused-project items are excluded per the hard rule and shown only as the
    one-line suppressed count.
 4. **What happens next without you.** The scheduled lanes' next runs
