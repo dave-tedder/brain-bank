@@ -39,6 +39,9 @@ steps:
         apk add --no-cache postgresql-client
         psql "$$LOCAL_DB_URL" -f gcp/gcp_compat_start.sql
         
+        # Log the database roles to verify creation
+        psql "$$LOCAL_DB_URL" -c "SELECT rolname FROM pg_roles"
+        
         # Strip pg_cron and pg_net extension statements from migrations for standard Cloud SQL compatibility
         sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_cron/-- CREATE EXTENSION IF NOT EXISTS pg_cron/g' supabase/migrations/0000_extensions.sql
         sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_net/-- CREATE EXTENSION IF NOT EXISTS pg_net/g' supabase/migrations/0000_extensions.sql
