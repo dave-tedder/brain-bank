@@ -29,13 +29,13 @@ which node && which git && which supabase && node --version | head -1 && \
   { which pbcopy || which xclip || which clip || which clip.exe; } && echo "toolkit OK"
 ```
 
-Passes silently if all present and Node >= 18. On failure:
+Passes silently if all present and Node >= 20. On failure:
 
 - **`which supabase` empty:** platform-matched install instructions.
   - macOS: `brew install supabase/tap/supabase`
   - Linux: `curl -fsSL https://supabase.com/install.sh | sh`
   - Windows (Git Bash): download the installer from [supabase.com/docs/guides/cli](https://supabase.com/docs/guides/cli#installation)
-- **Node < 18:** link to [nodejs.org](https://nodejs.org) with "install v20 LTS".
+- **Node < 20:** link to [nodejs.org](https://nodejs.org) with "install v20 LTS". Node 20 is what CI pins and what `dashboard/package.json` declares in `engines`; 18 mostly works but is not what gets tested.
 - **No clipboard tool:** mac should have `pbcopy` pre-installed; Linux `sudo apt install xclip` (Debian/Ubuntu) or `sudo dnf install xclip` (Fedora); Git Bash has `clip`; pure PowerShell/cmd.exe is unsupported for v1, use Git Bash or WSL.
 
 Halt if pre-flight fails. Do not proceed to state scan until all checks pass.
@@ -205,7 +205,7 @@ Each of deploy-from-scratch.md's Steps 1-10 becomes a conversational beat. The s
 |---|---|---|---|
 | **1. Clone** | "You're in the repo already (the skill only fires inside a brain-bank clone), so clone is done. Moving on." | `ls README.md supabase profile.example.json` to confirm structure. | Nothing. |
 | **1.5. Verify skill registration** | "Checking that the repo's Claude Code skills are registered. The repo ships `.claude/skills/<name>` symlinks pointing at `skills/<name>` — Claude Code does not scan a repo-root `skills/` folder by itself." | For each of `auto-resolve-patterns`, `brain-bank-setup`, `queue-runner`: check `.claude/skills/<name>/SKILL.md` resolves (`ls .claude/skills/<name>/SKILL.md`). If a link is missing or checked out as a plain text file (Windows without Developer Mode does this), recreate it: `mkdir -p .claude/skills && ln -sfn ../../skills/<name> .claude/skills/<name>` (on Windows, enable Developer Mode or use `mklink /D`). | Nothing on macOS/Linux. Windows operators enable Developer Mode if links came out broken. |
-| **2. Create Supabase project** | "Open [supabase.com/dashboard](https://supabase.com/dashboard), New Project. Name: whatever you like. Password: save to your password manager. Region: closest to you. Free tier. Takes ~2 min to provision." Link + two bullets on what to copy back (Reference ID, API URL). **Already-have-a-project path:** "If you already have an empty Supabase project you want to use, paste the 20-char Reference ID instead of creating a new one. 'Empty' means no `thoughts` table yet (Step 7 will apply the 12 migrations; it will fail loudly if the schema already exists, which is fine, you're not resuming a prior install here)." | When operator confirms project ready, ask for the project ref. Validate shape with regex `^[a-z0-9]{20}$`. If the ref doesn't match that pattern, say: "That looks like a URL or the wrong format. The ref is 20 lowercase letters and numbers, found at Dashboard > Project Settings > General > Reference ID. It looks like `abcdefghij1234567890`." | Click through dashboard, paste project ref when prompted. Or paste the ref of an existing empty project. |
+| **2. Create Supabase project** | "Open [supabase.com/dashboard](https://supabase.com/dashboard), New Project. Name: whatever you like. Password: save to your password manager. Region: closest to you. Free tier. Takes ~2 min to provision." Link + two bullets on what to copy back (Reference ID, API URL). **Already-have-a-project path:** "If you already have an empty Supabase project you want to use, paste the 20-char Reference ID instead of creating a new one. 'Empty' means no `thoughts` table yet (Step 7 will apply every migration in `supabase/migrations/`; it will fail loudly if the schema already exists, which is fine, you're not resuming a prior install here)." | When operator confirms project ready, ask for the project ref. Validate shape with regex `^[a-z0-9]{20}$`. If the ref doesn't match that pattern, say: "That looks like a URL or the wrong format. The ref is 20 lowercase letters and numbers, found at Dashboard > Project Settings > General > Reference ID. It looks like `abcdefghij1234567890`." | Click through dashboard, paste project ref when prompted. Or paste the ref of an existing empty project. |
 | **3. Link the CLI** | "Running `supabase login`: browser will open. Then `supabase link --project-ref <your-ref>`. The CLI may or may not prompt for your DB password here, depending on version. v2.75+ defers the password prompt to Step 7 (`supabase db push`); have it ready either way." | `supabase login` via Bash (opens browser, blocks until auth). Then `supabase link --project-ref $REF`. Check `ls supabase/.temp/project-ref`. | Approves browser auth, pastes DB password if prompted (here or at Step 7). |
 | **3.5. Profile Q&A** | [Full Q&A catalog below] | After last question, write `supabase/functions/_shared/profile.json` via Write tool. **The bundler requires this exact path**: `loadProfile()` in `_shared/profile.ts` imports `profile.json` as a sibling module (`import profileDefaults from "./profile.json" with { type: "json" }`), and the Supabase CLI bundler resolves imports relative to the source file. A `profile.json` at repo root (or anywhere else) is invisible to the bundler and every deploy 400s with `Module not found`. Run `python3 -m json.tool supabase/functions/_shared/profile.json > /dev/null` to verify it parses. | Answer 13 questions (accept defaults on 10-13). |
 | **4. Confirm profile.json** | "Your `profile.json` is written. Verifying it parses." | Already verified in 3.5. Just announce. | Nothing. |
@@ -316,13 +316,34 @@ Three options:
 
 On `1`: Read `references/cron-branch.md` and run that sub-flow (Task 4 wires this up).
 On `2`: `open docs/deploy-from-scratch.md`, point at Step 12.
-On `3`: wrap up.
+On `3`: proceed to the dashboard branch menu.
+
+After the cron branch completes (or is skipped), present:
+
+```text
+Last one. Want to deploy the web dashboard? It gives you a browsing UI, semantic
+search, a chat interface, and the digest archive. It is entirely optional; the
+engine works without it.
+
+  1. Point me at docs/dashboard-deploy.md (Railway and Vercel both covered)
+  2. Skip the dashboard
+```
+
+On `1`: `open docs/dashboard-deploy.md`, then say the four things that actually cost people time:
+
+> "Four things to get right, in order of how much they hurt. First, set the deploy platform's root directory to `dashboard/`, not the repo root, or the build will not find the app. Second, all six env vars are required at runtime, and preview builds need them too; the two people forget are `BRAIN_BANK_URL` and `BRAIN_BANK_API_KEY`, and missing them does not fail the build, it fails `/chat` at request time. Third, never give `SUPABASE_SERVICE_ROLE_KEY` a `NEXT_PUBLIC_` prefix; that key bypasses row-level security and the prefix ships it to the browser. Fourth, and this is the one that actually matters: do not move `src/middleware.ts`. It is the only authentication on the dashboard, and Next.js silently ignores a root-level `middleware.ts` when the app directory is `src/app/`. No warning, no build failure, just your entire memory system served to anonymous traffic. After your first deploy, confirm the build output contains a `ƒ Middleware` line. If it is absent, middleware is not running and your dashboard is public."
+
+Then offer to verify: hit the deployed root URL unauthenticated and confirm it redirects to `/login`. If it does not, stop and check the middleware.
+
+On `2`: wrap up.
+
+There is no guided sub-flow for this branch. The doc is a pointer, not a wizard, because the deploy happens in a web console this skill cannot drive.
 
 When wrapping up:
 
 > "Setup complete. Capture your first real thought with `source .env && curl -X POST "$SUPABASE_URL/functions/v1/open-brain-mcp" -H "x-brain-key: $MCP_ACCESS_KEY" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"capture_thought","arguments":{"content":"hello world","source":"rest"}}}'` or wait for the morning digest if you scheduled it. Operating guide: `docs/troubleshooting.md` when things break."
 
-**Both branches are live.** Slack: `references/slack-branch.md`. Cron: `references/cron-branch.md`. On-failure routing uses `references/error-recovery.md`.
+**Slack and cron are guided branches.** Slack: `references/slack-branch.md`. Cron: `references/cron-branch.md`. On-failure routing uses `references/error-recovery.md`. The dashboard branch is pointer-only (`docs/dashboard-deploy.md`); the deploy happens in a web console this skill cannot drive.
 
 ## Flow conventions
 
