@@ -14,15 +14,22 @@
 // safe. Either endpoint can fail without blocking the other.
 //
 // Paste this into a new Apps Script project at script.google.com,
-// fill in the three constants below, save, authorize, and set up
-// a daily time-driven trigger on captureAndSync().
+// set BRAIN_BANK_BASE + BRAIN_KEY in Project Settings > Script
+// Properties, fill in the calendar constants below, save, authorize,
+// and set up a daily time-driven trigger on captureAndSync().
 //
 // Full walkthrough: docs/capture-sources/calendar-sync.md
 // ============================================================
 
-// Replace all three values below with yours.
-var BRAIN_BANK_BASE = 'https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp';
-var BRAIN_KEY = 'YOUR_BRAIN_KEY';
+// BRAIN_BANK_BASE and BRAIN_KEY live in Project Settings > Script
+// Properties, not in this file, so rotating your key is a one-field
+// update instead of a code edit. A hardcoded key silently fails the
+// moment you rotate MCP_ACCESS_KEY in Supabase and forget to re-paste
+// it here (it just starts 401ing with no error you would notice). Set
+// both properties before the first run (see the setup doc, Step 3).
+var _props = PropertiesService.getScriptProperties();
+var BRAIN_BANK_BASE = _props.getProperty('BRAIN_BANK_BASE');
+var BRAIN_KEY = _props.getProperty('BRAIN_KEY');
 
 // Google Calendar IDs to sync. For your primary calendar, use the
 // Gmail address the calendar belongs to. For secondary calendars,
@@ -81,6 +88,9 @@ function classifyEvent(title, calendarName) {
 // Trigger: daily (Time-driven), pre-digest (e.g. 3-5 AM window).
 // ============================================================
 function captureAndSync() {
+  if (!BRAIN_BANK_BASE || !BRAIN_KEY) {
+    throw new Error('Missing Script Property BRAIN_BANK_BASE or BRAIN_KEY. Set both in Project Settings > Script Properties.');
+  }
   var now = new Date();
   var windowEnd = new Date(now);
   windowEnd.setDate(windowEnd.getDate() + SYNC_WINDOW_DAYS);

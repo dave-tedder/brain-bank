@@ -4,7 +4,7 @@
 
 -- ---------------------------------------------------------------------------
 -- Table: projects
--- Holds operator metadata for topics Dave wants to pin, override, or annotate.
+-- Holds operator metadata for topics the operator wants to pin, override, or annotate.
 -- Topics auto-surface in the rollup without a row here; this table is the
 -- optional explicit layer. slug joins to a thoughts.metadata->'topics' element.
 -- ---------------------------------------------------------------------------

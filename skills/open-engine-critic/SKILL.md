@@ -104,9 +104,26 @@ Without `execute_sql`, use `list_agent_tasks` for `Agent Review` and
 
 For each eligible task, read the whole picture before judging:
 - the executor's `AGENT DONE` (or `AGENT NEEDS OPERATOR`) receipt;
-- the deliverable — either the `deliverables/<slug>/...` file named under
-  "Touched files or records:", or the inline draft in "Work summary" (cloud
-  fallback), or the linked repo diff for a code change;
+- the deliverable, resolved in this order:
+  1. LOCAL DISK — if this runtime can read the repo checkout, read the
+     `deliverables/<slug>/...` file named under "Touched files or records:".
+  2. GITHUB API — otherwise fetch it from `main` (executors do not push per
+     artifact under architecture B; the sweep lane pushes the batch, so the
+     current `main` copy is the reviewed target):
+     ```
+     curl -sS -H "Authorization: Bearer $BB_REPO_READ_TOKEN" \
+       -H "Accept: application/vnd.github.raw+json" \
+       "https://api.github.com/repos/<your-org>/<your-repo>/contents/deliverables/<path>?ref=main"
+     ```
+     A 404 usually means the sweep has not pushed it yet; fall through if so.
+  3. BUCKET — `get_deliverable {"path": "<slug>/<file>"}` (receipts that say
+     `@ BUCKET`).
+  4. INLINE — the draft left in "Work summary" (cloud fallback).
+
+  Flag "unverifiable" ONLY when every applicable path above actually failed,
+  and name which ones you tried. An unread artifact is a fetch failure to
+  report, not a work defect — "flagged: unverifiable" must never again mean
+  "I did not have the file.";
 - the task's `acceptance_criteria` and `boundaries` (via `get_agent_task`).
 
 Then run this check, defaulting to FLAG on any doubt:

@@ -108,6 +108,14 @@ paths (same pattern as `integrations/*/config.json`). Missing or unresolved
 routes hold the task; the controller never guesses from the current working
 directory.
 
+Because the registry is gitignored, it does NOT exist in a fresh git worktree —
+only in the main checkout. Running closeout from a worktree therefore dies with
+`ENOENT: ... project-closeout-registry.json` before it can route anything. Run
+closeout from the main checkout (which is where the scheduled lanes run), or
+pass an absolute path to the main checkout's `closeout-run.sh`. This is working
+as intended, not a bug: the registry points at real project trackers outside
+this repo, and a worktree has no business writing to them under a stale route.
+
 ### OE-8B draft writer (`--write-drafts`)
 
 `--write-drafts` writes one pending-closeout draft per APPLYABLE project batch
@@ -186,7 +194,17 @@ node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply
      registry. Appends are marker-guarded (`open-engine closeout <date>
      tasks: …`) so re-runs report `unchanged`; existing content is never
      rewritten.
-  3. One `capture_thought` per project batch, tagged with the route's
+  3. Plan-doc sync per plan-doc-seeded task in the batch. A task carrying a
+     `plan-doc: <path>` source entry has its plan-doc folder grepped for the
+     task short-id tag `[OE:<shortid>]`; every carded line is flipped
+     (`[ ]`->`[x]` where a checkbox is present, `carded <date>`->`done
+     <apply-date>`), across both the plan doc and the co-located tracker todo.
+     Session logs are skipped (append-only history). The gate refuses to apply
+     a plan-doc task whose tagged line cannot be located
+     (`PLAN_DOC_LINE_NOT_FOUND`) or whose path cannot be resolved
+     (`PLAN_DOC_PATH_UNRESOLVED`) — no apply without doc sync. The flip is
+     idempotent, so `--resume` replays it harmlessly.
+  4. One `capture_thought` per project batch, tagged with the route's
      `capture_tag` plus `open_engine`.
 - The controller never runs git. Committing closeout writes stays
   human/session-side (locked decision, Session 268).

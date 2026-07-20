@@ -17,10 +17,10 @@ import { partitionQuarantine, selectPagesToCompile } from "./_selection.ts";
 import { selectContradictionLintPages } from "../_shared/wiki-lint-scope.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import { loadProfile } from "../_shared/profile.ts";
+import { authenticateAccessKey, clampInt } from "../_shared/access-key.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const FUNCTION_SLUG = "compile-pages";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
@@ -525,29 +525,11 @@ async function compilePage(
     });
     if (newThoughts.length === 0) return { updated: false };
 
-    // For client pages, also pull session history and events
+    // For client pages, also pull profile data. (Session history lived in
+    // the client_sessions table, dropped by migration 0011 — the schema has
+    // no such table, so a fresh deploy would hit a missing relation here.)
     let supplementalContext = "";
     if (page.page_type === "client" && page.source_entity_id) {
-      const { data: sessions } = await supabase
-        .from("client_sessions")
-        .select(
-          "session_date, status, piece_description, placement, style, duration_hours, notes",
-        )
-        .eq("client_id", page.source_entity_id)
-        .order("session_date", { ascending: false })
-        .limit(20);
-      if (sessions?.length) {
-        supplementalContext += "\n\nSession history:\n" + sessions.map((s) => {
-          const parts = [`${s.session_date} (${s.status})`];
-          if (s.piece_description) parts.push(s.piece_description);
-          if (s.placement) parts.push(`on ${s.placement}`);
-          if (s.style) parts.push(`[${s.style}]`);
-          if (s.duration_hours) parts.push(`${s.duration_hours}h`);
-          if (s.notes) parts.push(`Notes: ${s.notes}`);
-          return "- " + parts.join(" | ");
-        }).join("\n");
-      }
-
       // Client profile data
       const { data: client } = await supabase
         .from("clients")
@@ -1246,12 +1228,19 @@ async function runLint(
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
-    const provided = req.headers.get("x-brain-key");
-    if (!provided || provided !== MCP_ACCESS_KEY) {
+    const auth = authenticateAccessKey(req.headers, {
+      allowBearer: false,
+    });
+    if (!auth.ok) {
       return new Response("Unauthorized", { status: 401 });
     }
 
     const mode = url.searchParams.get("mode") || "compile"; // "compile", "lint", or "index"
+    if (
+      (mode === "compile" || mode === "index") && req.method !== "POST"
+    ) {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
     const targetSlug = url.searchParams.get("slug");
     const invoker = url.searchParams.get("invoker") || "pg_cron";
     const indexMode = parseIndexCompileMode(
@@ -1312,11 +1301,8 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Prioritize: never-compiled first, then oldest last_compiled.
     // Min is 0, not 1: batch=0 is the documented "no compile work" request
     // (brain-digest's weekly lint fetch uses it to read lint results without
-    // burning an LLM compile lane). Absent/invalid batch defaults to 15.
-    const batchParam = parseInt(url.searchParams.get("batch") || "15");
-    const maxCompilePerRun = Number.isNaN(batchParam)
-      ? 15
-      : Math.min(Math.max(batchParam, 0), 25);
+    // burning an LLM compile lane). Absent/invalid batch still defaults to 15.
+    const maxCompilePerRun = clampInt(url.searchParams.get("batch"), 15, 0, 25);
     const requestedModel = url.searchParams.get("model");
     const requestedIntake = parseInt(url.searchParams.get("intake") || "0");
     const maintenanceModel = targetSlug ? requestedModel : null;

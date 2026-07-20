@@ -1,6 +1,6 @@
 ---
 name: open-engine-triage
-description: Use when running one OE-12 triage heartbeat as the triage lane - the scheduled morning pass (or a manual "run triage") that reads open action items via list_open_action_items and creates full-packet Standing drafts on the Open Engine board. Draft-safe only; it never promotes (until the stage-4 gate ships), never resolves action items, never edits files, never runs git. Skip for manual single-item intake (use create_agent_task_from_action_item directly) and for queue-runner work.
+description: Use when running one OE-12 triage heartbeat as the triage lane - the scheduled morning pass (or a manual "run triage") that reads open action items via list_open_action_items and creates full-packet Standing drafts on the Open Engine board. It then runs stage-4 guarded auto-promote: only drafts that pass the strict server-side allowlist (low-risk, action-item-linked, full-packet, non-local, non-live-surface) move to Agent Todo on their own, at most the daily cap. It never calls the human promote path, never resolves action items, never edits files, never runs git. Skip for manual single-item intake (use create_agent_task_from_action_item directly) and for queue-runner work.
 ---
 
 # Open Engine Triage (OE-12)
@@ -20,11 +20,14 @@ if deferred.
   (<detail>)` message; if the ledger write is available, also write the failure
   there. Never improvise around a missing tool.
 - NEVER: resolve or archive action items; call `promote_agent_task_intake`
-  (this rule is the binding control - the promotion guard only refuses
-  `promoted_by` strings that match registered agent codes; it cannot see
-  who is calling, so do not treat it as a safety net); grant
-  explicit_approval; assign agent_code at draft time; edit files; run git;
-  send anything (Slack, email, posts).
+  (the HUMAN promote path - this rule is the binding control, and it stays
+  absolute; the promotion guard only refuses `promoted_by` strings that match
+  registered agent codes; it cannot see who is calling, so do not treat it as
+  a safety net); grant explicit_approval; assign agent_code at draft time;
+  edit files; run git; send anything (Slack, email, posts). The ONE promotion
+  triage may do is the stage-4 guarded `auto_promote_agent_task_intake` (step 6,
+  server-gated) - a different, deliberately narrow tool. `promote_agent_task_intake`
+  remains off-limits even when a draft looks obviously promotable.
 - Draft cap 20 per run. Read bound 100 items. Beyond either cap, report the
   remainder in the ledger summary instead of processing it.
 - Risk is fail-closed: anything not CLEARLY low per the rubric is medium.
@@ -51,10 +54,39 @@ if deferred.
      judgment, no `agent_code`, OMIT `title` (the intake builder generates
      `[agent instructions][unassigned][task] <outcome>` automatically;
      hand-built titles just risk drifting from the board format);
+   - **`project_slug` — set it whenever the item clearly belongs to a project.**
+     Action items carry no project field, so infer the slug from the item's
+     subject and its source thought, the same way you already infer paused
+     projects. The ONLY valid values are the route keys in your closeout
+     registry (`scripts/open-engine/project-closeout-registry.json`; see
+     `project-closeout-registry.example.json` for the shape). Read those keys
+     and pick from them.
+     If NOTHING clearly matches, LEAVE IT UNSET. Never invent a slug and never
+     force a rough fit — a wrong slug appends a closeout receipt to the wrong
+     project's tracker and session log, which is worse than leaving it null.
+     WHY THIS MATTERS: a task with a null `project_slug` can never be applied.
+     The closeout controller routes strictly by slug and holds anything it
+     cannot resolve (`MISSING_PROJECT_SLUG` / `UNKNOWN_PROJECT_ROUTE`). A
+     triage lane that sets no slug will produce tasks that get executed and
+     reviewed and then pile up in Agent Review forever, finished but
+     structurally unappliable, with nothing in the logs explaining why.
+     Setting the slug here is what lets finished work land.
    - boundaries always include: "Exit through one honest receipt. No sends,
      no canonical-file edits, no git."
-5. **Report.** `write_agent_ledger` for `triage`:
-   `last_queue_result` = "drafted N / needs-operator N / skipped N / capped N",
+5. **Stage 4 — guarded auto-promote (auto-promote allowlist below).** AFTER all
+   drafting this run, walk ONLY the drafts you created in THIS run. For each,
+   decide whether it clears every rubric-side condition (J category fit, K live-
+   surface veto, L not-redoing-finished-work). For the ones that do, call
+   `auto_promote_agent_task_intake(task_id, caller_agent_code: "triage",
+   allowlist_category: <1-4>, rationale: "<one sentence>")`. The server enforces
+   the row conditions (low risk, no explicit_approval, Standing, triage-agent,
+   linked action item, full packet, `requires_local=false`) and the daily cap;
+   you supply the category and a one-sentence reason. A refusal (any condition,
+   or the cap) leaves that draft Standing - RECORD it in the summary, never
+   retry it in-run, and never fall back to `promote_agent_task_intake`. Skip this
+   step entirely if you created no drafts this run.
+6. **Report.** `write_agent_ledger` for `triage`:
+   `last_queue_result` = "drafted N / auto-promoted N / needs-operator N / skipped N / capped N",
    `last_successful_run` = now (pass it in the `Z` datetime form,
    e.g. `2026-07-08T03:33:39.995Z`; the `+00:00` offset form is rejected as
    an invalid datetime and fails the write), `notes` = one line per
@@ -103,3 +135,48 @@ second draft still slips through and an executor burns a rep on redundant
 work. Before drafting, scan the current BOARD-ELIGIBLE set AND
 recently-applied work for a semantic twin; if one exists, SKIP the duplicate
 and name it in the ledger note instead of drafting.
+
+**Doc-seeded duplicates.** Some board tasks are planned work seeded straight
+from a project plan doc, not from an action item: their `sources` carry a
+`plan-doc: <path>` entry and their doc line is tagged `[OE:<shortid> …]` (the
+two-path provenance model — captured work links an action item; planned work
+carries one `plan-doc:` source). That path sets no `linked_action_item_id`, so
+`has_active_draft` never fires for it and an open action item describing the
+same planned work slips through. Extend the semantic-twin scan to the board's
+doc-seeded tasks: if an item duplicates a Standing/active task carrying a
+`plan-doc:` source (or a plan-doc line you can see is already `OE:`-tagged
+carded or done, not archived), SKIP it as a duplicate and name the short-id in
+the ledger note. An `archived` tag is deliberately re-cardable, so it does not
+suppress.
+
+## Auto-promote allowlist (stage 4)
+
+Default launch config: **all four categories, cap 5 per UTC day** (tune via the
+`oe_auto_promote_config` row). Auto-promote removes the operator's *promote*
+click, not their *install* click - every auto-promoted task still exits through
+a staged deliverable that routes to Needs Operator (operator-install
+enforcement), so nothing an auto-promoted task does reaches a live surface
+without the operator installing it.
+
+The SQL fails closed on the row/cap conditions; your job is the three judgments
+SQL cannot make. Promote a same-run draft ONLY when all three hold:
+
+- **J — it fits exactly one category, name it:** (1) read-only research/lookup
+  that produces a *report*; (2) content/email/copy *draft* that is created and
+  never sent; (3) local documentation *draft* (no canonical tracker/session-log
+  edits, no git); (4) read-only verification/audit that produces a *report*.
+- **K — the absolute veto:** never auto-promote anything that, in its own
+  desired outcome, touches WordPress or any live site, sends email/Slack/social,
+  writes client or business records, deploys, migrates, spends, deletes, or
+  reaches any live surface. If in doubt, it fails K.
+- **L — not redoing finished work:** never auto-promote an SEO or content-
+  metadata task aimed at an existing live page ("redo already-done work" / the
+  stale-open-action-item trap). No column can see this; it is your call. Such
+  drafts stay Standing for a human promote. "I recently did this" is a valid
+  reason to hold, never a reason the server can check.
+
+Anything that does not clearly clear J+K+L stays Standing - leave it for the
+operator. When unsure, do NOT auto-promote; a missed auto-promotion costs one
+click, a wrong one costs a watch veto and a reset. The 7-day watch reads every
+auto-promotion in the briefing; a single item the operator would have vetoed
+resets it.

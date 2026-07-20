@@ -16,7 +16,7 @@ import {
   shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
-import { timingSafeEqualStr } from "../_shared/access-key.ts";
+import { clampInt, timingSafeEqualStr } from "../_shared/access-key.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
@@ -36,10 +36,12 @@ import {
   assertNoActiveActionItemDraft,
   assertNoActiveThoughtDraft,
   assertNoDuplicateOpenFollowUp,
+  assertPromotablePacketShape,
   buildActionItemPromotionIntakeRecord,
   buildAgentTaskIntakeRecord,
   buildFollowUpTaskRecord,
   buildThoughtIntakeRecord,
+  THOUGHT_TEMPLATE_PREFIX,
 } from "./_agent_intake.ts";
 import {
   AGENT_TASK_STATUSES,
@@ -49,6 +51,8 @@ import {
   type AgentTaskStatus,
   type AgentTaskToolAction,
   assertAgentCanWriteTask,
+  assertAutoPromotionCallerAllowed,
+  assertClaimTokenMatches,
   assertClaimAllowed,
   assertIntakePromotionAllowed,
   assertPromotionCallerAllowed,
@@ -63,6 +67,13 @@ import {
   receiptForAppliedStatus,
   receiptForTaskTool,
 } from "./_agent_tasks.ts";
+import {
+  DELIVERABLE_MAX_BYTES,
+  DELIVERABLES_BUCKET,
+  deliverableContentType,
+  validateDeliverableContent,
+  validateDeliverablePath,
+} from "./_deliverables.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -154,6 +165,39 @@ async function getEmbedding(text: string): Promise<number[]> {
     input: text,
   });
   return data.data![0].embedding!;
+}
+
+// Near-duplicate guard: reworded re-captures of the same fact (session
+// closeouts captured twice, task-packet echoes) slip past the SHA-256
+// content_hash because the bytes differ. Same source + embedding similarity
+// above NEAR_DUP_THRESHOLD within NEAR_DUP_WINDOW_MINUTES is a duplicate.
+// Mechanical captures (daily sync/receipt templates) are exempt — they are a
+// legitimate recurring time series that scores high similarity run after run.
+// Thread replies are also exempt at the call-site level: their stored
+// embedding combines parent+reply, which would score near its own parent.
+// Fails open: a guard error must never block a capture.
+const NEAR_DUP_THRESHOLD = 0.95;
+const NEAR_DUP_WINDOW_MINUTES = 60;
+
+async function findNearDuplicate(
+  embedding: number[],
+  source: string,
+  content: string,
+): Promise<string | null> {
+  if (isMechanicalCapture(content)) return null;
+  const { data, error } = await supabase.rpc("find_recent_near_duplicate", {
+    query_embedding: embedding,
+    source_filter: source,
+    sim_threshold: NEAR_DUP_THRESHOLD,
+    window_minutes: NEAR_DUP_WINDOW_MINUTES,
+  });
+  if (error) {
+    console.error(
+      `near-dup guard failed open (capturing anyway): ${error.message}`,
+    );
+    return null;
+  }
+  return (data?.[0]?.id as string | undefined) ?? null;
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
@@ -710,7 +754,11 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local";
+
+// Internal load for the receipt-guard path only: includes claim_token so
+// assertClaimTokenMatches can pre-check. Never use for list/get responses.
+const AGENT_TASK_LOAD_SELECT = `${AGENT_TASK_SELECT}, claim_token`;
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -736,7 +784,7 @@ async function loadAgentTaskForTool(taskId: string): Promise<
 > {
   const { data, error } = await supabase
     .from("agent_tasks")
-    .select(AGENT_TASK_SELECT)
+    .select(AGENT_TASK_LOAD_SELECT)
     .eq("id", taskId)
     .single();
   if (error) throw error;
@@ -748,10 +796,12 @@ async function moveAgentTaskViaTool(args: {
   agentCode: string;
   action: AgentTaskToolAction;
   reason?: string;
+  claimToken?: string;
 }) {
   const task = await loadAgentTaskForTool(args.taskId);
   if (!task) throw new Error(`Task not found: ${args.taskId}`);
   assertAgentCanWriteTask(task, args.agentCode);
+  assertClaimTokenMatches(task, args.claimToken ?? null, args.action);
   if (args.action === "update") {
     assertStatusHeartbeatAllowed(task);
     assertClaimAllowed(task);
@@ -774,6 +824,7 @@ async function moveAgentTaskViaTool(args: {
     p_event_type: receipt,
     p_agent_code: args.agentCode,
     p_reason: args.reason ?? null,
+    p_claim_token: args.claimToken ?? null,
   });
   if (error) throw error;
   return { receipt, task: data };
@@ -795,7 +846,7 @@ function tooLong(value: unknown, max: number): boolean {
 async function handleRestSearch(url: URL): Promise<Response> {
   const query = url.searchParams.get("query");
   if (!query) return jsonResponse({ error: "query parameter required" }, 400);
-  const limit = parseInt(url.searchParams.get("limit") || "10");
+  const limit = clampInt(url.searchParams.get("limit"), 10, 1, 50);
   const threshold = parseFloat(url.searchParams.get("threshold") || "0.5");
   try {
     const qEmb = await getEmbedding(query);
@@ -831,7 +882,7 @@ async function handleRestSearch(url: URL): Promise<Response> {
 }
 
 async function handleRestList(url: URL): Promise<Response> {
-  const limit = parseInt(url.searchParams.get("limit") || "10");
+  const limit = clampInt(url.searchParams.get("limit"), 10, 1, 100);
   const type = url.searchParams.get("type");
   const topic = url.searchParams.get("topic");
   const person = url.searchParams.get("person");
@@ -978,6 +1029,13 @@ async function handleRestCapture(req: Request): Promise<Response> {
       getEmbedding(content),
       extractMetadata(content),
     ]);
+    const nearDupId = await findNearDuplicate(embedding, source, content);
+    if (nearDupId) {
+      return jsonResponse({
+        status: "duplicate",
+        message: `Already in the brain (near-duplicate of ${nearDupId}).`,
+      });
+    }
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
     // Route map: fill a null project from content phrases (unique match only).
@@ -1896,6 +1954,12 @@ server.registerTool(
         "Allowed OE-6 intake source. Slack is intake-only; action-item promotion is manual-only.",
       ),
       agent_code: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
+      ),
+      requires_local: z.boolean().optional().describe(
+        "HARD runtime constraint: true = only an attended local (git-capable) runtime may claim this task. Distinct from preferred_agent (soft). Leave unset to default from the project (known-local project slugs -> true, else false).",
+      ),
       project_slug: z.string().min(1).optional(),
       priority: z.enum(["low", "medium", "high"]).optional(),
       risk: z.enum(["low", "medium", "high"]).optional(),
@@ -1916,6 +1980,8 @@ server.registerTool(
       boundaries: string;
       intake_source: AgentTaskIntakeSource;
       agent_code?: string;
+      preferred_agent?: string;
+      requires_local?: boolean;
       project_slug?: string;
       priority?: "low" | "medium" | "high";
       risk?: AgentTaskRisk;
@@ -1928,6 +1994,7 @@ server.registerTool(
     logToolInvocation("create_agent_task_intake", {
       intake_source: args.intake_source,
       agent_code: args.agent_code,
+      preferred_agent: args.preferred_agent,
       project_slug: args.project_slug,
       priority: args.priority,
       risk: args.risk,
@@ -1965,21 +2032,27 @@ server.registerTool(
     inputSchema: {
       action_item_id: z.string().uuid(),
       agent_code: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
+      ),
       project_slug: z.string().min(1).optional(),
       requested_by: z.string().min(1).optional(),
     },
   },
   async (
-    { action_item_id, agent_code, project_slug, requested_by }: {
-      action_item_id: string;
-      agent_code?: string;
-      project_slug?: string;
-      requested_by?: string;
-    },
+    { action_item_id, agent_code, preferred_agent, project_slug, requested_by }:
+      {
+        action_item_id: string;
+        agent_code?: string;
+        preferred_agent?: string;
+        project_slug?: string;
+        requested_by?: string;
+      },
   ) => {
     logToolInvocation("create_agent_task_from_action_item", {
       action_item_id,
       agent_code,
+      preferred_agent,
       project_slug,
     }, "mcp");
     try {
@@ -2001,6 +2074,7 @@ server.registerTool(
       const record = buildActionItemPromotionIntakeRecord({
         action_item: actionItem,
         agent_code,
+        preferred_agent,
         project_slug,
         requested_by,
       });
@@ -2236,14 +2310,18 @@ server.registerTool(
     inputSchema: {
       thought_id: z.string().uuid(),
       agent_code: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
+      ),
       project_slug: z.string().min(1).optional(),
       requested_by: z.string().min(1).optional(),
     },
   },
   async (
-    { thought_id, agent_code, project_slug, requested_by }: {
+    { thought_id, agent_code, preferred_agent, project_slug, requested_by }: {
       thought_id: string;
       agent_code?: string;
+      preferred_agent?: string;
       project_slug?: string;
       requested_by?: string;
     },
@@ -2251,6 +2329,7 @@ server.registerTool(
     logToolInvocation("create_agent_task_from_thought", {
       thought_id,
       agent_code,
+      preferred_agent,
       project_slug,
     }, "mcp");
     try {
@@ -2272,6 +2351,7 @@ server.registerTool(
       const record = buildThoughtIntakeRecord({
         thought,
         agent_code,
+        preferred_agent,
         project_slug,
         requested_by,
       });
@@ -2304,23 +2384,35 @@ server.registerTool(
   {
     title: "Promote Agent Task Intake",
     description:
-      "Human-controlled promotion for one Standing intake draft. Moves it to Agent Todo so normal Queue Runner claim rules can see it. Does not grant explicit approval. promoted_by must name the human operator who approved the promotion — anonymous callers, registered agent codes, and automated-runtime identities are refused.",
+      "Human-controlled promotion for one Standing intake draft. Moves it to Agent Todo so normal Queue Runner claim rules can see it. Does not grant explicit approval. promoted_by must name the human operator who approved the promotion — anonymous callers, registered agent codes, and automated-runtime identities are refused. Side effect: for triage-authored drafts (intake_source=triage-agent), promoting the last still-Standing draft of a given ET creation day (with none of that day's triage drafts archived) also records a clean OE Phase-4 watch ruling for that day, so the readiness streak reflects the promote decision without a separate step. An existing ruling is never overridden.",
     inputSchema: {
       task_id: z.string().uuid(),
       promoted_by: z.string().min(1).optional(),
       note: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Optional promote-time routing override; null leaves the intake-set preferred_agent untouched.",
+      ),
+      allow_template_body: z.boolean().optional().describe(
+        "Override for the follow-up template refusal: promote a template-bodied " +
+          "follow-up stub anyway, knowingly, for attended human review only. " +
+          "Without it, promoting an unmodified follow-up draft is refused because " +
+          "it guarantees a PACKET_INVALID bounce.",
+      ),
     },
   },
   async (
-    { task_id, promoted_by, note }: {
+    { task_id, promoted_by, note, preferred_agent, allow_template_body }: {
       task_id: string;
       promoted_by?: string;
       note?: string;
+      preferred_agent?: string;
+      allow_template_body?: boolean;
     },
   ) => {
     logToolInvocation("promote_agent_task_intake", {
       task_id,
       promoted_by,
+      preferred_agent,
     }, "mcp");
     try {
       const { data: ledgerRows, error: ledgerError } = await supabase
@@ -2334,26 +2426,124 @@ server.registerTool(
       const task = await loadAgentTaskForTool(task_id);
       if (!task) throw new Error(`Task not found: ${task_id}`);
       assertIntakePromotionAllowed(task);
+      assertPromotablePacketShape(
+        task as { intake_source?: string | null; do_steps?: string | null },
+        allow_template_body ?? false,
+      );
       const { data, error } = await supabase.rpc(
         "promote_agent_task_intake",
         {
           p_task_id: task_id,
           p_promoted_by: promoted_by ?? null,
           p_note: note ?? null,
+          p_preferred_agent: preferred_agent ?? null,
         },
       );
       if (error) throw error;
+      // Scheduled OE-5 runners pass max_risk=low to claim_next_agent_task, so a
+      // task promoted at medium/high is invisible to every scheduled lane and
+      // silently sits in Agent Todo. Risk is frozen at intake, so the only fix
+      // is to recreate. Surface this at promote time rather than letting the
+      // operator discover it when the work never happens.
+      const promotedRisk = (data as { risk?: string } | null)?.risk ?? null;
+      const claimGatingWarning = promotedRisk && promotedRisk !== "low"
+        ? `risk=${promotedRisk}. Scheduled runners pass max_risk=low, so NO scheduled lane can claim this task; it will sit in Agent Todo until an attended manual run claims it (manual callers default to max_risk=medium). Risk is frozen at intake and no verb amends it. If this should run unattended, recreate the intake at risk=low and supersede this one via admin_amend_agent_task.`
+        : null;
+      // A verbatim action-item promotion is a review-me stub, not an executable
+      // packet: its do_steps are the intake template and its acceptance criteria
+      // is human review. Promoted into the claim pool it burns a scheduled rep
+      // (claim -> validate -> AGENT HUMAN HOLD) and strands in Agent Needs Input
+      // (a real instance sat stranded 11 days). Warn at promote time.
+      const promotedIntakeSource = (data as { intake_source?: string } | null)?.intake_source ?? null;
+      const promotedDoSteps = (data as { do_steps?: string } | null)?.do_steps ?? "";
+      let intakeShapeWarning: string | null = null;
+      if (
+        promotedIntakeSource === "action-item-promotion" &&
+        promotedDoSteps.startsWith("Review the linked action item")
+      ) {
+        intakeShapeWarning =
+          `This row is a verbatim action-item stub, not an executable packet: its do_steps are still the intake template ("Review the linked action item, expand this draft..."). A scheduled lane WILL claim it, hold it to Agent Needs Input, and burn the rep. Expand it into a real packet before promoting, or promote knowingly for attended human review only.`;
+      } else if (
+        (promotedIntakeSource === "brain-bank-capture" ||
+          promotedIntakeSource === "session-log-closeout") &&
+        promotedDoSteps.startsWith(THOUGHT_TEMPLATE_PREFIX)
+      ) {
+        intakeShapeWarning =
+          `This row is a verbatim thought-intake stub, not an executable packet: its do_steps are still the intake template ("Review the source thought..."). A scheduled lane WILL claim it and hold it to Agent Needs Input. Expand it into a real packet before promoting, or promote knowingly for attended human review only.`;
+      }
       return textToolResponse({
         receipt: "INTAKE_PROMOTED",
         // The S3 hardening batch made the SQL function write an AGENT STATUS
         // promotion audit event (verified Session 265); the flag predated it.
         audit_event_written: true,
         explicit_approval_granted: false,
+        ...(claimGatingWarning ? { claim_gating_warning: claimGatingWarning } : {}),
+        ...(intakeShapeWarning ? { intake_shape_warning: intakeShapeWarning } : {}),
         task: data,
       });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error promoting agent task intake: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "auto_promote_agent_task_intake",
+  {
+    title: "Auto-Promote Agent Task Intake (OE-12 Phase 4)",
+    description:
+      "Guarded autonomous promotion (OE-12 Phase 4). Triage's stage-4 action: move ONE same-run Standing draft to Agent Todo without a human promote click, and only if it passes every server-side allowlist condition (low risk, explicit_approval false, Standing and not archived, intake_source=triage-agent, linked to an action item, full packet, requires_local=false) and the daily UTC-day cap is not exceeded. Callable only with caller_agent_code='triage' (enforced here and in SQL; both fail closed). On success emits an UNASSIGNED Agent Todo row (shared claim pool) and exactly one AGENT STATUS event authored by triage-auto, so the promotion is distinguishable from a human promote and never dirties the readiness watch (which keys DIRTY on triage authorship). Any failed condition refuses and leaves the draft Standing — record it in the run summary, never retry in-run. Never grants explicit approval; never touches attempt_count or claim state. NOT a substitute for promote_agent_task_intake (the human path).",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      caller_agent_code: z.literal("triage").describe(
+        "Must be 'triage'. Self-attested on the shared key; also enforced in SQL.",
+      ),
+      allowlist_category: z.number().int().min(1).max(4).describe(
+        "The allowlist J category: 1 read-only research/lookup -> report, 2 content/email/copy draft (created, never sent), 3 local documentation draft (no tracker/session-log/git), 4 read-only verification/audit -> report.",
+      ),
+      rationale: z.string().min(1).describe(
+        "One sentence: why this draft is safe to auto-promote in its category. Recorded in the audit event; never blank.",
+      ),
+    },
+  },
+  async (
+    { task_id, caller_agent_code, allowlist_category, rationale }: {
+      task_id: string;
+      caller_agent_code: string;
+      allowlist_category: number;
+      rationale: string;
+    },
+  ) => {
+    logToolInvocation("auto_promote_agent_task_intake", {
+      task_id,
+      caller_agent_code,
+      allowlist_category,
+    }, "mcp");
+    try {
+      assertAutoPromotionCallerAllowed(caller_agent_code);
+      const { data, error } = await supabase.rpc(
+        "auto_promote_agent_task_intake",
+        {
+          p_task_id: task_id,
+          p_caller_agent_code: caller_agent_code,
+          p_allowlist_category: allowlist_category,
+          p_rationale: rationale,
+        },
+      );
+      if (error) throw error;
+      return textToolResponse({
+        receipt: "INTAKE_AUTO_PROMOTED",
+        audit_event_written: true,
+        audit_event_author: "triage-auto",
+        explicit_approval_granted: false,
+        allowlist_category,
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error auto-promoting agent task intake: ${(err as Error).message}`,
       );
     }
   },
@@ -2370,6 +2560,9 @@ server.registerTool(
       desired_outcome: z.string().min(1),
       context: z.string().min(1),
       agent_code: z.string().min(1).optional(),
+      preferred_agent: z.string().min(1).optional().describe(
+        "Soft-affinity hint: agent_code that gets first dibs at claim time. Reorders, never restricts — any eligible runtime can still claim. Leave unset for the shared pool.",
+      ),
       project_slug: z.string().min(1).optional(),
       requested_by: z.string().min(1).optional(),
       priority: z.enum(["low", "medium", "high"]).optional(),
@@ -2382,6 +2575,7 @@ server.registerTool(
       desired_outcome: string;
       context: string;
       agent_code?: string;
+      preferred_agent?: string;
       project_slug?: string;
       requested_by?: string;
       priority?: "low" | "medium" | "high";
@@ -2391,6 +2585,7 @@ server.registerTool(
     logToolInvocation("create_agent_task_follow_up", {
       parent_task_id: args.parent_task_id,
       agent_code: args.agent_code,
+      preferred_agent: args.preferred_agent,
       project_slug: args.project_slug,
       priority: args.priority,
       risk: args.risk,
@@ -2456,12 +2651,16 @@ server.registerTool(
       max_risk: z.enum(["low", "medium", "high"]).optional().describe(
         "Highest task risk this claim may select. Defaults to medium for manual callers; scheduled OE-5 runners pass low.",
       ),
+      runtime_local: z.boolean().optional().describe(
+        "Assert that this is an attended local (git-capable) runtime. Only such a claim may select a requires_local task. Defaults false: scheduled/cloud lanes omit it and never grab local-only work.",
+      ),
     },
   },
   async (
-    { agent_code, max_risk }: {
+    { agent_code, max_risk, runtime_local }: {
       agent_code: string;
       max_risk?: AgentTaskRisk;
+      runtime_local?: boolean;
     },
   ) => {
     const effectiveMaxRisk = isAgentTaskRisk(max_risk || "")
@@ -2470,11 +2669,13 @@ server.registerTool(
     logToolInvocation("claim_next_agent_task", {
       agent_code,
       max_risk: effectiveMaxRisk,
+      runtime_local: runtime_local === true,
     }, "mcp");
     try {
       const { data, error } = await supabase.rpc("claim_next_agent_task", {
         p_agent_code: agent_code,
         p_max_risk: effectiveMaxRisk,
+        p_runtime_local: runtime_local === true,
       });
       if (error) throw error;
       const tasks = Array.isArray(data) ? data : data ? [data] : [];
@@ -2512,13 +2713,17 @@ server.registerTool(
       max_risk: z.enum(["low", "medium", "high"]).optional().describe(
         "Highest task risk this claim may accept. Defaults to medium.",
       ),
+      runtime_local: z.boolean().optional().describe(
+        "Assert that this is an attended local (git-capable) runtime. Required to claim a requires_local task; a non-local claim is refused with a clear error. Defaults false.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, max_risk }: {
+    { task_id, agent_code, max_risk, runtime_local }: {
       task_id: string;
       agent_code: string;
       max_risk?: AgentTaskRisk;
+      runtime_local?: boolean;
     },
   ) => {
     const effectiveMaxRisk = isAgentTaskRisk(max_risk || "")
@@ -2528,6 +2733,7 @@ server.registerTool(
       task_id,
       agent_code,
       max_risk: effectiveMaxRisk,
+      runtime_local: runtime_local === true,
     }, "mcp");
     try {
       const { data, error } = await supabase.rpc(
@@ -2536,6 +2742,7 @@ server.registerTool(
           p_task_id: task_id,
           p_agent_code: agent_code,
           p_max_risk: effectiveMaxRisk,
+          p_runtime_local: runtime_local === true,
         },
       );
       if (error) throw error;
@@ -2575,13 +2782,17 @@ server.registerTool(
       status_note: z.string().min(1).describe(
         "Short receipt note describing current progress or next checkpoint.",
       ),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, status_note }: {
+    { task_id, agent_code, status_note, claim_token }: {
       task_id: string;
       agent_code: string;
       status_note: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("update_agent_task", {
@@ -2596,6 +2807,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "update",
           reason: status_note,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -2615,14 +2827,18 @@ server.registerTool(
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
-      result: z.string().min(1).describe("Completion receipt for Dave."),
+      result: z.string().min(1).describe("Completion receipt for the operator."),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, result }: {
+    { task_id, agent_code, result, claim_token }: {
       task_id: string;
       agent_code: string;
       result: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("complete_agent_task", { task_id, agent_code }, "mcp");
@@ -2633,6 +2849,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "complete",
           reason: result,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -2655,13 +2872,17 @@ server.registerTool(
       blocker: z.string().min(1).describe(
         "The exact blocker or question that needs human input.",
       ),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, blocker }: {
+    { task_id, agent_code, blocker, claim_token }: {
       task_id: string;
       agent_code: string;
       blocker: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("block_agent_task", { task_id, agent_code }, "mcp");
@@ -2672,6 +2893,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "block",
           reason: blocker,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -2687,18 +2909,22 @@ server.registerTool(
   {
     title: "Request Agent Review",
     description:
-      "Move a claimed or assigned task to Agent Review with an AGENT DONE receipt when the runtime needs Dave to inspect the result.",
+      "Move a claimed or assigned task to Agent Review with an AGENT DONE receipt when the runtime needs the operator to inspect the result.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
       review_note: z.string().min(1),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, review_note }: {
+    { task_id, agent_code, review_note, claim_token }: {
       task_id: string;
       agent_code: string;
       review_note: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("request_agent_review", { task_id, agent_code }, "mcp");
@@ -2709,6 +2935,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "request-review",
           reason: review_note,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -2922,6 +3149,95 @@ server.registerTool(
 );
 
 server.registerTool(
+  "admin_amend_agent_task",
+  {
+    title: "Admin Amend Agent Task",
+    description:
+      "Ops-correction escape hatch (C3). One honest verb for board fixes that otherwise need raw SQL: set project_slug, append sources, set operator_action/operator_target, set requires_local, move a terminal Agent Done or Agent Review task back onto the Needs Operator desk, and/or release a stuck claim (the folded handoff). Never touches attempt_count, never writes a false AGENT FAILED, never edits an existing event. Writes exactly one honest audit event (AGENT NEEDS OPERATOR when moving to the desk, else AGENT STATUS). Human/ops use only — not for executor lanes.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      reason: z.string().min(1).describe(
+        "Why this correction is being made. Recorded in the audit event.",
+      ),
+      actor: z.string().min(1).optional().describe(
+        "Who is running the correction (e.g. 'operator via ops session').",
+      ),
+      set_project_slug: z.string().min(1).optional(),
+      add_sources: z.array(z.unknown()).optional().describe(
+        "Source entries to append; entries already present are skipped.",
+      ),
+      set_operator_action: z.string().min(1).optional(),
+      set_operator_target: z.string().min(1).optional(),
+      set_requires_local: z.boolean().optional().describe(
+        "Set the C2 hard runtime constraint on this task.",
+      ),
+      move_to_needs_operator: z.boolean().optional().describe(
+        "Move an Agent Done or Agent Review task to Needs Operator. Requires an operator_action (existing or set in this call).",
+      ),
+      release_claim: z.boolean().optional().describe(
+        "Clear claimed_by/claim_token/claim_expires_at without a status change or a false AGENT FAILED — the honest cross-runtime handoff.",
+      ),
+    },
+  },
+  async (
+    {
+      task_id,
+      reason,
+      actor,
+      set_project_slug,
+      add_sources,
+      set_operator_action,
+      set_operator_target,
+      set_requires_local,
+      move_to_needs_operator,
+      release_claim,
+    }: {
+      task_id: string;
+      reason: string;
+      actor?: string;
+      set_project_slug?: string;
+      add_sources?: unknown[];
+      set_operator_action?: string;
+      set_operator_target?: string;
+      set_requires_local?: boolean;
+      move_to_needs_operator?: boolean;
+      release_claim?: boolean;
+    },
+  ) => {
+    logToolInvocation("admin_amend_agent_task", {
+      task_id,
+      move_to_needs_operator: move_to_needs_operator === true,
+      release_claim: release_claim === true,
+    }, "mcp");
+    try {
+      const { data, error } = await supabase.rpc("admin_amend_agent_task", {
+        p_task_id: task_id,
+        p_reason: reason,
+        p_actor: actor ?? null,
+        p_set_project_slug: set_project_slug ?? null,
+        p_add_sources: add_sources ?? null,
+        p_set_operator_action: set_operator_action ?? null,
+        p_set_operator_target: set_operator_target ?? null,
+        p_set_requires_local: typeof set_requires_local === "boolean"
+          ? set_requires_local
+          : null,
+        p_move_to_needs_operator: move_to_needs_operator === true,
+        p_release_claim: release_claim === true,
+      });
+      if (error) throw error;
+      return textToolResponse({
+        receipt: move_to_needs_operator ? "AGENT NEEDS OPERATOR" : "AGENT STATUS",
+        task: data,
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error amending agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
   "record_critic_verdict",
   {
     title: "Record Critic Verdict",
@@ -2980,7 +3296,7 @@ server.registerTool(
   {
     title: "Resume Agent Task",
     description:
-      "Resume a claimed or assigned Agent Needs Input or Agent Review task back to Agent Working with an AGENT RESUMED receipt.",
+      "Resume a claimed or assigned Agent Needs Input or Agent Review task back to Agent Working with an AGENT RESUMED receipt. The returned task carries a freshly minted claim_token; the resuming session must pass it on subsequent receipts.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
@@ -3019,7 +3335,7 @@ server.registerTool(
   {
     title: "Unblock Agent Task",
     description:
-      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT UNBLOCKED receipt.",
+      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT UNBLOCKED receipt. The returned task carries a freshly minted claim_token; the resuming session must pass it on subsequent receipts.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
@@ -3058,7 +3374,7 @@ server.registerTool(
   {
     title: "Answer Agent Task",
     description:
-      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT HUMAN ANSWERED receipt.",
+      "Move a claimed or assigned Agent Needs Input task back to Agent Working with an AGENT HUMAN ANSWERED receipt. The returned task carries a freshly minted claim_token; the resuming session must pass it on subsequent receipts.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
@@ -3104,13 +3420,17 @@ server.registerTool(
       reason: z.string().min(1).describe(
         "Honest hold reason: what was validated, what was NOT executed, and who should pick the task up.",
       ),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, reason }: {
+    { task_id, agent_code, reason, claim_token }: {
       task_id: string;
       agent_code: string;
       reason: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("hold_agent_task", { task_id, agent_code }, "mcp");
@@ -3121,6 +3441,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "hold",
           reason,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -3143,13 +3464,17 @@ server.registerTool(
       reason: z.string().min(1).describe(
         "The failure reason to record on the task and event payload.",
       ),
+      claim_token: z.string().uuid().optional().describe(
+        "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, reason }: {
+    { task_id, agent_code, reason, claim_token }: {
       task_id: string;
       agent_code: string;
       reason: string;
+      claim_token?: string;
     },
   ) => {
     logToolInvocation("fail_agent_task", { task_id, agent_code }, "mcp");
@@ -3160,6 +3485,7 @@ server.registerTool(
           agentCode: agent_code,
           action: "fail",
           reason,
+          claimToken: claim_token,
         }),
       );
     } catch (err: unknown) {
@@ -3297,6 +3623,136 @@ server.registerTool(
 );
 
 server.registerTool(
+  "put_deliverable",
+  {
+    title: "Put Deliverable (cloud on-ramp)",
+    description:
+      "Store one executor deliverable in the private 'deliverables' storage bucket. Cloud-runtime lanes use this instead of a local deliverables/ file write; the closeout sweep later syncs bucket objects into the repo, so git stays the single durable store. Path is <project-slug>/<task-shortid>-<name>.<md|html|txt|json|csv>. Objects are immutable: writing an existing path is refused — pick a new task-scoped filename. Text content only, 512 KB cap. Not for code diffs, not for secrets, not a general file store.",
+    inputSchema: {
+      path: z.string().min(1).describe(
+        "<project-slug>/<task-shortid>-<name>.<ext> — same shape as a local deliverables/ path, without the deliverables/ prefix.",
+      ),
+      content: z.string().min(1).describe("Full text content of the deliverable."),
+    },
+  },
+  async ({ path, content }: { path: string; content: string }) => {
+    logToolInvocation("put_deliverable", { path }, "mcp");
+    try {
+      const cleanPath = validateDeliverablePath(path);
+      const cleanContent = validateDeliverableContent(content);
+      const { error } = await supabase.storage
+        .from(DELIVERABLES_BUCKET)
+        .upload(cleanPath, new Blob([cleanContent]), {
+          contentType: deliverableContentType(cleanPath),
+          upsert: false,
+        });
+      if (error) {
+        const exists = /exists|duplicate/i.test(error.message ?? "");
+        throw new Error(
+          exists
+            ? `DELIVERABLE_EXISTS: '${cleanPath}' is already stored and objects are immutable. Write a new task-scoped filename (e.g. bump a -v2 suffix) instead of overwriting.`
+            : error.message,
+        );
+      }
+      return textToolResponse({
+        receipt: "DELIVERABLE_STORED",
+        path: cleanPath,
+        bytes: new TextEncoder().encode(cleanContent).length,
+        durable_note:
+          "Bucket object stored. The closeout sweep commits it to the repo; record this path in the receipt as deliverables/<path> @ BUCKET.",
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error storing deliverable: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "get_deliverable",
+  {
+    title: "Get Deliverable",
+    description:
+      "Fetch one deliverable's full text from the private 'deliverables' storage bucket by <project-slug>/<filename> path. Used by critic lanes to read an artifact the repo does not have yet, and by the closeout sweep.",
+    inputSchema: {
+      path: z.string().min(1),
+    },
+  },
+  async ({ path }: { path: string }) => {
+    logToolInvocation("get_deliverable", { path }, "mcp");
+    try {
+      const cleanPath = validateDeliverablePath(path);
+      const { data, error } = await supabase.storage
+        .from(DELIVERABLES_BUCKET)
+        .download(cleanPath);
+      if (error) throw new Error(error.message);
+      const content = await data.text();
+      return textToolResponse({ path: cleanPath, content });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error fetching deliverable: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "list_deliverables",
+  {
+    title: "List Deliverables",
+    description:
+      "List objects in the private 'deliverables' storage bucket, optionally under one <project-slug>/ prefix. Returns paths, sizes, and timestamps. Used by the closeout sweep to find cloud-written artifacts not yet committed to the repo.",
+    inputSchema: {
+      prefix: z.string().optional().describe(
+        "Optional project-slug folder to list; omit to list every folder.",
+      ),
+    },
+  },
+  async ({ prefix }: { prefix?: string }) => {
+    logToolInvocation("list_deliverables", { prefix }, "mcp");
+    try {
+      const objects: {
+        path: string;
+        bytes: number | null;
+        updated_at: string | null;
+      }[] = [];
+      const folders: string[] = [];
+      if (prefix?.trim()) {
+        folders.push(prefix.trim().replace(/\/+$/, ""));
+      } else {
+        const { data: rootEntries, error: rootError } = await supabase.storage
+          .from(DELIVERABLES_BUCKET)
+          .list("", { limit: 200 });
+        if (rootError) throw new Error(rootError.message);
+        for (const entry of rootEntries ?? []) {
+          if (!entry.id) folders.push(entry.name); // folders have no object id
+        }
+      }
+      for (const folder of folders) {
+        const { data: entries, error } = await supabase.storage
+          .from(DELIVERABLES_BUCKET)
+          .list(folder, { limit: 500 });
+        if (error) throw new Error(error.message);
+        for (const entry of entries ?? []) {
+          if (!entry.id) continue; // skip nested folders
+          objects.push({
+            path: `${folder}/${entry.name}`,
+            bytes: (entry.metadata as { size?: number } | null)?.size ?? null,
+            updated_at: entry.updated_at ?? null,
+          });
+        }
+      }
+      return textToolResponse({ count: objects.length, objects });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error listing deliverables: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
   "capture_thought",
   {
     title: "Capture Thought",
@@ -3335,6 +3791,15 @@ server.registerTool(
         getEmbedding(content),
         extractMetadata(content),
       ]);
+      const nearDupId = await findNearDuplicate(embedding, "mcp", content);
+      if (nearDupId) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Already in the brain (near-duplicate of ${nearDupId}).`,
+          }],
+        };
+      }
       const knownSlugs = await loadKnownSlugs(supabase);
       const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
       // Route map: fill a null project from content phrases (unique match only).
@@ -3768,6 +4233,11 @@ server.registerTool(
     }
   },
 );
+
+// NOTE: upstream also ships a log_session tool that inserts into a
+// client_sessions table. It is deliberately not ported here: migration
+// 0011 drops client_sessions as deprecated, so the tool would fail on
+// every fresh deploy from this repo's migrations.
 
 // --- Content Pipeline Extension MCP Tools ---
 
@@ -4979,7 +5449,7 @@ async function handleRestPages(url: URL): Promise<Response> {
     const slug = url.searchParams.get("slug");
     const type = url.searchParams.get("type");
     const query = url.searchParams.get("query");
-    const limit = parseInt(url.searchParams.get("limit") || "20");
+    const limit = clampInt(url.searchParams.get("limit"), 20, 1, 100);
 
     if (slug) {
       logToolInvocation("get_compiled_page", { slug }, "rest");

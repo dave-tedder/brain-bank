@@ -3,10 +3,12 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { loadProfile } from "../_shared/profile.ts";
 import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import { authenticateAccessKey } from "../_shared/access-key.ts";
 import {
   DigestActionRow,
   renderOpenActionChecklist,
 } from "./action-checklist.ts";
+import { formatSentinelReport } from "./sentinel-report.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -47,6 +49,24 @@ async function loadCompileHealthWarning(): Promise<string | null> {
   }
 }
 
+async function loadSentinelReport(): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from("agent_task_ledger")
+      .select("last_heartbeat, last_queue_result")
+      .eq("agent_code", "sentinel")
+      .maybeSingle();
+    if (error) {
+      console.error("sentinel report query failed (non-fatal):", error);
+      return "*Ops sentinel unavailable:* ledger could not be checked.";
+    }
+    return formatSentinelReport(data, new Date().toISOString());
+  } catch (err) {
+    console.error("sentinel report failed (non-fatal):", err);
+    return "*Ops sentinel unavailable:* ledger could not be checked.";
+  }
+}
+
 // --- Slack ---
 
 async function postToSlack(
@@ -65,12 +85,15 @@ async function postToSlack(
     const d = await r.json();
     if (!d.ok) {
       console.error("Slack post error:", d.error);
-      return { ok: false, error: String(d.error || "unknown") };
+      return { ok: false, error: String(d.error ?? `http_${r.status}`) };
     }
     return { ok: true };
   } catch (err) {
     console.error("Slack post error:", err);
-    return { ok: false, error: "fetch_failed" };
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -845,8 +868,13 @@ async function pushInsightsToNotion(
 Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const url = new URL(req.url);
-    const provided = req.headers.get("x-brain-key");
-    if (!provided || provided !== MCP_ACCESS_KEY) {
+    if (req.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
+    const auth = authenticateAccessKey(req.headers, {
+      allowBearer: false,
+    });
+    if (!auth.ok) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -1009,6 +1037,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
     const compileHealthWarning = await loadCompileHealthWarning();
     if (compileHealthWarning) {
       slackMessage += `\n\n---\n${compileHealthWarning}`;
+    }
+
+    // Ops sentinel verdict is advisory, same contract as compile health:
+    // warn, never block. Daily mode only.
+    if (mode === "daily") {
+      const sentinelReport = await loadSentinelReport();
+      if (sentinelReport) {
+        slackMessage += `\n${sentinelReport}`;
+      }
     }
 
     const slackResult = await postToSlack(SLACK_DIGEST_CHANNEL, slackMessage);

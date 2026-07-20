@@ -62,6 +62,7 @@ export interface AgentTaskAccessRow {
   claimed_by: string | null;
   risk: AgentTaskRisk;
   explicit_approval: boolean;
+  claim_token?: string | null;
   status: AgentTaskStatus;
 }
 
@@ -99,6 +100,36 @@ export function assertAgentCanWriteTask(
   if (!canAgentWriteTask(task, agentCode)) {
     throw new Error(
       "Agent can only update tasks it has claimed or tasks assigned to its agent_code.",
+    );
+  }
+}
+
+// OE-15: run-side receipt actions that must present the current claim_token
+// while the task carries one. Resume-family actions (resume/unblock/answer)
+// are human-gated and mint a fresh token instead. This mirrors the SQL guard
+// in move_agent_task_status — SQL is the enforcement source of truth; this
+// pre-check exists for a clearer tool-level error message.
+export const CLAIM_TOKEN_GUARDED_ACTIONS = [
+  "update",
+  "complete",
+  "block",
+  "request-review",
+  "hold",
+  "fail",
+] as const;
+
+export function assertClaimTokenMatches(
+  task: AgentTaskAccessRow,
+  presentedToken: string | null | undefined,
+  action: AgentTaskToolAction,
+): void {
+  if (
+    !(CLAIM_TOKEN_GUARDED_ACTIONS as readonly string[]).includes(action)
+  ) return;
+  if (!task.claim_token) return;
+  if (!presentedToken || presentedToken !== task.claim_token) {
+    throw new Error(
+      "This task is held by a different run: pass the claim_token returned by the claim (or resume) call this run made. A run that does not hold the current claim cannot write receipts on it.",
     );
   }
 }
@@ -155,6 +186,26 @@ export function assertPromotionCallerAllowed(
   if (RUNNER_CALLER_PATTERN.test(value)) {
     throw new Error(
       `promoted_by '${value}' identifies an automated runtime. Automated runtimes cannot promote intake drafts; promotion is a human decision.`,
+    );
+  }
+}
+
+// OE-12 Phase 4 auto-promote is the INVERSE of the human promote check: it is
+// the one path where an agent runtime IS the allowed caller — but ONLY the
+// triage identity, and only as the tool-layer echo of the SQL's condition G.
+// The SQL enforces the same string; both fail closed, so a dishonest key still
+// cannot widen the caller set. This is deliberately NOT a substitute for
+// assertPromotionCallerAllowed (the human path) — the two guards protect
+// opposite lanes.
+export function assertAutoPromotionCallerAllowed(
+  callerAgentCode: string | null | undefined,
+): void {
+  const value = typeof callerAgentCode === "string" ? callerAgentCode.trim() : "";
+  if (value !== "triage") {
+    throw new Error(
+      `auto_promote_agent_task_intake is callable only by agent_code 'triage'; got '${
+        value || "<none>"
+      }'. Auto-promote is the triage stage-4 action, not a general promote path.`,
     );
   }
 }
@@ -230,11 +281,31 @@ export function receiptForAppliedStatus(
 export function compactObject<T extends Record<string, unknown>>(value: T): T {
   const copy: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (entry !== undefined && entry !== null && entry !== "") {
+    if (entry !== undefined && entry !== "") {
       copy[key] = entry;
     }
   }
   return copy as T;
+}
+
+// C2 hard runtime constraint. Project slugs that are entirely LOCAL RUNTIME ONLY:
+// intake defaults requires_local=true for these so a task is protected the moment
+// it is drafted, without threading an explicit flag through every builder. The
+// column is still per-task and an explicit value always wins. Ships empty — a
+// fork adds its own local-only slugs here.
+export const KNOWN_LOCAL_PROJECT_SLUGS = [] as const;
+
+// Resolve the requires_local value at intake time. An explicit boolean (from the
+// human/triage caller) always wins; otherwise a known-local project defaults to
+// true, everything else to false. Overridable: pass explicit=false to force a
+// known-local project's task onto the shared pool.
+export function resolveRequiresLocal(
+  explicit: boolean | null | undefined,
+  projectSlug: string | null | undefined,
+): boolean {
+  if (typeof explicit === "boolean") return explicit;
+  const slug = (projectSlug ?? "").trim().toLowerCase();
+  return (KNOWN_LOCAL_PROJECT_SLUGS as readonly string[]).includes(slug);
 }
 
 export function operatorTargetHasAllowedScheme(value: string): boolean {

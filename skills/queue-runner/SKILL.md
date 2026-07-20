@@ -12,6 +12,70 @@ This skill does not create cron jobs, scheduled runners, background loops, Slack
 
 This skill is behavioral guidance for the agent running the heartbeat. It is not an enforcement boundary by itself. Real enforcement must stay in the SQL helpers, MCP task tools, and runtime tests so a scheduled or misbehaving runtime cannot bypass risk and transition guards by ignoring prose.
 
+## STEP 0 — MCP PREFLIGHT (MANDATORY, BEFORE ANYTHING ELSE)
+
+Run this before reading the board, the packet, or any deliverable. It is a
+procedure, not advice. Do not skip it because the tools "look fine".
+
+1. List every MCP this run may need. Always the Brain Bank board tools. Plus any
+   the task names: WordPress servers, Notion, or any other integration.
+2. ToolSearch each one, then make a CHEAP LIVE CALL to confirm it answers:
+   `mcp__<server>__mcp_ping` for the WordPress servers; any read verb for others.
+3. If ToolSearch returns "No matching deferred tools found", that is **NOT**
+   evidence of absence. Desktop-configured MCP servers connect ASYNCHRONOUSLY and
+   routinely surface minutes into a session with no action taken. Wait, then
+   re-run ToolSearch. **Retry up to 3 times.**
+4. Only a LIVE CALL that still fails after 3 retries may be reported as
+   unavailable. Report it; do not fix it.
+
+Because the pings are cheap and the connect window is short, fire them first and
+then read the packet. By the time you need a tool it is warm, and the
+false-negative window never opens.
+
+### Forbidden while diagnosing a "missing" MCP
+
+- Do NOT run `claude mcp list`. It lists ONLY Code-registered servers and never
+  lists Desktop servers. Its output is not evidence of anything.
+- Do NOT read `~/.claude.json`, `claude_desktop_config.json`, or check for a
+  project `.mcp.json`. Those describe **registration**. Registration is not
+  **reachability**. A Desktop server is genuinely reachable from a Code session.
+- Do NOT run `claude mcp add` or `claude mcp remove`. The servers are already
+  live; you would duplicate working servers. A PreToolUse hook can block this
+  (see `scripts/hooks/block-mcp-registration.sh`).
+- Do NOT build a causal story about WHY the MCP is missing. If you catch yourself
+  explaining why, that IS the tell. Stop and re-run ToolSearch.
+
+**The rule is about the KIND of evidence, not the specific command.** No static
+artifact (CLI listing, JSON config, worktree state, missing `.mcp.json`) can prove
+an MCP is unavailable. Only a live call can, and only after the retries above.
+
+This exists because the misdiagnosis recurred in two separate sessions on the
+same day **while a memory note describing it was in context**, each time
+reasoning confidently from a different artifact. Treat any "the MCP isn't here"
+conclusion as a red flag about your own reasoning first.
+
+## STEP 0.6 — PRIOR-ART RECALL (MANDATORY BEFORE ANY DIAGNOSIS)
+
+Before forming ANY theory about a symptom, block, failure, or "X is
+broken/blocked/missing" claim (from a packet, a probe you just ran, or your own
+observation):
+
+1. `search_thoughts` the symptom in Brain Bank. Query with the concrete nouns:
+   the domain, the tool, the error ("crawler 403 CDN <domain>", not "website
+   problem"). Limit 5.
+2. If a prior capture DIAGNOSES, CORRECTS, or WITHDRAWS the same finding, that
+   capture outranks your fresh reasoning. Follow its method. A withdrawal
+   reverses the burden of proof: you need NEW evidence of a kind the withdrawal
+   did not already discredit before re-raising the alarm.
+3. The recall applies to the PACKET'S premise too. A packet can encode a false
+   alarm and send several sessions chasing it across weeks.
+4. Only after the search comes up empty may you investigate from scratch.
+
+This exists because a bot-blocking false alarm was diagnosed and formally
+withdrawn in the brain, then re-derived from scratch twice afterward, with the
+withdrawal sitting in the brain the whole time. Confidence in a freshly built
+causal story is the tell, exactly as in STEP 0.
+
 ## Runtime Identity
 
 Default runtime:
@@ -21,6 +85,10 @@ Default runtime:
 - `automation_state`: `manual-required`
 
 If the user explicitly assigns a different runtime, use that `agent_code` only after the ledger confirms it exists. Never invent a new ledger identity during a heartbeat.
+
+Task drafts are born UNASSIGNED (`agent_code = NULL`) so any local executor can claim them (OE-9 shared-pool decision). Never stamp an `agent_code` on a draft by default; a hard `agent_code` is a capability or quality lock only. Routing preferences use `preferred_agent`, which reorders claims but never restricts them.
+
+**C2 hard runtime constraint.** A task flagged `requires_local = true` (LOCAL RUNTIME ONLY: needs git + local files) is claimable ONLY by a claim that asserts `runtime_local: true` on `claim_next_agent_task` / `claim_specific_agent_task`. A scheduled/cloud heartbeat MUST NOT pass `runtime_local` — omit it (defaults false), so local-only tasks are invisible to the heartbeat by design and can never be mis-claimed. Only an attended local session working a specific known-local task passes `runtime_local: true`. This is distinct from `preferred_agent`: `requires_local` is a HARD filter, `preferred_agent` only reorders. Ops corrections that need to set `requires_local`, `project_slug`, `sources`, or operator fields, move a terminal task to Needs Operator, or release a stuck claim use `admin_amend_agent_task` (human/ops only — never from a heartbeat).
 
 ## Mandatory Preflight
 
@@ -48,7 +116,8 @@ Follow this order exactly:
 5. Check human-hold and blocked tasks before new work.
 6. Resume exactly one ready hold or block if possible.
 7. Otherwise claim the oldest eligible `Agent Todo` task for this `agent_code`.
-8. Re-read the task after claim or resume.
+8. Re-read the task after claim or resume, and record the `claim_token` from the claim/resume response. Every later receipt on this task (`update`, `complete`, `block`, `request-review`, `hold`, `fail`) must pass that exact token; the board rejects receipts from a run that does not hold the current claim, even under the same `agent_code`.
+   **PASS the token as a tool argument. NEVER write it into receipt text.** The token is a per-run secret: it is the one thing proving you are the run holding this claim, and it is deliberately kept off every read surface (never returned by list/get reads, never in event payloads). A receipt is a published surface — its text lands in `agent_task_events.payload` and `agent_tasks.review_reason`, both readable by anything with board access — so echoing the token there hands the proof-of-holding to every other run and undoes the guard for that task. Seen in practice: a scheduled executor run wrote `used claim_token <uuid> for this receipt` into its Verification section, and the token was still live on that Agent Review row afterward. The run was not misbehaving; the contract said "record the token" and "pass that exact token", which describe a tool ARGUMENT, and nothing said not to print it — so a run being thorough about its Verification section would do exactly this. Say *that* you used the token, never its value. Same rule as any credential: naming it is fine, printing it is not.
 9. Do only the scoped work in the task packet.
 10. Post one receipt.
 11. Update the ledger.
@@ -94,7 +163,7 @@ Use exactly one task receipt for the heartbeat result:
 
 - `AGENT STATUS` for a progress heartbeat while still working.
 - `AGENT DONE` through `complete_agent_task` or `request_agent_review` only when the task packet's acceptance criteria are met and the scoped task is ready for review. This moves the task to `Agent Review`, not final done.
-- `AGENT HUMAN HOLD` through `hold_agent_task` when the packet validates but this heartbeat has no executor for the work. The task moves to `Agent Needs Input` for a human or local runtime.
+- `AGENT HUMAN HOLD` through `hold_agent_task` when the packet validates but this heartbeat has no executor for the work (say WHICH runner: "the scheduled queue-runner Edge Function performs claim-and-hold only". Local executor lanes DO execute; never write a receipt sentence that reads as a claim about the whole scheduled grid). The task moves to `Agent Needs Input` for a human or local runtime.
 - `AGENT BLOCKED` through `block_agent_task` when work cannot safely continue.
 - `AGENT FAILED` through `fail_agent_task` when a post-claim step fails. The task returns to `Agent Todo` with `attempt_count` incremented and the claim cleared.
 - `AGENT FOLLOW-UP` only when recording a follow-up is the scoped output and the tool path supports it.
@@ -130,15 +199,25 @@ The OE-8 closeout controller consumes these headings; a receipt missing a sectio
 
 DELIVERABLES-TO-FILE (local runtime): when the task produces a client-facing standalone draft (a listing pack, a bio, a directory field-by-field, blog copy), write it to `deliverables/<project_slug>/<task-shortid>-<slug>.md` in the Brain Bank repo and record that exact path under "Touched files or records:". `deliverables/` is gitignored — the draft never ships to brain-bank. Do NOT use `deliverables/` for code/config changes to a project: those are a commit/diff in that project's own repo; record the repo + branch under "Touched files or records:" instead.
 
-CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk leaves the full draft inline in "Work summary" and records `Touched files or records: None written (cloud runtime — draft inline above)`. No task is ever unreviewable.
+CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk calls `put_deliverable` with path `<project_slug>/<task-shortid>-<slug>.md` and the full draft, then records `Touched files or records: deliverables/<path> @ BUCKET`. If `put_deliverable` is unavailable or errors, leave the full draft inline in "Work summary" and record `Touched files or records: None written (cloud runtime — draft inline above)`. No task is ever unreviewable.
 
-OPERATOR STEP MARKER: when accepting the work leaves the operator a personal outside-system step (claim a listing and paste, make a call, confirm a fact), add this line inside "Follow-up recommendation:":
+OPERATOR STEP MARKER: when accepting the work leaves the operator a step outside the system (claim a listing and paste, make a call, confirm a fact) — OR leaves a file you staged that a human must still install — add this line inside "Follow-up recommendation:":
 
 ```text
 OPERATOR-ACTION: <one-line step> || OPERATOR-TARGET: <url-or-path>
 ```
 
-(OPERATOR-TARGET and the `||` are optional.) The closeout-controller reads this verbatim to route the task to the Needs Operator desk. No marker => terminal task, closes to Agent Done. The marker is valid ONLY inside "Follow-up recommendation:" — a marker in any other section holds the task (`OPERATOR_MARKER_OUTSIDE_FOLLOW_UP`) instead of closing it, so the step is never silently lost.
+(OPERATOR-TARGET and the `||` are optional.) **The marker must stand alone on its own line.** The controller only reads a marker at the START of a line, so a marker tacked onto the end of a prose sentence is invisible to it and the operator step is silently lost on apply. Write the prose, end the line, then put the marker on a line by itself.
+
+**Mandatory whenever the run stages a deliverable:** if the run wrote any file under `deliverables/` (see DELIVERABLES-TO-FILE), the task is NOT terminal — the staged file does nothing until a human installs it. Emit exactly:
+
+```text
+OPERATOR-ACTION: install <the deliverables/ path written> || OPERATOR-TARGET: <absolute path or URL the file must be installed to>
+```
+
+Stamp the install target at completion time; the run already knows it (it is the file the packet asked to modify, or the page/post/repo the draft is for). If the target is genuinely unknowable, name what is known in the target slot rather than dropping the marker.
+
+The closeout-controller reads the marker verbatim to route the task to the Needs Operator desk. It HOLDS any receipt that names a `deliverables/` file but carries no marker (`DELIVERABLE_WITHOUT_OPERATOR_ACTION`), and any receipt whose marker is mid-line (`OPERATOR_MARKER_NOT_LINE_ANCHORED`) — held and visible, never applied-and-lost. No deliverable and no operator step => terminal task, closes to Agent Done. The marker is valid ONLY inside "Follow-up recommendation:" — a marker in any other section holds the task (`OPERATOR_MARKER_OUTSIDE_FOLLOW_UP`) instead of closing it, so the step is never silently lost.
 
 VOICE RULES for any drafted client-facing or operator-voice content inside a task
 (blog drafts, emails, titles/metas): no em dashes; never use the words
@@ -148,7 +227,7 @@ craft-first tone, no hype.
 
 ## Scheduled Path: Claim-and-Hold
 
-The scheduled `queue-runner` Edge Function follows this same heartbeat with one hard difference: it has no executor, so it never writes `AGENT DONE`. Its claim-and-hold contract is: claim through the guarded MCP path, validate the packet, then post `AGENT HUMAN HOLD` with an honest 8-section hold receipt draft. Post-claim failures write `AGENT FAILED` on the claimed task instead of stranding it in `Agent Working`. The scheduled path reports held/blocked work in its summary; it never resumes held work itself.
+The scheduled `queue-runner` Edge Function follows this same heartbeat with one hard difference: the queue-runner Edge Function itself has no executor, so it never writes `AGENT DONE`. Its claim-and-hold contract is: claim through the guarded MCP path, validate the packet, then post `AGENT HUMAN HOLD` with an honest 8-section hold receipt draft. Post-claim failures write `AGENT FAILED` on the claimed task instead of stranding it in `Agent Working`. The scheduled path reports held/blocked work in its summary; it never resumes held work itself. Hold receipts must name the queue-runner specifically and state the packet-specific reason for the hold (e.g. "this intake draft's acceptance criteria require human review"). A receipt phrase like "the scheduled path has no executor" reads as a global capability claim and has already misled an attended session into reporting that scheduled lanes cannot execute content work at all.
 
 ## Ledger Update
 

@@ -1,4 +1,8 @@
-import { type AgentTaskRisk, isAgentTaskRisk } from "./_agent_tasks.ts";
+import {
+  type AgentTaskRisk,
+  isAgentTaskRisk,
+  resolveRequiresLocal,
+} from "./_agent_tasks.ts";
 
 export const AGENT_TASK_INTAKE_SOURCES = [
   "dashboard-button",
@@ -23,6 +27,8 @@ export interface AgentTaskIntakeInput {
   boundaries: string;
   intake_source: AgentTaskIntakeSource;
   agent_code?: string | null;
+  preferred_agent?: string | null;
+  requires_local?: boolean | null;
   project_slug?: string | null;
   priority?: "low" | "medium" | "high";
   risk?: AgentTaskRisk;
@@ -38,6 +44,8 @@ export interface AgentTaskIntakeRecord {
   label: "agent-instructions";
   status: "Standing";
   agent_code: string | null;
+  preferred_agent: string | null;
+  requires_local: boolean;
   project_slug: string | null;
   priority: "low" | "medium" | "high";
   risk: AgentTaskRisk;
@@ -66,6 +74,7 @@ export interface ActionItemPromotionRow {
 export interface ActionItemPromotionInput {
   action_item: ActionItemPromotionRow;
   agent_code?: string | null;
+  preferred_agent?: string | null;
   project_slug?: string | null;
   requested_by?: string | null;
 }
@@ -80,6 +89,7 @@ export interface ThoughtIntakeRow {
 export interface ThoughtIntakeInput {
   thought: ThoughtIntakeRow;
   agent_code?: string | null;
+  preferred_agent?: string | null;
   project_slug?: string | null;
   requested_by?: string | null;
 }
@@ -88,7 +98,12 @@ export interface FollowUpTaskInput {
   parent_task_id: string;
   desired_outcome: string;
   context: string;
+  do_steps?: string | null;
+  acceptance_criteria?: string | null;
+  boundaries?: string | null;
+  output_handoff?: string | null;
   agent_code?: string | null;
+  preferred_agent?: string | null;
   project_slug?: string | null;
   requested_by?: string | null;
   priority?: "low" | "medium" | "high";
@@ -190,6 +205,9 @@ export function buildAgentTaskIntakeRecord(
 
   const desiredOutcome = cleanText(input.desired_outcome, "desired_outcome");
   const agentCode = input.agent_code?.trim() || null;
+  const preferredAgent = input.preferred_agent?.trim() || null;
+  const projectSlug = input.project_slug?.trim() || null;
+  const requiresLocal = resolveRequiresLocal(input.requires_local, projectSlug);
   const priority = input.priority && VALID_PRIORITIES.has(input.priority)
     ? input.priority
     : "medium";
@@ -204,7 +222,9 @@ export function buildAgentTaskIntakeRecord(
     label: "agent-instructions",
     status: "Standing",
     agent_code: agentCode,
-    project_slug: input.project_slug?.trim() || null,
+    preferred_agent: preferredAgent,
+    requires_local: requiresLocal,
+    project_slug: projectSlug,
     priority,
     risk,
     requested_by: input.requested_by?.trim() || null,
@@ -318,6 +338,7 @@ export function buildActionItemPromotionIntakeRecord(
       "Manual draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, or mark the linked action item resolved from this intake step.",
     intake_source: "action-item-promotion",
     agent_code: input.agent_code,
+    preferred_agent: input.preferred_agent,
     project_slug: input.project_slug,
     priority: "medium",
     risk: "low",
@@ -388,6 +409,7 @@ export function buildThoughtIntakeRecord(
       "Manual draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, or mark related work complete from this intake step.",
     intake_source: thoughtIntakeSource(thought.metadata),
     agent_code: input.agent_code,
+    preferred_agent: input.preferred_agent,
     project_slug: input.project_slug,
     priority: "medium",
     risk: "low",
@@ -399,12 +421,48 @@ export function buildThoughtIntakeRecord(
   });
 }
 
+// GAP B (spec 2026-07-19 §5.2 + §5.3, decision D3 = REFUSE with override):
+// a Standing follow-up draft still defaults to this template when no
+// execution fields are provided, so it stays a manual-review-only stub
+// unless the caller deliberately supplies an executable packet.
+export const FOLLOW_UP_TEMPLATE_DO_STEPS =
+  "Review the parent task result, confirm this child work is still needed, expand this draft into a complete task packet if needed, then use the normal human promotion path when ready.";
+export const FOLLOW_UP_TEMPLATE_ACCEPTANCE_CRITERIA =
+  "The child Standing draft is reviewed by a human and remains unclaimable until explicitly promoted later.";
+export const FOLLOW_UP_TEMPLATE_OUTPUT_HANDOFF =
+  "Leave notes on the parent task, what follow-up remains, what evidence was checked, and whether this child draft should be promoted, rewritten, or left Standing.";
+export const FOLLOW_UP_TEMPLATE_BOUNDARIES =
+  "Manual follow-up draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, resolve linked action items, or mark project records complete from this draft step.";
+
+// Template-detection prefixes for the promote-time gate. The action-item
+// prefix already exists inline in index.ts's intake_shape_warning; the checks
+// converge on these constants so a future template rewording cannot silently
+// blind the gate.
+export const ACTION_ITEM_TEMPLATE_PREFIX = "Review the linked action item";
+export const THOUGHT_TEMPLATE_PREFIX = "Review the source thought";
+export const FOLLOW_UP_TEMPLATE_PREFIX = "Review the parent task result";
+
 export function buildFollowUpTaskRecord(
   input: FollowUpTaskInput,
 ): AgentTaskIntakeRecord {
   const parentTaskId = cleanText(input.parent_task_id, "parent_task_id");
   const desiredOutcome = cleanText(input.desired_outcome, "desired_outcome");
   const context = cleanText(input.context, "context");
+
+  const doSteps = input.do_steps?.trim() || null;
+  const acceptanceCriteria = input.acceptance_criteria?.trim() || null;
+  const boundaries = input.boundaries?.trim() || null;
+  const outputHandoff = input.output_handoff?.trim() || null;
+  const anyExecutionField = Boolean(
+    doSteps || acceptanceCriteria || boundaries || outputHandoff,
+  );
+  if (
+    anyExecutionField && !(doSteps && acceptanceCriteria && boundaries)
+  ) {
+    throw new Error(
+      "Executable follow-up packets must provide do_steps, acceptance_criteria, and boundaries together (output_handoff optional). A partial override recreates the claimable-but-unrunnable packet this parameter set exists to prevent.",
+    );
+  }
 
   return buildAgentTaskIntakeRecord({
     desired_outcome: desiredOutcome,
@@ -417,16 +475,14 @@ export function buildFollowUpTaskRecord(
         relationship: "parent",
       },
     ],
-    do_steps:
-      "Review the parent task result, confirm this child work is still needed, expand this draft into a complete task packet if needed, then use the normal human promotion path when ready.",
-    acceptance_criteria:
-      "The child Standing draft is reviewed by a human and remains unclaimable until explicitly promoted later.",
-    output_handoff:
-      "Leave notes on the parent task, what follow-up remains, what evidence was checked, and whether this child draft should be promoted, rewritten, or left Standing.",
-    boundaries:
-      "Manual follow-up draft only. Do not promote, claim, run, deploy, send messages, spend money, delete data, resolve linked action items, or mark project records complete from this draft step.",
+    do_steps: doSteps ?? FOLLOW_UP_TEMPLATE_DO_STEPS,
+    acceptance_criteria: acceptanceCriteria ??
+      FOLLOW_UP_TEMPLATE_ACCEPTANCE_CRITERIA,
+    output_handoff: outputHandoff ?? FOLLOW_UP_TEMPLATE_OUTPUT_HANDOFF,
+    boundaries: boundaries ?? FOLLOW_UP_TEMPLATE_BOUNDARIES,
     intake_source: "agent-follow-up",
     agent_code: input.agent_code,
+    preferred_agent: input.preferred_agent,
     project_slug: input.project_slug,
     priority: input.priority ?? "medium",
     risk: input.risk ?? "low",
@@ -436,4 +492,24 @@ export function buildFollowUpTaskRecord(
     }][follow-up] ${desiredOutcome}`,
     parent_task_id: parentTaskId,
   });
+}
+
+// GAP B — promote-time refusal guard (pure, D3 = REFUSE). Wired into
+// index.ts's promote_agent_task_intake BEFORE the RPC call.
+// Refuses ONLY the follow-up template: action-item and thought stubs keep
+// their warn-only behavior by decision D3.
+export function assertPromotablePacketShape(
+  task: { intake_source?: string | null; do_steps?: string | null },
+  allowTemplateBody: boolean,
+): void {
+  if (allowTemplateBody) return;
+  const doSteps = (task.do_steps ?? "").trim();
+  if (
+    task.intake_source === "agent-follow-up" &&
+    doSteps.startsWith(FOLLOW_UP_TEMPLATE_PREFIX)
+  ) {
+    throw new Error(
+      "PROMOTION_REFUSED_TEMPLATE_BODY: this follow-up draft still carries the Standing-template do_steps/boundaries, which forbid execution — promoting it guarantees a PACKET_INVALID bounce. Repair paths: (1) recreate it as an execution-shaped packet via create_agent_task_follow_up with do_steps + acceptance_criteria + boundaries, or via create_agent_task_intake, then archive this stub; (2) pass allow_template_body: true ONLY if you deliberately want the template stub in Agent Todo for attended human review.",
+    );
+  }
 }

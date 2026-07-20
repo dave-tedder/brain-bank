@@ -3,7 +3,9 @@ import {
   AGENT_TASK_RECEIPTS,
   type AgentTaskAccessRow,
   assertAgentCanWriteTask,
+  assertAutoPromotionCallerAllowed,
   assertClaimAllowed,
+  assertClaimTokenMatches,
   assertIntakePromotionAllowed,
   assertPromotionCallerAllowed,
   assertResumeTransitionAllowed,
@@ -11,12 +13,14 @@ import {
   assertStatusHeartbeatAllowed,
   assertWorkingExitAllowed,
   canAgentWriteTask,
+  compactObject,
   isAgentTaskRisk,
   isLedgerAutomationState,
   isReviewResolution,
   operatorTargetHasAllowedScheme,
   receiptForAppliedStatus,
   receiptForTaskTool,
+  resolveRequiresLocal,
 } from "./_agent_tasks.ts";
 
 const baseTask: AgentTaskAccessRow = {
@@ -137,6 +141,38 @@ Deno.test("promotion caller guard passes human attributions", () => {
   assertPromotionCallerAllowed("Jane Doe (Session 12, Claude Code)", codes);
   assertPromotionCallerAllowed("Jane via Codex parent session", codes);
   assertPromotionCallerAllowed("Jane", []);
+});
+
+// OE-12 Phase 4 auto-promote: the INVERSE guard. Only 'triage' passes;
+// everything the human-promote guard accepts (human names) is rejected here,
+// and vice versa.
+Deno.test("auto-promote caller guard passes only triage", () => {
+  assertAutoPromotionCallerAllowed("triage");
+  assertAutoPromotionCallerAllowed("  triage  ");
+});
+
+Deno.test("auto-promote caller guard rejects everything else", () => {
+  for (
+    const value of [
+      undefined,
+      null,
+      "",
+      "   ",
+      "triage-auto",
+      "local-codex",
+      "local-claude-code",
+      "Jane",
+      "Jane Doe",
+      "queue-runner",
+      "TRIAGE",
+    ]
+  ) {
+    assertThrows(
+      () => assertAutoPromotionCallerAllowed(value),
+      Error,
+      "only by agent_code 'triage'",
+    );
+  }
 });
 
 Deno.test("review apply guard only allows Agent Review tasks", () => {
@@ -301,6 +337,18 @@ Deno.test("apply receipt follows returned task status", () => {
   );
 });
 
+Deno.test("compactObject preserves explicit null clears", () => {
+  assertEquals(
+    compactObject({
+      keep: "value",
+      clear: null,
+      dropUndefined: undefined,
+      dropEmpty: "",
+    } as Record<string, unknown>),
+    { keep: "value", clear: null },
+  );
+});
+
 Deno.test("operator target allows http(s) schemes and rejects unsafe schemes", () => {
   assertEquals(operatorTargetHasAllowedScheme("https://example.com"), true);
   assertEquals(operatorTargetHasAllowedScheme("http://example.com"), true);
@@ -313,4 +361,76 @@ Deno.test("operator target allows http(s) schemes and rejects unsafe schemes", (
   assertEquals(operatorTargetHasAllowedScheme("data:text/html,test"), false);
   assertEquals(operatorTargetHasAllowedScheme("//evil.com/phish"), false);
   assertEquals(operatorTargetHasAllowedScheme("  //evil.com"), false);
+});
+
+Deno.test("claim token guard blocks run-side receipts without the current token", () => {
+  const task = {
+    agent_code: null,
+    claimed_by: "local-claude-code",
+    risk: "low" as const,
+    explicit_approval: false,
+    status: "Agent Working" as const,
+    claim_token: "11111111-1111-4111-8111-111111111111",
+  };
+
+  for (
+    const action of [
+      "update",
+      "complete",
+      "block",
+      "request-review",
+      "hold",
+      "fail",
+    ] as const
+  ) {
+    assertThrows(() => assertClaimTokenMatches(task, undefined, action));
+    assertThrows(() =>
+      assertClaimTokenMatches(
+        task,
+        "22222222-2222-4222-8222-222222222222",
+        action,
+      )
+    );
+    assertClaimTokenMatches(
+      task,
+      "11111111-1111-4111-8111-111111111111",
+      action,
+    );
+  }
+});
+
+Deno.test("claim token guard skips token-less claims and resume-family actions", () => {
+  const untokened = {
+    agent_code: null,
+    claimed_by: "local-claude-code",
+    risk: "low" as const,
+    explicit_approval: false,
+    status: "Agent Working" as const,
+    claim_token: null,
+  };
+  // Pre-migration claims carry no token and stay exempt.
+  assertClaimTokenMatches(untokened, undefined, "complete");
+
+  const tokened = { ...untokened, claim_token: "11111111-1111-4111-8111-111111111111" };
+  // Resume-family transitions are human-gated and mint a fresh token instead
+  // of presenting the old one.
+  for (const action of ["resume", "unblock", "answer"] as const) {
+    assertClaimTokenMatches(tokened, undefined, action);
+  }
+});
+
+Deno.test("resolveRequiresLocal: explicit boolean always wins", () => {
+  // Explicit true forces local for any project.
+  assertEquals(resolveRequiresLocal(true, "some-project"), true);
+  // Explicit false forces the shared pool for any project.
+  assertEquals(resolveRequiresLocal(false, "some-project"), false);
+});
+
+Deno.test("resolveRequiresLocal: default derives from the known-local list", () => {
+  // KNOWN_LOCAL_PROJECT_SLUGS ships empty, so every project defaults to the
+  // shared pool; a fork that adds a slug there flips its default to true.
+  assertEquals(resolveRequiresLocal(undefined, "some-project"), false);
+  assertEquals(resolveRequiresLocal(null, "Some-Project"), false);
+  assertEquals(resolveRequiresLocal(undefined, null), false);
+  assertEquals(resolveRequiresLocal(undefined, ""), false);
 });

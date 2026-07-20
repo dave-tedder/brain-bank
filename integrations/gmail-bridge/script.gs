@@ -3,15 +3,22 @@
 //
 // Google Apps Script that captures Gmail threads into Brain Bank.
 // Paste this into a new Apps Script project at script.google.com,
-// fill in the two constants below, save, authorize, and set up an
-// hourly time-driven trigger on processEmails().
+// set BRAIN_BANK_URL + BRAIN_KEY in Project Settings > Script
+// Properties, save, authorize, and set up an hourly time-driven
+// trigger on processEmails().
 //
 // Full walkthrough: docs/capture-sources/gmail-bridge.md
 // ============================================================
 
-// Replace both values below with yours.
-var BRAIN_BANK_URL = 'https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp/capture';
-var BRAIN_KEY = 'YOUR_BRAIN_KEY';
+// BRAIN_BANK_URL and BRAIN_KEY live in Project Settings > Script
+// Properties, not in this file, so rotating your key is a one-field
+// update instead of a code edit. A hardcoded key silently fails the
+// moment you rotate MCP_ACCESS_KEY in Supabase and forget to re-paste
+// it here. Set both properties before the first run (see the setup
+// doc, Step 3).
+var _props = PropertiesService.getScriptProperties();
+var BRAIN_BANK_URL = _props.getProperty('BRAIN_BANK_URL');
+var BRAIN_KEY = _props.getProperty('BRAIN_KEY');
 
 // Label names (must match the labels you created in Gmail).
 var LABEL_CAPTURE = 'brain-capture';
@@ -258,6 +265,9 @@ function captureToBrainBank(content) {
 // ============================================================
 function processEmails() {
   try {
+    if (!BRAIN_BANK_URL || !BRAIN_KEY) {
+      throw new Error('Missing Script Property BRAIN_BANK_URL or BRAIN_KEY. Set both in Project Settings > Script Properties.');
+    }
     var processedLabel = ensureLabel(LABEL_PROCESSED);
     var skippedLabel = ensureLabel(LABEL_SKIPPED);
     var captureLabel = ensureLabel(LABEL_CAPTURE);
@@ -324,8 +334,20 @@ function processEmails() {
 
     Logger.log('Done. Captured: ' + captured + ', Skipped: ' + skipped + ', Errors: ' + errors);
 
-    // Record last successful run for the health check function.
-    PropertiesService.getScriptProperties().setProperty('lastSuccessfulRun', new Date().toISOString());
+    // A run with capture errors is NOT a success. Do not write lastSuccessfulRun
+    // (so healthCheck() sees the staleness) and alert immediately. Stamping the
+    // timestamp unconditionally lets a silently failing capture path (stale key,
+    // wrong endpoint) stay green for weeks.
+    if (errors > 0) {
+      sendAlert('Capture Errors',
+        'processEmails finished with ' + errors + ' capture error(s). Captured: ' + captured
+        + ', Skipped: ' + skipped + '.\n\n'
+        + 'lastSuccessfulRun was NOT updated, so the daily health check will also flag this if it persists.\n\n'
+        + 'Check the execution log at script.google.com');
+    } else {
+      // Record last successful run for the health check function (clean runs only).
+      PropertiesService.getScriptProperties().setProperty('lastSuccessfulRun', new Date().toISOString());
+    }
 
   } catch (e) {
     Logger.log('FATAL: ' + e.message);
@@ -353,6 +375,19 @@ function sendAlert(subject, body) {
 // Alerts if no successful processEmails run in the last 3 hours.
 // ============================================================
 function healthCheck() {
+  // Config check first: a missing or misnamed Script Property means every
+  // processEmails run fails at the top guard. Property NAMES matter, not just
+  // that something is set (BRAIN_BANK_BASE where the script reads
+  // BRAIN_BANK_URL fails identically to nothing set at all).
+  var missing = [];
+  if (!BRAIN_BANK_URL) missing.push('BRAIN_BANK_URL');
+  if (!BRAIN_KEY) missing.push('BRAIN_KEY');
+  if (missing.length > 0) {
+    sendAlert('Health Check', 'Missing Script Property: ' + missing.join(', ')
+      + '. Set it in Project Settings > Script Properties. The name must match exactly.');
+    return;
+  }
+
   var lastRun = PropertiesService.getScriptProperties().getProperty('lastSuccessfulRun');
   if (!lastRun) {
     sendAlert('Health Check', 'No successful Gmail Bridge runs recorded. Check if the hourly trigger exists and processEmails is running.');

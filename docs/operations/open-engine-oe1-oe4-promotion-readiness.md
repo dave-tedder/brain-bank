@@ -96,7 +96,7 @@ cd dashboard && npm run build && npx tsc --noEmit
 
 Repeat the public hygiene scan from the session prompt before staging.
 
-Expected result for OE-1 through OE-4 promotion: no Dave-specific runtime examples in the files being promoted. If held OE-5/OE-6 files are present in the branch, do not promote that branch.
+Expected result for OE-1 through OE-4 promotion: no operator-specific runtime examples in the files being promoted. If held OE-5/OE-6 files are present in the branch, do not promote that branch.
 
 ## Explicit Holds
 
@@ -104,7 +104,7 @@ Hold OE-5 until Open Brain cron job `9` natural-run evidence is reviewed:
 
 - `827fc07` `port: OE-5 queue runner base from Open Brain`
 
-Hold OE-6 until the same job `9` evidence is reviewed, unless Dave explicitly approves a separate split:
+Hold OE-6 until the same job `9` evidence is reviewed, unless the operator explicitly approves a separate split:
 
 - `b719859` `feat(dashboard): add OE-6 intake promotion controls`
 - `8b4aac4` `fix(dashboard): normalize OE-6 intake source label`
@@ -116,4 +116,4 @@ Hold OE-6 until the same job `9` evidence is reviewed, unless Dave explicitly ap
 
 ## Stop Lines
 
-Stop and ask Dave before pushing, promoting to `dev` or `main`, rewriting migration history, editing cron or Queue Runner behavior, touching OE-5/OE-6 code, applying migrations, deploying functions, mutating live Supabase state, creating Slack intake behavior, adding autonomous promotion, expanding receipt/event vocabulary, or modifying any protected `* 2.*` duplicate file.
+Stop and ask the operator before pushing, promoting to `dev` or `main`, rewriting migration history, editing cron or Queue Runner behavior, touching OE-5/OE-6 code, applying migrations, deploying functions, mutating live Supabase state, creating Slack intake behavior, adding autonomous promotion, expanding receipt/event vocabulary, or modifying any protected `* 2.*` duplicate file.

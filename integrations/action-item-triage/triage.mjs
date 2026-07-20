@@ -117,12 +117,16 @@ function projectFromRow(row, statuses) {
 
 async function loadBusinessEvents() {
   try {
-    const rows = await supabase('business_events?select=title,date_start,attendees&order=date_start.desc&limit=500');
+    // Attendees live in the metadata jsonb (there is no top-level attendees
+    // column on business_events).
+    const rows = await supabase('business_events?select=title,date_start,metadata&order=date_start.desc&limit=500');
     return rows.map((row) => ({
       title: row.title || '',
       titleNorm: normalizeEvidenceText(row.title),
       date_start: row.date_start || null,
-      attendeesNorm: Array.isArray(row.attendees) ? row.attendees.map(normalizeEvidenceText).filter(Boolean) : [],
+      attendeesNorm: Array.isArray(row.metadata?.attendees)
+        ? row.metadata.attendees.map(normalizeEvidenceText).filter(Boolean)
+        : [],
     }));
   } catch (error) {
     console.warn('business_events unavailable; external event evidence skipped: ' + error.message.slice(0, 120));

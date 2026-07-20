@@ -24,7 +24,7 @@ The bridge is a Google Apps Script running entirely inside your Google account. 
 4. Filtered threads get a `brain-capture-skipped` label so you can audit the filter.
 5. Any thread carrying the manual `brain-capture` label gets sent regardless of the blocklist.
 
-The script stores a `lastSuccessfulRun` timestamp. A separate (optional) daily health-check trigger emails you if more than three hours have passed since the last success.
+The script stores a `lastSuccessfulRun` timestamp, but only when the run finished with zero capture errors. A run that hits capture errors (stale key, wrong endpoint, network failure) emails you immediately and leaves the timestamp untouched, so the separate (optional) daily health-check trigger also flags the staleness if more than three hours pass without a clean run.
 
 ---
 
@@ -63,25 +63,24 @@ At the top of the page, click **Untitled project** and rename the project to **B
 
 ---
 
-## Step 3. Paste the script and fill the two constants
+## Step 3. Paste the script and set the two Script Properties
 
 Open [`integrations/gmail-bridge/script.gs`](../../integrations/gmail-bridge/script.gs) in the Brain Bank repo. Select all and copy.
 
 Back in the Apps Script editor, open `Code.gs`, select all existing code, delete it, and paste the Brain Bank script.
 
-Scroll to the top of the script. Edit these two constants:
+**Set `BRAIN_BANK_URL` and `BRAIN_KEY` as Script Properties (not in the code).** These are your connection secret, so they live in project settings instead of the script body: rotating your key later becomes a one-field update instead of a code edit, and it can never go stale from a forgotten paste. Open **Project Settings** (the gear icon in the left sidebar) → scroll to **Script Properties** → **Add script property** twice:
 
-```javascript
-var BRAIN_BANK_URL = 'https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp/capture';
-var BRAIN_KEY = 'YOUR_BRAIN_KEY';
-```
+| Property | Value |
+| --- | --- |
+| `BRAIN_BANK_URL` | `https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp/capture` |
+| `BRAIN_KEY` | the same value you have in `.env` as `MCP_ACCESS_KEY` |
 
-- `BRAIN_BANK_URL`: replace `<your-project-ref>` with your Supabase project ref (the 20-character lowercase string from `deploy-from-scratch.md` Step 2). Leave the rest of the URL alone; `/functions/v1/open-brain-mcp/capture` is the REST endpoint path.
-- `BRAIN_KEY`: paste the same value you have in `.env` as `MCP_ACCESS_KEY`.
+For `BRAIN_BANK_URL`, replace `<your-project-ref>` with your Supabase project ref (the 20-character lowercase string from `deploy-from-scratch.md` Step 2) and leave the rest of the URL alone; `/functions/v1/open-brain-mcp/capture` is the REST endpoint path.
 
 Click the save icon (or press `Cmd+S` / `Ctrl+S`).
 
-**What success looks like:** the URL shows your real project ref and the key is a 64-character hex string. The title bar shows "Saved" with no yellow "unsaved changes" dot.
+**What success looks like:** Project Settings shows both `BRAIN_BANK_URL` (your real project ref) and `BRAIN_KEY` (a 64-character hex string) under Script Properties. If either is missing, the first run throws `Missing Script Property BRAIN_BANK_URL or BRAIN_KEY` instead of failing silently. The title bar shows "Saved" with no yellow "unsaved changes" dot.
 
 **If it fails:**
 - Paste includes weird characters: Apps Script is touchy about smart quotes getting substituted by the clipboard. If the editor shows red underlines on the `var` declarations, delete the two offending lines and retype them manually.
@@ -113,8 +112,9 @@ You can revoke all four at [myaccount.google.com/permissions](https://myaccount.
 
 **If it fails:**
 - **"Exception: You do not have permission to call UrlFetchApp.fetch"**: the authorization dialog did not complete. Re-run `processEmails` from the editor and click through the full dialog this time.
-- **"Brain Bank returned 401"** in the execution log: your `BRAIN_KEY` does not match `MCP_ACCESS_KEY` in Supabase. Re-copy the key from `.env`, paste into the script, save, run again.
-- **"Brain Bank returned 404"**: the URL is wrong. Verify the project ref in `BRAIN_BANK_URL` and that the path ends with `/functions/v1/open-brain-mcp/capture`.
+- **"Missing Script Property BRAIN_BANK_URL or BRAIN_KEY"**: you pasted the script but did not set the two Script Properties (Step 3). Open Project Settings → Script Properties and add both.
+- **"Brain Bank returned 401"** in the execution log: your `BRAIN_KEY` Script Property does not match `MCP_ACCESS_KEY` in Supabase. Re-copy the key from `.env`, update the `BRAIN_KEY` Script Property (Project Settings → Script Properties), run again.
+- **"Brain Bank returned 404"**: the URL is wrong. Verify the project ref in the `BRAIN_BANK_URL` Script Property and that the path ends with `/functions/v1/open-brain-mcp/capture`.
 - **"Exception: Request failed with error: ..."** with a DNS-looking message: your Supabase project ref is malformed (maybe you pasted the dashboard URL instead of just the ref). Re-copy from `deploy-from-scratch.md` Step 2.
 
 **Why this matters:** the authorization dialog only appears the first time. Subsequent runs (including trigger-driven ones) use the token granted here. If you re-authenticate or revoke the scope later, you have to re-run the function manually to re-authorize before the next trigger fires.
@@ -181,7 +181,7 @@ Click **Save**.
 
 ## Step 7. (Optional) Set up the daily health-check trigger
 
-The script tracks `lastSuccessfulRun` in Apps Script Properties. A separate function, `healthCheck`, compares that timestamp to now and emails you if more than three hours have elapsed. This catches silent failures that the trigger's own notification would miss (for example, if Google temporarily suspends Apps Script runs for your account).
+The script tracks `lastSuccessfulRun` in Apps Script Properties, and `processEmails` only writes it when a run finishes with zero capture errors. A separate function, `healthCheck`, first verifies the `BRAIN_BANK_URL` and `BRAIN_KEY` Script Properties are actually set (a misnamed property fails exactly like a missing one), then compares that timestamp to now and emails you if more than three hours have elapsed. This catches silent failures that the trigger's own notification would miss (for example, if Google temporarily suspends Apps Script runs for your account, or if every capture is erroring while the trigger itself runs green).
 
 In the same Triggers page, click **+ Add Trigger** again:
 
@@ -196,7 +196,7 @@ Click **Save**.
 **What success looks like:** a second trigger for `healthCheck` appears in the list, configured for a daily run.
 
 **If it fails:**
-- **Health check emails you every day even when `processEmails` is running fine**: the `processEmails` trigger has not recorded `lastSuccessfulRun` yet. Open the Executions tab and confirm at least one `processEmails` run has completed successfully in the last three hours, then wait until tomorrow's health check.
+- **Health check emails you every day even when `processEmails` is running fine**: the `processEmails` trigger has not recorded `lastSuccessfulRun` yet. Remember that a run only counts as successful when it has zero capture errors, so check for `Capture Errors` alert emails too. Open the Executions tab and confirm at least one `processEmails` run has completed cleanly in the last three hours, then wait until tomorrow's health check.
 
 **Why this matters:** a silent Apps Script outage is the most common failure mode for this bridge. Google does not pro-actively tell you when your triggers stop firing. The health check is a one-minute setup that catches six months of silent data loss.
 
@@ -274,7 +274,7 @@ You now have Gmail capturing into Brain Bank on an hourly schedule, with a tunab
 
 - **Add more capture sources.** Gmail is one of six dummies guides in `docs/capture-sources/`. Calendar, Apple Notes, voice memos, Notion, and the ChatGPT custom GPT are all independent and can be added incrementally.
 - **Decomission later.** If you want to stop the bridge, open Apps Script → Triggers → delete both triggers. The script stays but does nothing. To also stop it from reading your inbox, go to [myaccount.google.com/permissions](https://myaccount.google.com/permissions), find "Brain Bank Gmail Bridge," and click **Remove access**.
-- **Rotate `BRAIN_KEY`.** If you ever rotate `MCP_ACCESS_KEY` in Supabase (via `.env` + `supabase secrets set`), remember to update `BRAIN_KEY` in the Apps Script too. Save the script. The next trigger uses the new key.
+- **Rotate `BRAIN_KEY`.** If you ever rotate `MCP_ACCESS_KEY` in Supabase (via `.env` + `supabase secrets set`), update the `BRAIN_KEY` Script Property (Project Settings → Script Properties). No code edit and no save needed; the next trigger reads the new value. Because the key lives in a Script Property rather than the script body, a rotation you forget to mirror surfaces immediately as a 401 in the execution log rather than failing silently.
 - **Increase or shrink the search window.** The default `SEARCH_WINDOW = '2h'` overlaps an hourly trigger with a comfortable margin. If you switch to a less frequent trigger (every four hours, nightly), widen the window to match so no threads fall through the gap.
 
 If a step in this walkthrough does not work end-to-end, it is a doc bug, not a user bug. Open an issue on the repo.

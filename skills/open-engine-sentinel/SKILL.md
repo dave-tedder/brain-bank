@@ -79,6 +79,39 @@ After approval and insert, verify with `read_agent_ledger(agent_code:
    - Standing drafts older than 7 days = old drafts. Report count and short
      ids. Known canaries or smoke rows can be named as known, but still list
      them.
+   - **Stranded unclaimable rows.** Count `Agent Todo` rows with `risk` in
+     (`medium`, `high`). Every scheduled lane claims with `max_risk=low`, so
+     these are never claimed by any lane and wait for an attended session while
+     looking exactly like queued work. Report the count even when 0, and name
+     ids when not. This is a COUNT, deliberately: the briefing's
+     CLAIMABILITY SPLIT rule is instruction-shaped and a render can forget it,
+     but a ledger figure the digest surfaces cannot. Report it; never grade it.
+     A stranded medium is the operator's call, not a sentinel failure, and must
+     never change the verdict word.
+3b. **Auto-promote watch state (if the Phase 4 auto-promote lever is enabled).**
+   A gate whose start condition may never occur has to say so on a read surface,
+   or it silently becomes "wait forever". The 7-day watch's day-0 is the FIRST
+   auto-promotion, so if the intake funnel is in steady state and triage drafts
+   nothing, the clock never starts and nothing reports that fact. Compute it:
+
+```sql
+select
+  (select count(*) from agent_task_events
+    where payload->>'action' = 'auto-promoted')     as auto_promotions_ever,
+  (select min(created_at) from agent_task_events
+    where payload->>'action' = 'auto-promoted')     as day0,
+  (select enabled from oe_auto_promote_config)      as enabled,
+  (select daily_cap from oe_auto_promote_config)    as daily_cap;
+```
+
+   - `auto_promotions_ever = 0`: report `phase4 watch NOT STARTED, N days since
+     enable, 0 auto-promotions`. Do not report a day count.
+   - Otherwise day K = (today - day0::date) + 1; report `phase4 watch day K of
+     7`. K > 7 means the window elapsed and awaits the operator's ruling.
+   A cloud/curl-only variant of this lane cannot run SQL. It should instead read
+   a `PHASE4_WATCH_DAY0=YYYY-MM-DD` marker from the `triage-auto` ledger row's
+   notes, and report NOT STARTED when the marker is absent (the correct
+   fail-safe). If both exist and disagree, the marker is the one that is wrong.
 4. **Learning eval.** Query `public.agent_scorecard` with `execute_sql`:
 
 ```sql
@@ -121,8 +154,33 @@ Phase 4 row text: | <n> | <date> | natural/manual | <draft ids/count> | <mis-tie
 
 7. **Ledger + capture.** Only after the report is complete:
    - `write_agent_ledger` for `sentinel` with `last_successful_run` as the
-     current UTC datetime in `Z` form, `last_queue_result` as the compact
-     PASS/FAIL line, and notes only if there is something actionable.
+     current UTC datetime in `Z` form, and `last_queue_result` set to ONE
+     line in this exact shape — a contract, not a style choice, because the
+     daily digest's sentinel-report parser keys on the literal `OE-SENTINEL `
+     prefix (`supabase/functions/brain-digest/sentinel-report.ts`), so every
+     run of this lane must produce the same `last_queue_result` shape:
+     `OE-SENTINEL <PASS|WARN|FAIL> <date>: <detail>` (under 300 chars, name
+     every missed or warned lane). If a run's verdict is inconclusive, write
+     it as `WARN` and say "inconclusive" in `<detail>`, since the contract
+     vocabulary is only PASS/WARN/FAIL. Notes only if there is something
+     actionable.
+     `<detail>` must end with the reported figures from step 3 / 3b, in this
+     order, and every variant of this lane must match verbatim:
+     `; phase4 watch <day K of 7 | NOT STARTED, 0 auto-promotions>, <N> auto-promoted today; <M> medium/high in Agent Todo unclaimable by scheduled lanes`
+     Name the ids when M > 0. Omit the `phase4 watch` clause entirely if the
+     auto-promote lever is not enabled in this deployment. Example:
+     `OE-SENTINEL WARN 2026-01-09: 1 old Standing draft abc12345; spine + local 4/4 fresh; phase4 watch day 1 of 7, 5 auto-promoted today; 1 medium/high in Agent Todo unclaimable by scheduled lanes (def67890)`
+     The parser only keys on the `OE-SENTINEL ` prefix and passes the rest
+     through verbatim, so extending the detail is safe.
+     ALSO set `last_successful_run` on every run that completes the checks and
+     writes a verdict, whatever the verdict word is: PASS/WARN/FAIL describe the
+     BOARD, not this run, so a FAIL you successfully detected and reported is
+     still a successful sentinel run. A variant that never sets this field leaves
+     it frozen while heartbeats advance daily, which is a signal that lies to
+     anyone who gates on it.
+   - The Slack report in step 6 is NOT part of this contract and may stay in
+     its richer multi-line shape — only the ledger line above must match the
+     `OE-SENTINEL ` prefix and level vocabulary the digest reads.
    - `capture_thought` with tags `["open-engine","sentinel","oe-14"]`.
 
 ## Suggested Read-Only SQL Bundle

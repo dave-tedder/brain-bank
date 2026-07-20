@@ -31,7 +31,7 @@ export function isHighValuePage(page: { page_type: string }): boolean {
 // skipped outright on every scheduled run, which made a deep-backlog page that
 // times out unrecoverable: it never compiles, so its watermark never advances,
 // so the catch-up batch only grows, so it keeps timing out. The three topics
-// that stalled for 1-2 months (dave/development/seo) all landed here.
+// that stalled for 1-2 months (personal/development/seo) all landed here.
 //
 // The slow lane admits a bounded number of the most-overdue quarantined pages
 // back into the run at forced intake=1 (the smallest possible edit-mode batch;

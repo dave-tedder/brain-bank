@@ -71,27 +71,32 @@ At the top of the page, click **Untitled project** and rename the project to **B
 
 ---
 
-## Step 3. Paste the script and fill the three constants
+## Step 3. Paste the script, set the two Script Properties, fill the calendar constant
 
 Open [`integrations/calendar-sync/script.gs`](../../integrations/calendar-sync/script.gs) in the Brain Bank repo. Select all and copy.
 
 Back in the Apps Script editor, open `Code.gs`, select all existing code, delete it, and paste the Brain Bank script.
 
-Scroll to the top of the script. Edit these three constants:
+**Set `BRAIN_BANK_BASE` and `BRAIN_KEY` as Script Properties (not in the code).** These are your connection secret, so they live in project settings instead of the script body: rotating your key later becomes a one-field update instead of a code edit, and it can never go stale from a forgotten paste. Open **Project Settings** (the gear icon in the left sidebar) → scroll to **Script Properties** → **Add script property** twice:
+
+| Property | Value |
+| --- | --- |
+| `BRAIN_BANK_BASE` | `https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp` |
+| `BRAIN_KEY` | the same value you have in `.env` as `MCP_ACCESS_KEY` |
+
+For `BRAIN_BANK_BASE`, replace `<your-project-ref>` with your Supabase project ref (the 20-character lowercase string from `deploy-from-scratch.md` Step 2) and leave the rest of the URL alone. This is the `open-brain-mcp` base (no trailing path); the script appends `/event` and `/capture` at each call site.
+
+Then scroll to the top of the script and fill the one remaining constant:
 
 ```javascript
-var BRAIN_BANK_BASE = 'https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp';
-var BRAIN_KEY = 'YOUR_BRAIN_KEY';
 var ALLOWED_CALENDARS = ['your-email@example.com'];
 ```
 
-- `BRAIN_BANK_BASE`: replace `<your-project-ref>` with your Supabase project ref (the 20-character lowercase string from `deploy-from-scratch.md` Step 2). Leave the rest of the URL alone. Note that this is the `open-brain-mcp` base (no trailing path); the script appends `/event` and `/capture` at each call site.
-- `BRAIN_KEY`: paste the same value you have in `.env` as `MCP_ACCESS_KEY`.
 - `ALLOWED_CALENDARS`: replace `'your-email@example.com'` with the calendar IDs from Step 1. To sync multiple calendars, list each ID as its own string: `['alex@example.com', 'work-abc123@group.calendar.google.com']`.
 
 Click the save icon (or press `Cmd+S` / `Ctrl+S`).
 
-**What success looks like:** the URL shows your real project ref, the key is a 64-character hex string, and `ALLOWED_CALENDARS` contains at least one real calendar ID. The title bar shows "Saved" with no yellow "unsaved changes" dot.
+**What success looks like:** Project Settings shows both `BRAIN_BANK_BASE` (your real project ref) and `BRAIN_KEY` (a 64-character hex string) under Script Properties, and `ALLOWED_CALENDARS` in the code contains at least one real calendar ID. If either property is missing, the first run throws `Missing Script Property BRAIN_BANK_BASE or BRAIN_KEY` instead of failing silently. The title bar shows "Saved" with no yellow "unsaved changes" dot.
 
 **If it fails:**
 - Paste includes weird characters: Apps Script is touchy about smart quotes getting substituted by the clipboard. If the editor shows red underlines on the `var` declarations, delete the offending lines and retype them manually.
@@ -123,8 +128,9 @@ You can revoke all three at [myaccount.google.com/permissions](https://myaccount
 
 **If it fails:**
 - **"Exception: You do not have permission to call UrlFetchApp.fetch"**: the authorization dialog did not complete. Re-run `captureAndSync` from the editor and click through the full dialog this time.
-- **"Event sync error ... 401"** in the execution log: your `BRAIN_KEY` does not match `MCP_ACCESS_KEY` in Supabase. Re-copy the key from `.env`, paste into the script, save, run again.
-- **"Event sync error ... 404"**: the URL is wrong. Verify the project ref in `BRAIN_BANK_BASE` and that the path ends with `/functions/v1/open-brain-mcp` (no trailing slash).
+- **"Missing Script Property BRAIN_BANK_BASE or BRAIN_KEY"**: you pasted the script but did not set the two Script Properties (Step 3). Open Project Settings → Script Properties and add both.
+- **"Event sync error ... 401"** in the execution log: your `BRAIN_KEY` Script Property does not match `MCP_ACCESS_KEY` in Supabase. Re-copy the key from `.env`, update the `BRAIN_KEY` Script Property (Project Settings → Script Properties), run again.
+- **"Event sync error ... 404"**: the URL is wrong. Verify the project ref in the `BRAIN_BANK_BASE` Script Property and that the path ends with `/functions/v1/open-brain-mcp` (no trailing slash).
 - **"No events in the next 30 days"** but you definitely have events: `ALLOWED_CALENDARS` does not include your real calendar ID. Check Step 1 again; the execution log lines starting `Skipping calendar:` tell you the exact IDs the script saw.
 
 **Why this matters:** the authorization dialog only appears the first time. Subsequent runs (including trigger-driven ones) use the token granted here. If you re-authenticate or revoke the scope later, you have to re-run the function manually to re-authorize before the next trigger fires.
@@ -267,7 +273,7 @@ You now have Google Calendar mirroring into Brain Bank on a daily schedule, with
 
 - **Add more capture sources.** Calendar is one of six dummies guides in `docs/capture-sources/`. Gmail, Apple Notes, voice memos, Notion, and the ChatGPT custom GPT are all independent and can be added incrementally.
 - **Decommission later.** If you want to stop the sync, open Apps Script → Triggers → delete the `captureAndSync` trigger. The script stays but does nothing. To also stop it from reading your calendar, go to [myaccount.google.com/permissions](https://myaccount.google.com/permissions), find "Brain Bank Calendar Sync," and click **Remove access**.
-- **Rotate `BRAIN_KEY`.** If you ever rotate `MCP_ACCESS_KEY` in Supabase (via `.env` + `supabase secrets set`), remember to update `BRAIN_KEY` in the Apps Script too. Save the script. The next trigger uses the new key.
+- **Rotate `BRAIN_KEY`.** If you ever rotate `MCP_ACCESS_KEY` in Supabase (via `.env` + `supabase secrets set`), update the `BRAIN_KEY` Script Property (Project Settings → Script Properties). No code edit and no save needed; the next trigger reads the new value. Because the key lives in a Script Property rather than the script body, a rotation you forget to mirror surfaces immediately as a 401 in the execution log rather than failing silently.
 - **Add a health-check trigger.** The Gmail Bridge ships with a separate `healthCheck()` function and daily trigger that emails you if the main run has not succeeded in three hours. The Calendar Sync does not include this by default (daily triggers with email-on-failure tend to be noisy enough). Add one if you need it.
 
 If a step in this walkthrough does not work end-to-end, it is a doc bug, not a user bug. Open an issue on the repo.
