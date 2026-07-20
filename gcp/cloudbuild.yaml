@@ -37,6 +37,10 @@ steps:
         
         # Install psql client and bootstrap compatibility schemas/roles directly on the database
         apk add --no-cache postgresql-client
+        
+        # Wipe any partial migration schemas/tables to ensure a clean migration run from scratch
+        psql "$$LOCAL_DB_URL" -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO postgres; GRANT ALL ON SCHEMA public TO public; DROP SCHEMA IF EXISTS supabase_migrations CASCADE;"
+        
         psql "$$LOCAL_DB_URL" -f gcp/gcp_compat_start.sql
         
         # Log the database roles to verify creation
