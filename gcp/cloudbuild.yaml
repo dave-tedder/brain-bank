@@ -70,6 +70,17 @@ steps:
         }
         for (const date in groups) {
           if (groups[date].length > 1) {
+            // Sort migrations within the group so security hardening, cleanup, and revoking occur last
+            groups[date].sort((a, b) => {
+              const score = (file) => {
+                let s = 0;
+                if (file.includes('security') || file.includes('hardening') || file.includes('revoke') || file.includes('cleanup')) {
+                  s += 1;
+                }
+                return s;
+              };
+              return score(a) - score(b);
+            });
             groups[date].forEach((file, index) => {
               const match = file.match(/^(\\d{8})_(.+)$/);
               const newName = date + String(index).padStart(6, '0') + '_' + match[2];
