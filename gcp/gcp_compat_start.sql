@@ -7,6 +7,21 @@
 -- Create extensions schema (for standard pgvector and pgcrypto placement)
 CREATE SCHEMA IF NOT EXISTS extensions;
 
+-- Create default Supabase roles used in policy declarations
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'anon') THEN
+    CREATE ROLE anon;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'authenticated') THEN
+    CREATE ROLE authenticated;
+  END IF;
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'service_role') THEN
+    CREATE ROLE service_role;
+  END IF;
+END
+$$;
+
 -- 1. Create auth schema and PostgREST role helper
 CREATE SCHEMA IF NOT EXISTS auth;
 
