@@ -31,6 +31,13 @@ GRANT anon TO postgres;
 GRANT authenticated TO postgres;
 GRANT service_role TO postgres;
 
+-- Configure service_role to behave like Supabase's service_role (bypassing RLS with full privileges)
+ALTER ROLE service_role BYPASSRLS;
+GRANT ALL ON SCHEMA public TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO service_role;
+
 -- 1. Create auth schema and PostgREST role helper
 CREATE SCHEMA IF NOT EXISTS auth;
 
