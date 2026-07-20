@@ -2,8 +2,9 @@ FROM denoland/deno:alpine-2.0.6
 
 WORKDIR /app
 
-# Copy shared code and ingest-thought function code
+# Copy shared code, open-brain-mcp (for _agent_intake imports), and ingest-thought function code
 COPY supabase/functions/_shared /app/supabase/functions/_shared
+COPY supabase/functions/open-brain-mcp /app/supabase/functions/open-brain-mcp
 COPY supabase/functions/ingest-thought /app/supabase/functions/ingest-thought
 
 # Pre-cache dependencies
