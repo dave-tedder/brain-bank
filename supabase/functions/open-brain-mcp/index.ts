@@ -167,6 +167,39 @@ async function getEmbedding(text: string): Promise<number[]> {
   return data.data![0].embedding!;
 }
 
+// Near-duplicate guard: reworded re-captures of the same fact (session
+// closeouts captured twice, task-packet echoes) slip past the SHA-256
+// content_hash because the bytes differ. Same source + embedding similarity
+// above NEAR_DUP_THRESHOLD within NEAR_DUP_WINDOW_MINUTES is a duplicate.
+// Mechanical captures (daily sync/receipt templates) are exempt — they are a
+// legitimate recurring time series that scores high similarity run after run.
+// Thread replies are also exempt at the call-site level: their stored
+// embedding combines parent+reply, which would score near its own parent.
+// Fails open: a guard error must never block a capture.
+const NEAR_DUP_THRESHOLD = 0.95;
+const NEAR_DUP_WINDOW_MINUTES = 60;
+
+async function findNearDuplicate(
+  embedding: number[],
+  source: string,
+  content: string,
+): Promise<string | null> {
+  if (isMechanicalCapture(content)) return null;
+  const { data, error } = await supabase.rpc("find_recent_near_duplicate", {
+    query_embedding: embedding,
+    source_filter: source,
+    sim_threshold: NEAR_DUP_THRESHOLD,
+    window_minutes: NEAR_DUP_WINDOW_MINUTES,
+  });
+  if (error) {
+    console.error(
+      `near-dup guard failed open (capturing anyway): ${error.message}`,
+    );
+    return null;
+  }
+  return (data?.[0]?.id as string | undefined) ?? null;
+}
+
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
   const { data } = await callOpenRouter({
     function_slug: FUNCTION_SLUG,
@@ -996,6 +1029,13 @@ async function handleRestCapture(req: Request): Promise<Response> {
       getEmbedding(content),
       extractMetadata(content),
     ]);
+    const nearDupId = await findNearDuplicate(embedding, source, content);
+    if (nearDupId) {
+      return jsonResponse({
+        status: "duplicate",
+        message: `Already in the brain (near-duplicate of ${nearDupId}).`,
+      });
+    }
     const knownSlugs = await loadKnownSlugs(supabase);
     const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
     // Route map: fill a null project from content phrases (unique match only).
@@ -3751,6 +3791,15 @@ server.registerTool(
         getEmbedding(content),
         extractMetadata(content),
       ]);
+      const nearDupId = await findNearDuplicate(embedding, "mcp", content);
+      if (nearDupId) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Already in the brain (near-duplicate of ${nearDupId}).`,
+          }],
+        };
+      }
       const knownSlugs = await loadKnownSlugs(supabase);
       const coerced = coerceMetadata(rawMetadata, knownSlugs, content);
       // Route map: fill a null project from content phrases (unique match only).
