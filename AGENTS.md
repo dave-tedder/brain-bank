@@ -75,3 +75,8 @@ brain-bank/
 - **Something is broken.** [`docs/troubleshooting.md`](./docs/troubleshooting.md)
 - **What changed in this release?** [`CHANGELOG.md`](./CHANGELOG.md)
 - **Dashboard-specific guidance.** [`dashboard/AGENTS.md`](./dashboard/AGENTS.md)
+
+## Windows Local Development Learnings
+
+- **Path Separators in Unit Tests:** Node's native path functions (such as `isAbsolute` and `join`) output Windows-style backslashes (`\`) when running on Windows. Hardcoded unit tests comparing absolute paths against POSIX strings will fail. When asserting path structures, conditionally normalize paths by replacing backslashes with forward slashes (e.g. `path.replace(/\\/g, "/")`) if the mock root uses POSIX slashes or if POSIX outputs are expected.
+- **PowerShell Script Execution Policy Locks:** In Windows environments, PowerShell execution policies can prevent the execution of Node.js / CLI script wrappers (npm commands). Use `cmd /c` to execute commands securely and reliably.
