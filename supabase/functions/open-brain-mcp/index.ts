@@ -82,6 +82,10 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const FUNCTION_SLUG = "open-brain-mcp";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+if (SUPABASE_URL && (SUPABASE_URL.includes("bb-postgrest") || !SUPABASE_URL.includes("supabase.co"))) {
+  // @ts-ignore
+  supabase.rest.url = SUPABASE_URL;
+}
 
 if (Deno.env.get("GCP_PROJECT")) {
   Object.defineProperty(supabase, "storage", {

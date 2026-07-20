@@ -34,6 +34,10 @@ const SLACK_SIGNING_SECRET = Deno.env.get("SLACK_SIGNING_SECRET") || "";
 
 const FUNCTION_SLUG = "ingest-thought";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+if (SUPABASE_URL && (SUPABASE_URL.includes("bb-postgrest") || !SUPABASE_URL.includes("supabase.co"))) {
+  // @ts-ignore
+  supabase.rest.url = SUPABASE_URL;
+}
 
 // --- HMAC-SHA256 Signature Verification ---
 

@@ -24,6 +24,10 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const FUNCTION_SLUG = "compile-pages";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+if (SUPABASE_URL && (SUPABASE_URL.includes("bb-postgrest") || !SUPABASE_URL.includes("supabase.co"))) {
+  // @ts-ignore
+  supabase.rest.url = SUPABASE_URL;
+}
 
 // Deno Edge Runtime exposes EdgeRuntime as a global; declare it for the type
 // checker so the workspace deno check stays clean for the audit-row write.
