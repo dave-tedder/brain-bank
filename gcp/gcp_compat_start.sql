@@ -76,3 +76,18 @@ AS $$
   SELECT 1::bigint;
 $$;
 
+-- Create mock public.call_edge_function to satisfy REVOKE statements in security migrations
+CREATE OR REPLACE FUNCTION public.call_edge_function(
+  func_name text,
+  qs text,
+  method text
+)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN 'mock';
+END;
+$$;
+
+
