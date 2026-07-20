@@ -53,7 +53,7 @@ on conflict (agent_code) do nothing;
 
 create table if not exists public.oe_auto_promote_config (
   id boolean primary key default true,
-  enabled boolean not null default true,
+  enabled boolean not null default false,
   daily_cap integer not null default 5,
   updated_at timestamptz not null default now(),
   constraint oe_auto_promote_config_singleton check (id = true),
@@ -61,7 +61,7 @@ create table if not exists public.oe_auto_promote_config (
 );
 
 comment on table public.oe_auto_promote_config is
-  'OE-12 Phase 4 auto-promote config. Single row (id=true). enabled=false is the instant server-side off-switch (rollback level 2); daily_cap=0 has the same effect via the cap check. Default launch values: enabled true, daily_cap 5 (per UTC day).';
+  'OE-12 Phase 4 auto-promote config. Single row (id=true). enabled=false is the instant server-side off-switch (rollback level 2); daily_cap=0 has the same effect via the cap check. Ships OFF (enabled false, daily_cap 5 per UTC day): autonomous promotion is opt-in, so flip enabled=true only once you have your own clean-day evidence.';
 
 alter table public.oe_auto_promote_config enable row level security;
 revoke all on public.oe_auto_promote_config from anon, authenticated;
@@ -72,9 +72,12 @@ create policy "Service role full access on oe_auto_promote_config"
   on public.oe_auto_promote_config for all
   using (auth.role() = 'service_role'::text);
 
--- Launch config: all four categories at cap 5/UTC-day.
+-- Ships OFF. All four allowlist categories are wired at cap 5/UTC-day, but
+-- enabled=false so a fresh install never machine-promotes work into the claim
+-- pool before the operator has decided to allow it. Flip to true once you have
+-- your own clean-day evidence (see the Phase 4 readiness watch).
 insert into public.oe_auto_promote_config (id, enabled, daily_cap)
-values (true, true, 5)
+values (true, false, 5)
 on conflict (id) do nothing;
 
 -- ---------------------------------------------------------------------------
