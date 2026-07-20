@@ -33,11 +33,16 @@ Everything on the backend is stateless. Secrets live in Supabase's vault, so key
 
 The `dashboard/` directory is a Next.js app that runs as a long-lived web service, not part of the Supabase Edge Function deploy. It is the primary surface for day-to-day operator use: browsing captures, projects, wiki pages, search, past digests, chat over your memory, and the manual Open Engine `/tasks` board.
 
-The reference deployment runs on Railway with the standalone Next.js output target:
+**Deploy guide: [`docs/dashboard-deploy.md`](docs/dashboard-deploy.md)**, covering Railway and Vercel step by step, the six required env vars and which surface each one breaks, and the middleware check you should run after your first deploy.
 
-- Build root: `dashboard/`
+The reference deployment runs on Railway with the standalone Next.js output target. Vercel works too; set the root directory to `dashboard/` and leave `output: "standalone"` alone if you plan to contribute back, since it is there for Railway.
+
+- Build root: `dashboard/` (not the repo root, on either platform)
 - Watch pattern: `dashboard/**` (Railway only rebuilds when files under this path change)
 - Required env vars: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENROUTER_API_KEY`, `DASHBOARD_PASSWORD`, `BRAIN_BANK_URL`, `BRAIN_BANK_API_KEY`
+- Node 20 (see `dashboard/.nvmrc`)
+
+The last two env vars do not fail the build when missing; they fail `/chat` at request time, which is why they are the two people forget.
 
 See [`dashboard/README.md`](dashboard/README.md) for env-var details, the Railway watch pattern, the standalone-output gotcha, and the local-dev quickstart. [`dashboard/AGENTS.md`](dashboard/AGENTS.md) is the agent-facing companion with file-by-file conventions.
 
@@ -150,6 +155,10 @@ If you intend to expose Brain Bank to multiple users or untrusted callers, place
 ## Inspired by
 
 Nate Jones' semantic memory build series was the starting point and remains the clearest introduction to the underlying design. Brain Bank is an independent implementation of those ideas, extended with proactive digest delivery, cross-reference briefings, a wiki compilation layer, and auto-resolution of action items.
+
+## Contributing
+
+Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) for the workflow, then [`docs/new-contributor-notes.md`](docs/new-contributor-notes.md) for the traps: Windows setup, the gitignored `profile.json` that has to exist before anything type-checks, and what CI actually enforces.
 
 ## Contributors
 
