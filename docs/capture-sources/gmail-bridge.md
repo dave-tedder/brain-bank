@@ -24,7 +24,7 @@ The bridge is a Google Apps Script running entirely inside your Google account. 
 4. Filtered threads get a `brain-capture-skipped` label so you can audit the filter.
 5. Any thread carrying the manual `brain-capture` label gets sent regardless of the blocklist.
 
-The script stores a `lastSuccessfulRun` timestamp. A separate (optional) daily health-check trigger emails you if more than three hours have passed since the last success.
+The script stores a `lastSuccessfulRun` timestamp, but only when the run finished with zero capture errors. A run that hits capture errors (stale key, wrong endpoint, network failure) emails you immediately and leaves the timestamp untouched, so the separate (optional) daily health-check trigger also flags the staleness if more than three hours pass without a clean run.
 
 ---
 
@@ -181,7 +181,7 @@ Click **Save**.
 
 ## Step 7. (Optional) Set up the daily health-check trigger
 
-The script tracks `lastSuccessfulRun` in Apps Script Properties. A separate function, `healthCheck`, compares that timestamp to now and emails you if more than three hours have elapsed. This catches silent failures that the trigger's own notification would miss (for example, if Google temporarily suspends Apps Script runs for your account).
+The script tracks `lastSuccessfulRun` in Apps Script Properties, and `processEmails` only writes it when a run finishes with zero capture errors. A separate function, `healthCheck`, first verifies the `BRAIN_BANK_URL` and `BRAIN_KEY` Script Properties are actually set (a misnamed property fails exactly like a missing one), then compares that timestamp to now and emails you if more than three hours have elapsed. This catches silent failures that the trigger's own notification would miss (for example, if Google temporarily suspends Apps Script runs for your account, or if every capture is erroring while the trigger itself runs green).
 
 In the same Triggers page, click **+ Add Trigger** again:
 
@@ -196,7 +196,7 @@ Click **Save**.
 **What success looks like:** a second trigger for `healthCheck` appears in the list, configured for a daily run.
 
 **If it fails:**
-- **Health check emails you every day even when `processEmails` is running fine**: the `processEmails` trigger has not recorded `lastSuccessfulRun` yet. Open the Executions tab and confirm at least one `processEmails` run has completed successfully in the last three hours, then wait until tomorrow's health check.
+- **Health check emails you every day even when `processEmails` is running fine**: the `processEmails` trigger has not recorded `lastSuccessfulRun` yet. Remember that a run only counts as successful when it has zero capture errors, so check for `Capture Errors` alert emails too. Open the Executions tab and confirm at least one `processEmails` run has completed cleanly in the last three hours, then wait until tomorrow's health check.
 
 **Why this matters:** a silent Apps Script outage is the most common failure mode for this bridge. Google does not pro-actively tell you when your triggers stop firing. The health check is a one-minute setup that catches six months of silent data loss.
 

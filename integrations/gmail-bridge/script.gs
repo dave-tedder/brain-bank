@@ -334,8 +334,20 @@ function processEmails() {
 
     Logger.log('Done. Captured: ' + captured + ', Skipped: ' + skipped + ', Errors: ' + errors);
 
-    // Record last successful run for the health check function.
-    PropertiesService.getScriptProperties().setProperty('lastSuccessfulRun', new Date().toISOString());
+    // A run with capture errors is NOT a success. Do not write lastSuccessfulRun
+    // (so healthCheck() sees the staleness) and alert immediately. Stamping the
+    // timestamp unconditionally lets a silently failing capture path (stale key,
+    // wrong endpoint) stay green for weeks.
+    if (errors > 0) {
+      sendAlert('Capture Errors',
+        'processEmails finished with ' + errors + ' capture error(s). Captured: ' + captured
+        + ', Skipped: ' + skipped + '.\n\n'
+        + 'lastSuccessfulRun was NOT updated, so the daily health check will also flag this if it persists.\n\n'
+        + 'Check the execution log at script.google.com');
+    } else {
+      // Record last successful run for the health check function (clean runs only).
+      PropertiesService.getScriptProperties().setProperty('lastSuccessfulRun', new Date().toISOString());
+    }
 
   } catch (e) {
     Logger.log('FATAL: ' + e.message);
@@ -363,6 +375,19 @@ function sendAlert(subject, body) {
 // Alerts if no successful processEmails run in the last 3 hours.
 // ============================================================
 function healthCheck() {
+  // Config check first: a missing or misnamed Script Property means every
+  // processEmails run fails at the top guard. Property NAMES matter, not just
+  // that something is set (BRAIN_BANK_BASE where the script reads
+  // BRAIN_BANK_URL fails identically to nothing set at all).
+  var missing = [];
+  if (!BRAIN_BANK_URL) missing.push('BRAIN_BANK_URL');
+  if (!BRAIN_KEY) missing.push('BRAIN_KEY');
+  if (missing.length > 0) {
+    sendAlert('Health Check', 'Missing Script Property: ' + missing.join(', ')
+      + '. Set it in Project Settings > Script Properties. The name must match exactly.');
+    return;
+  }
+
   var lastRun = PropertiesService.getScriptProperties().getProperty('lastSuccessfulRun');
   if (!lastRun) {
     sendAlert('Health Check', 'No successful Gmail Bridge runs recorded. Check if the hourly trigger exists and processEmails is running.');
