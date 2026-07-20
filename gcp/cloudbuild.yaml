@@ -184,7 +184,7 @@ steps:
       - "--set-env-vars=GCP_PROJECT=${PROJECT_ID}"
       - "--set-env-vars=GCS_BUCKET_NAME=brainbank-deliverables-bucket"
       - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
-      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-jwt-secret:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
       - "--set-secrets=MCP_ACCESS_KEY=brainbank-mcp-access-key:latest"
       - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
     waitFor: ["push-images", "deploy-postgrest"]
@@ -206,7 +206,7 @@ steps:
       - "--cpu=1"
       - "--port=8000"
       - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
-      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-jwt-secret:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
       - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
       - "--set-secrets=SLACK_BOT_TOKEN=brainbank-slack-bot-token:latest"
       - "--set-secrets=SLACK_SIGNING_SECRET=brainbank-slack-signing-secret:latest"
@@ -232,7 +232,7 @@ steps:
       - "--cpu=1"
       - "--port=8000"
       - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
-      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-jwt-secret:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
       - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
       - "--set-secrets=MCP_ACCESS_KEY=brainbank-mcp-access-key:latest"
     waitFor: ["push-images", "deploy-postgrest"]
@@ -254,7 +254,7 @@ steps:
       - "--cpu=1"
       - "--port=8000"
       - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
-      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-jwt-secret:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
       - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
     waitFor: ["push-images", "deploy-postgrest"]
 
@@ -275,7 +275,7 @@ steps:
       - "--cpu=1"
       - "--port=8000"
       - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
-      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-jwt-secret:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
       - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
     waitFor: ["push-images", "deploy-postgrest"]
 
@@ -295,7 +295,7 @@ steps:
       - "--memory=512Mi"
       - "--cpu=1"
       - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
-      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-jwt-secret:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
       - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
       - "--set-secrets=DASHBOARD_PASSWORD=brainbank-dashboard-password:latest"
       - "--set-secrets=BRAIN_BANK_URL=brainbank-mcp-url:latest"
