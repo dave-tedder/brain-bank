@@ -7,6 +7,10 @@
 -- Create extensions schema (for standard pgvector and pgcrypto placement)
 CREATE SCHEMA IF NOT EXISTS extensions;
 
+-- Set global search path to include extensions, matching Supabase default behavior
+ALTER DATABASE postgres SET search_path TO "$user", public, extensions;
+ALTER ROLE postgres SET search_path TO "$user", public, extensions;
+
 -- Create default Supabase roles used in policy declarations
 DO $$
 BEGIN
