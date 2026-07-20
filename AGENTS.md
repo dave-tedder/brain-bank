@@ -80,3 +80,10 @@ brain-bank/
 
 - **Path Separators in Unit Tests:** Node's native path functions (such as `isAbsolute` and `join`) output Windows-style backslashes (`\`) when running on Windows. Hardcoded unit tests comparing absolute paths against POSIX strings will fail. When asserting path structures, conditionally normalize paths by replacing backslashes with forward slashes (e.g. `path.replace(/\\/g, "/")`) if the mock root uses POSIX slashes or if POSIX outputs are expected.
 - **PowerShell Script Execution Policy Locks:** In Windows environments, PowerShell execution policies can prevent the execution of Node.js / CLI script wrappers (npm commands). Use `cmd /c` to execute commands securely and reliably.
+
+## Google Cloud Platform (GCP) Deployment Learnings
+
+- **Windows Secret Injection:** Always write secrets using direct stdin file buffers/parameters in Python rather than command-line `echo` pipes on Windows to prevent trailing space/newline (`\r\n`) validation crashes inside Deno's URL parser.
+- **Deno Cloud Run Port Configuration:** Deno 2.x `Deno.serve()` defaults to port `8000`. Cloud Run services deploying Deno containers must specify `--port=8000` to prevent TCP startup health check failures.
+- **Cloud Run Deploy Secret Check:** Cloud Run requires all referenced secrets to exist in GCP Secret Manager at deploy time. Dummy secrets (e.g. `"optional"`) must be provisioned on first deploy for optional integrations like Slack.
+
