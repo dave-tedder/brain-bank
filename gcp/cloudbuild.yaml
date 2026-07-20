@@ -50,6 +50,9 @@ steps:
         sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_cron/-- CREATE EXTENSION IF NOT EXISTS pg_cron/g' supabase/migrations/0000_extensions.sql
         sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_net/-- CREATE EXTENSION IF NOT EXISTS pg_net/g' supabase/migrations/0000_extensions.sql
         
+        # Resolve duplicate policy declaration in security_baseline_fixes migration
+        sed -i 's/CREATE POLICY "Service role full access on digests"/DROP POLICY IF EXISTS "Service role full access on digests" ON public.digests; CREATE POLICY "Service role full access on digests"/g' supabase/migrations/20260513_security_baseline_fixes.sql
+        
         # Dynamically rename duplicate date-prefixed migration files to prevent primary key conflicts
         node -e "
         const fs = require('fs');
