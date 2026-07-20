@@ -1,0 +1,14 @@
+FROM denoland/deno:alpine-2.0.6
+
+WORKDIR /app
+
+# Copy shared code and ingest-thought function code
+COPY supabase/functions/_shared /app/supabase/functions/_shared
+COPY supabase/functions/ingest-thought /app/supabase/functions/ingest-thought
+
+# Pre-cache dependencies
+RUN deno cache supabase/functions/ingest-thought/index.ts
+
+EXPOSE 8080
+
+CMD ["run", "--allow-net", "--allow-env", "--allow-read", "supabase/functions/ingest-thought/index.ts"]

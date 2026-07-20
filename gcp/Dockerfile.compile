@@ -1,0 +1,14 @@
+FROM denoland/deno:alpine-2.0.6
+
+WORKDIR /app
+
+# Copy shared code and compile-pages function code
+COPY supabase/functions/_shared /app/supabase/functions/_shared
+COPY supabase/functions/compile-pages /app/supabase/functions/compile-pages
+
+# Pre-cache dependencies
+RUN deno cache supabase/functions/compile-pages/index.ts
+
+EXPOSE 8080
+
+CMD ["run", "--allow-net", "--allow-env", "--allow-read", "supabase/functions/compile-pages/index.ts"]
