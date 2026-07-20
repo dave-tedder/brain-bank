@@ -21,11 +21,31 @@ steps:
     args:
       - "-c"
       - |
+        # Download Google Cloud SQL Auth Proxy v2
+        wget https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.11.0/cloud-sql-proxy.linux.amd64 -O cloud_sql_proxy
+        chmod +x cloud_sql_proxy
+        
+        # Run the proxy in the background pointing to the Cloud SQL instance
+        ./cloud_sql_proxy --port 5432 $PROJECT_ID:us-east1:brainbank-db &
+        sleep 3
+        
+        # Prepend the GCP compatibility setup (schemas, auth.role, storage) to the very first migration
+        cat supabase/migrations/20260720_gcp_compat.sql supabase/migrations/0000_extensions.sql > temp_extensions.sql
+        mv temp_extensions.sql supabase/migrations/0000_extensions.sql
+        rm supabase/migrations/20260720_gcp_compat.sql
+        
         # Strip pg_cron and pg_net extension statements from migrations for standard Cloud SQL compatibility
         sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_cron/-- CREATE EXTENSION IF NOT EXISTS pg_cron/g' supabase/migrations/0000_extensions.sql
         sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_net/-- CREATE EXTENSION IF NOT EXISTS pg_net/g' supabase/migrations/0000_extensions.sql
-        # Run migrations using the npx wrapper for Supabase CLI
-        npx supabase db push --db-url "$$DATABASE_URL"
+        
+        # Redirect connection to localhost through the proxy and disable SSL
+        LOCAL_DB_URL="$(echo "$$DATABASE_URL" | sed -E 's/@[^:]+:[0-9]+/@127.0.0.1:5432/')?sslmode=disable"
+        
+        # Log the masked URL to verify the string concatenation is correct
+        echo "Local DB URL: $(echo "$$LOCAL_DB_URL" | sed -E 's/:[^@]+@/:xxxxxx@/')"
+        
+        # Run migrations using the npx wrapper for Supabase CLI with debug enabled
+        npx supabase db push --db-url "$$LOCAL_DB_URL" --debug
     secretEnv: ["DATABASE_URL"]
 
   # ── Step 2: Deploy PostgREST Database API Gateway ───────────────────────
