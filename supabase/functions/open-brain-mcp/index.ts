@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import { loadProfile } from "../_shared/profile.ts";
+import { getGcsStorageShim } from "./_gcs_storage_shim.ts";
 import {
   coerceMetadata,
   isOperationCommandCapture,
@@ -81,6 +82,14 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const FUNCTION_SLUG = "open-brain-mcp";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+if (Deno.env.get("GCP_PROJECT")) {
+  Object.defineProperty(supabase, "storage", {
+    value: getGcsStorageShim(),
+    writable: false,
+    configurable: true,
+  });
+}
 
 // Deno Edge Runtime exposes EdgeRuntime as a global; declare it for the type
 // checker so the workspace deno check stays at 0 errors.
