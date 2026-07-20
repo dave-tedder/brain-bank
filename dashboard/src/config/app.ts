@@ -3,9 +3,9 @@
 
 export const APP = {
   name: "Brain Bank",
-  tagline: "Neural Terminal - Semantic Memory System",
+  tagline: "Personal Semantic Memory System",
   sidebarSubtitle: "Semantic Memory",
-  loginSubtitle: "Neural Terminal",
-  chatHeader: "Neural Interface",
+  loginSubtitle: "Semantic Memory Gate",
+  chatHeader: "Semantic Query Interface",
   chatSubtitle: "Query the semantic memory network",
 } as const;
