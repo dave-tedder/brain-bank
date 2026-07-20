@@ -483,7 +483,7 @@ You now have:
 Places to go from here:
 
 - **Capture sources.** Slack covers a lot, but Brain Bank can also ingest from Gmail (labeled threads), Google Calendar events, Apple Notes, voice memos, Notion pages, and a ChatGPT custom GPT. Per-source dummies guides live in `docs/capture-sources/` (arriving in Phase 4.6 through 4.11).
-- **Dashboard.** The Next.js dashboard at `dashboard/` gives you a browsing UI, chat interface, and digest archive. Deploy instructions ship with Phase 5 (monorepo merge) and will live at `docs/dashboard-deploy.md`.
+- **Dashboard.** The Next.js dashboard at `dashboard/` gives you a browsing UI, chat interface, and digest archive. Deploy instructions for Railway and Vercel are at `docs/dashboard-deploy.md`.
 - **Troubleshooting.** When something breaks six weeks from now and you cannot remember why, `docs/troubleshooting.md` (Phase 4.12) will be the first stop.
 - **Rotating a key.** Change `MCP_ACCESS_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, or `OPENROUTER_API_KEY` by editing the value in `.env` and re-running `supabase secrets set --env-file .env --project-ref <ref>`. For `MCP_ACCESS_KEY`, also refresh the vault entry so cron keeps working: `delete from vault.secrets where name = 'mcp_access_key';` then re-run the `vault.create_secret(...)` call from Step 8 with the new value.
 

@@ -7,6 +7,9 @@
     "build": "next build",
     "start": "next start"
   },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.52",
     "@supabase/supabase-js": "^2.47.10",
