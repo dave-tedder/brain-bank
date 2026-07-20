@@ -29,19 +29,19 @@ steps:
         ./cloud_sql_proxy --port 5432 $PROJECT_ID:us-east1:brainbank-db &
         sleep 3
         
-        # Prepend the GCP compatibility setup (schemas, auth.role, storage) to the very first migration
-        cat gcp/gcp_compat_start.sql supabase/migrations/0000_extensions.sql > temp_extensions.sql
-        mv temp_extensions.sql supabase/migrations/0000_extensions.sql
-        
-        # Strip pg_cron and pg_net extension statements from migrations for standard Cloud SQL compatibility
-        sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_cron/-- CREATE EXTENSION IF NOT EXISTS pg_cron/g' supabase/migrations/0000_extensions.sql
-        sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_net/-- CREATE EXTENSION IF NOT EXISTS pg_net/g' supabase/migrations/0000_extensions.sql
-        
         # Redirect connection to localhost through the proxy and disable SSL
         LOCAL_DB_URL="$(echo "$$DATABASE_URL" | sed -E 's/@[^:]+:[0-9]+/@127.0.0.1:5432/')?sslmode=disable"
         
         # Log the masked URL to verify the string concatenation is correct
         echo "Local DB URL: $(echo "$$LOCAL_DB_URL" | sed -E 's/:[^@]+@/:xxxxxx@/')"
+        
+        # Install psql client and bootstrap compatibility schemas/roles directly on the database
+        apk add --no-cache postgresql-client
+        psql "$$LOCAL_DB_URL" -f gcp/gcp_compat_start.sql
+        
+        # Strip pg_cron and pg_net extension statements from migrations for standard Cloud SQL compatibility
+        sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_cron/-- CREATE EXTENSION IF NOT EXISTS pg_cron/g' supabase/migrations/0000_extensions.sql
+        sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_net/-- CREATE EXTENSION IF NOT EXISTS pg_net/g' supabase/migrations/0000_extensions.sql
         
         # Run migrations using the npx wrapper for Supabase CLI with debug enabled
         npx supabase db push --db-url "$$LOCAL_DB_URL" --debug
