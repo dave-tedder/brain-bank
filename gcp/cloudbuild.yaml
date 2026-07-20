@@ -46,6 +46,33 @@ steps:
         sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_cron/-- CREATE EXTENSION IF NOT EXISTS pg_cron/g' supabase/migrations/0000_extensions.sql
         sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_net/-- CREATE EXTENSION IF NOT EXISTS pg_net/g' supabase/migrations/0000_extensions.sql
         
+        # Dynamically rename duplicate date-prefixed migration files to prevent primary key conflicts
+        node -e "
+        const fs = require('fs');
+        const path = require('path');
+        const dir = 'supabase/migrations';
+        const files = fs.readdirSync(dir);
+        const groups = {};
+        for (const file of files) {
+          const match = file.match(/^(\\d{8})_(.+)$/);
+          if (match) {
+            const date = match[1];
+            if (!groups[date]) groups[date] = [];
+            groups[date].push(file);
+          }
+        }
+        for (const date in groups) {
+          if (groups[date].length > 1) {
+            groups[date].forEach((file, index) => {
+              const match = file.match(/^(\\d{8})_(.+)$/);
+              const newName = date + String(index).padStart(6, '0') + '_' + match[2];
+              fs.renameSync(path.join(dir, file), path.join(dir, newName));
+              console.log('Renamed build-time migration: ' + file + ' -> ' + newName);
+            });
+          }
+        }
+        "
+        
         # Run migrations using the npx wrapper for Supabase CLI with debug enabled
         npx supabase db push --db-url "$$LOCAL_DB_URL" --debug
     secretEnv: ["DATABASE_URL"]
