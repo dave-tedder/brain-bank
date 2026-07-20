@@ -61,3 +61,18 @@ CREATE TABLE IF NOT EXISTS storage.objects (
   metadata jsonb,
   path_tokens text[] GENERATED ALWAYS AS (string_to_array(name, '/')) STORED
 );
+
+-- Create mock cron schema and schedule function to intercept pg_cron setup statements
+CREATE SCHEMA IF NOT EXISTS cron;
+
+CREATE OR REPLACE FUNCTION cron.schedule(
+  job_name text,
+  schedule text,
+  command text
+)
+RETURNS bigint
+LANGUAGE sql
+AS $$
+  SELECT 1::bigint;
+$$;
+
