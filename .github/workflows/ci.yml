@@ -17,8 +17,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Seed to the path the loader actually imports from. profile.ts does
+      # `import ... from "./profile.json"`, so the file must be its sibling —
+      # a copy at the repo root type-checks nowhere and deploys nowhere.
       - name: Seed profile.json
-        run: cp profile.example.json profile.json
+        run: cp profile.example.json supabase/functions/_shared/profile.json
 
       - name: Install Deno
         uses: denoland/setup-deno@v2
@@ -27,6 +30,11 @@ jobs:
 
       - name: Run engine Deno tests (open-brain-mcp)
         run: deno test --allow-read --allow-env --config supabase/functions/open-brain-mcp/deno.json supabase/functions/open-brain-mcp/_agent_tasks_test.ts
+
+      # Type-checks the whole module graph, including the profile.json import.
+      # This is what catches a fresh-clone break that the tests above miss.
+      - name: Type-check Edge Functions
+        run: deno check --config supabase/functions/open-brain-mcp/deno.json supabase/functions/open-brain-mcp/index.ts
 
       - name: Verify queue-runner skill contract
         run: node skills/queue-runner/verify.mjs

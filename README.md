@@ -69,7 +69,7 @@ No local Docker, no Postgres install, nothing else.
 The short path to a working backend:
 
 1. Clone the repo and link it to a fresh Supabase project.
-2. Copy `profile.example.json` to `profile.json` and `.env.example` to `.env`. Edit both.
+2. Copy `profile.example.json` to `supabase/functions/_shared/profile.json` and `.env.example` to `.env`. Edit both.
 3. Run the migrations against your Supabase project.
 4. Deploy the four Edge Functions.
 5. Configure the Slack app and point it at your function URLs.
@@ -77,7 +77,10 @@ The short path to a working backend:
 ```bash
 git clone https://github.com/dave-tedder/brain-bank.git
 cd brain-bank
-cp profile.example.json profile.json
+# profile.json MUST live next to the loader that imports it — the Supabase
+# bundler resolves the import relative to the source file, so any other path
+# fails the deploy with "Failed to bundle ... Module not found".
+cp profile.example.json supabase/functions/_shared/profile.json
 cp .env.example .env
 # Edit both files with your values
 
@@ -98,6 +101,8 @@ brain-bank/
 ├── supabase/
 │   ├── migrations/       # 11 SQL migrations, applied in order
 │   └── functions/        # 4 Edge Functions (Deno)
+│       ├── _shared/
+│       │   └── profile.json   # your copy of profile.example.json (gitignored)
 │       ├── ingest-thought/
 │       ├── open-brain-mcp/
 │       ├── brain-digest/
@@ -109,8 +114,7 @@ brain-bank/
 │       ├── SKILL.md
 │       ├── references/                      # slack-branch, cron-branch, error-recovery
 │       └── scripts/byte-check.sh            # Tier 1 static analysis
-├── profile.example.json  # copy to profile.json and edit
-├── profile.json          # personal overrides (gitignored)
+├── profile.example.json  # copy to supabase/functions/_shared/profile.json and edit
 ├── .env.example          # every env var required by the deploy
 └── CHANGELOG.md
 ```

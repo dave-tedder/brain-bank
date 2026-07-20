@@ -352,10 +352,11 @@ Your Edge Functions were working yesterday. Today they are 500ing, or a redeploy
 
 The Supabase CLI bundler could not find `profile.json` at the location the loader imports from. This should not happen on a post-setup deploy unless:
 
-1. You renamed or deleted `profile.json` at the repo root.
-2. You changed branches in git and the new branch does not have it (e.g., experimental branch with a different structure).
+1. You put `profile.json` at the repo root instead of next to the loader. It must be at `supabase/functions/_shared/profile.json`, because `profile.ts` imports it as a sibling module and the bundler resolves that path relative to the source file. This is the most common first-deploy mistake.
+2. You renamed or deleted it.
+3. You changed branches in git and the new branch does not have it (e.g., experimental branch with a different structure).
 
-Fix: confirm `ls profile.json` returns the file, and you are running `supabase functions deploy` from the repo root.
+Fix: confirm `ls supabase/functions/_shared/profile.json` returns the file, and you are running `supabase functions deploy` from the repo root.
 
 ### 500 `WORKER_ERROR` at runtime after a deploy
 
