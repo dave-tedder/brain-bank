@@ -1,0 +1,29 @@
+# Line endings.
+#
+# Git for Windows ships with core.autocrlf=true by default, which rewrites every
+# text file to CRLF on checkout. Two things in this repo break when that happens:
+#
+#   1. The bash scripts (scripts/**/*.sh, skills/**/*.sh) fail to execute under
+#      Git Bash or WSL with "bash\r: No such file or directory".
+#   2. skills/queue-runner/verify.mjs is a required CI step and parses SKILL.md
+#      with LF-literal regexes (e.g. /## Heartbeat Order\n\n([\s\S]*?)\n\n## /).
+#      Under CRLF those match nothing, the script throws, and a contributor on
+#      Windows cannot reproduce a green CI locally even with correct code.
+#      scripts/open-engine/closeout-controller.mjs parses markdown the same way.
+#
+# So: normalize to LF in the index AND check out LF on every platform. Nothing
+# here needs CRLF, and the editors people actually use handle LF fine on Windows.
+* text=auto eol=lf
+
+# Binaries: never touch these.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.otf   binary
+*.pdf   binary

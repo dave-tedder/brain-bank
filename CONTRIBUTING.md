@@ -10,10 +10,12 @@ If you are about to write more than ~50 lines, please open a GitHub issue first 
 
 ## Development Setup
 
-The full first-deploy walkthrough is in [docs/deploy-from-scratch.md](docs/deploy-from-scratch.md). At minimum, contributors need:
+The full first-deploy walkthrough is in [docs/deploy-from-scratch.md](docs/deploy-from-scratch.md). If this is your first time in the repo, read [docs/new-contributor-notes.md](docs/new-contributor-notes.md) first — it covers Windows setup, the gitignored `profile.json` that has to exist before anything type-checks, and what CI actually enforces.
+
+At minimum, contributors need:
 
 - A Supabase project (free tier is fine for dev work).
-- Node.js 18+ for the dashboard, Deno 2.x for the Edge Functions.
+- Node.js 20 for the dashboard (CI pins 20; 18 mostly works but is not what gets tested), Deno 2.x for the Edge Functions.
 - An OpenRouter account with a low spend cap if you want to exercise capture/digest end-to-end.
 - A copy of `profile.example.json` saved as `profile.json` at `supabase/functions/_shared/profile.json` (gitignored). Edit values to match your own use case.
 

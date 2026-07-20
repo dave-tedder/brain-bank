@@ -7,7 +7,7 @@ Internal Next.js dashboard for browsing, searching, and auditing the Brain Bank 
 - **Framework:** Next.js 15, App Router, React 19
 - **Styling:** Tailwind CSS 4
 - **Database:** Supabase (shared with the Brain Bank engine)
-- **Hosting:** Railway (standalone output mode)
+- **Hosting:** Railway (standalone output mode) or Vercel. See `docs/dashboard-deploy.md`.
 - **Auth:** Simple password gate via middleware cookie
 
 ## Project Structure
@@ -74,11 +74,16 @@ dashboard/
 
 ## Environment Variables
 
-All required, set via Railway environment variables:
+Six, all required at runtime. Set them in whichever platform you deploy to (Railway, Vercel) or in `.env.local` for local dev. See `docs/dashboard-deploy.md` for per-platform setup.
+
 - `SUPABASE_URL`: Supabase project URL
-- `SUPABASE_SERVICE_ROLE_KEY`: Server-side only, never exposed to browser
+- `SUPABASE_SERVICE_ROLE_KEY`: Server-side only, never exposed to browser. Never give this a `NEXT_PUBLIC_` prefix.
 - `OPENROUTER_API_KEY`: For semantic search embeddings
 - `DASHBOARD_PASSWORD`: Single shared password for access
+- `BRAIN_BANK_URL`: `https://<your-project-ref>.supabase.co/functions/v1/open-brain-mcp`. Required by `/chat`.
+- `BRAIN_BANK_API_KEY`: Copy of `MCP_ACCESS_KEY`, sent as the `x-brain-key` header. Required by `/chat`.
+
+Omitting the last two does not fail the build. It fails `/chat` at request time, which is why they are easy to miss.
 
 ## Run / Build / Deploy
 
@@ -89,7 +94,9 @@ npm run build        # Production build (standalone output)
 npm run start        # Start production server
 ```
 
-Railway deployment: push to repo, Railway auto-builds. Needs env vars set in Railway dashboard.
+Node 20 is what CI runs and what `engines` declares. Newer versions generally work; if a build passes locally and fails in CI, check your Node version first.
+
+Deployment (Railway or Vercel), including the root-directory setting and what to do about `output: "standalone"`, is documented in `docs/dashboard-deploy.md`.
 
 ## Database Access
 
@@ -108,11 +115,11 @@ Uses `match_thoughts` RPC for semantic search.
 
 - **Middleware MUST live at `src/middleware.ts`, not project root.** Next.js silently ignores a root-level `middleware.ts` when the app directory is at `src/app/`. No warning, no error, no `next build` failure, just the entire site served to anonymous traffic. Detection: `npm run build` output must include a `ƒ Middleware  NN kB` line. If absent, middleware isn't running.
 - **Auth check must explicitly handle unset env var.** `cookie !== process.env.DASHBOARD_PASSWORD` fails open when the env var is missing (`undefined !== undefined` is `false`). Use `!expected || !auth || auth !== expected` instead.
-- **Route handler redirects must use relative `Location` headers.** On Railway standalone, `request.url` inside Route Handlers dereferences the internal bind (`http://localhost:8080`). `NextResponse.redirect(new URL("/login", request.url))` leaks `localhost:8080` into production `Location` headers. Middleware's `NextRequest.url` is fine; the same syntactic call only breaks in route handlers.
+- **Route handler redirects must use relative `Location` headers.** On Railway standalone, `request.url` inside Route Handlers dereferences the internal bind (`http://localhost:8080`). `NextResponse.redirect(new URL("/login", request.url))` leaks `localhost:8080` into production `Location` headers. Middleware's `NextRequest.url` is fine; the same syntactic call only breaks in route handlers. The `localhost:8080` symptom is Railway-specific, but a relative `Location` is correct on every platform, so keep the pattern even if you deploy somewhere the absolute form happens to work.
 - All pages use `export const dynamic = "force-dynamic"` (no caching, always fresh data)
 - Neural-terminal phosphor-green theme (VT323 + IBM Plex Mono, Matrix-rain background, `--phosphor-glow: #5ff79d` for hot accents, scanline-hover utility). See CSS variables in `globals.css`.
 - Server components for data fetching, client components for interactivity. Markdown rendering in DigestMarkdown is a client component so `react-markdown` hydrates; the data prop is server-computed.
-- All Supabase calls happen server-side (service_role key never in browser). Always call `supabase()` (lazy-init, imported from `@/lib/supabase`) inside route handlers; never at module top level. Railway builds without env vars and top-level `createClient()` crashes the build.
+- All Supabase calls happen server-side (service_role key never in browser). Always call `supabase()` (lazy-init, imported from `@/lib/supabase`) inside route handlers; never at module top level. Builds run without runtime env vars on both Railway and Vercel, and a top-level `createClient()` crashes the build with a misleading missing-env error.
 - For clickable cards over server-component pages, use the overlay-link pattern (absolute `<Link className="absolute inset-0 z-10" />` + relative content layer with `className="relative z-20 pointer-events-none [&_a]:pointer-events-auto"`). Never add `onClick` handlers to children of a server component (request-time 500 with opaque digest). `next build` does NOT catch it.
 - `prefers-reduced-motion: reduce` disables the digest cursor blink and hero `.ascii-frame .animate-in` stagger; respect it when adding new animations.
 - Narrow viewports (`max-width: 640px`) collapse the `.ascii-frame__top` and `.ascii-frame__bottom` pseudo-header/footer; layout falls back to a flat phosphor left border on the card.

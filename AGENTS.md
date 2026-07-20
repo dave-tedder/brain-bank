@@ -4,7 +4,7 @@ Personal semantic memory system. Captures thoughts from multiple sources (Slack,
 
 ## Current Status
 
-**v0.2.1 shipped 2026-06-15.** Repo is public. The four Edge Functions and the Next.js dashboard are merged into this monorepo and verified end-to-end against fresh-deploy throwaway Supabase projects. Pre-public adversarial audit findings (BLOCKERs, HIGHs, MEDIUMs, LOWs) all landed before the visibility flip. Going forward, `CHANGELOG.md` is the source of truth. `[Unreleased]` covers in-flight work, dated sections cover shipped releases. New work branches from `dev`; `main` carries tagged releases only.
+**v0.6.0 shipped 2026-07-20.** Repo is public. The four Edge Functions and the Next.js dashboard are merged into this monorepo and verified end-to-end against fresh-deploy throwaway Supabase projects. Pre-public adversarial audit findings (BLOCKERs, HIGHs, MEDIUMs, LOWs) all landed before the visibility flip. Going forward, `CHANGELOG.md` is the source of truth. `[Unreleased]` covers in-flight work, dated sections cover shipped releases. New work branches from `dev`; `main` carries tagged releases only.
 
 ## Tech Stack
 
@@ -30,10 +30,10 @@ brain-bank/
 ├── deno.json                  # Deno workspace config for the Edge Functions
 ├── .claude-plugin/            # Claude Code plugin marketplace + plugin manifests
 ├── supabase/
-│   ├── migrations/            # 11 SQL migrations (0000-0010)
+│   ├── migrations/            # SQL migrations, YYYYMMDD_snake_case.sql (75 as of v0.6.0)
 │   └── functions/
 │       ├── ingest-thought/    # Slack webhook + auto-resolve LAYER 0-3 pipeline
-│       ├── open-brain-mcp/    # MCP server (19 tools) + REST API
+│       ├── open-brain-mcp/    # MCP server (54 tools) + REST API
 │       ├── brain-digest/      # daily / weekly digest synthesis + Slack post
 │       ├── compile-pages/     # Karpathy-style wiki compilation
 │       └── _shared/           # profile loader + profile.json bundled at deploy
