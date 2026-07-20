@@ -26,6 +26,11 @@ BEGIN
 END
 $$;
 
+-- Grant standard roles to postgres user so it can switch roles in PostgREST
+GRANT anon TO postgres;
+GRANT authenticated TO postgres;
+GRANT service_role TO postgres;
+
 -- 1. Create auth schema and PostgREST role helper
 CREATE SCHEMA IF NOT EXISTS auth;
 
