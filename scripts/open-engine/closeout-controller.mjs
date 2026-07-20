@@ -530,15 +530,19 @@ export function planDocRefs(sources) {
 
 export function resolvePlanDocPath(relPath, route) {
   if (!relPath) return null;
-  if (isAbsolute(relPath)) return relPath;
+  // Handle both POSIX and Windows absolute paths
+  if (isAbsolute(relPath) || relPath.startsWith("/") || relPath.startsWith("\\") || /^[a-zA-Z]:\\/.test(relPath)) {
+    return (relPath.startsWith("/") || relPath.startsWith("\\")) ? relPath.replace(/\\/g, "/") : relPath;
+  }
   // A stored plan-doc path is relative to the Projects root (e.g.
   // "Projects/example-site/seo/PLAN.md"). Anchor it to the parent of
   // the route's /Projects/ segment so it resolves regardless of how deep the
   // workspace nests under Projects.
   const workspace = route?.workspace_path || "";
-  const idx = workspace.indexOf("/Projects/");
+  let idx = workspace.replace(/\\/g, "/").toLowerCase().indexOf("/projects/");
   if (idx === -1) return null;
-  return join(workspace.slice(0, idx), relPath);
+  const result = join(workspace.slice(0, idx), relPath);
+  return (result.startsWith("/") || result.startsWith("\\")) ? result.replace(/\\/g, "/") : result;
 }
 
 export function flipDocLineText(line, shortId, doneDate) {
