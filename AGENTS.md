@@ -86,4 +86,7 @@ brain-bank/
 - **Windows Secret Injection:** Always write secrets using direct stdin file buffers/parameters in Python rather than command-line `echo` pipes on Windows to prevent trailing space/newline (`\r\n`) validation crashes inside Deno's URL parser.
 - **Deno Cloud Run Port Configuration:** Deno 2.x `Deno.serve()` defaults to port `8000`. Cloud Run services deploying Deno containers must specify `--port=8000` to prevent TCP startup health check failures.
 - **Cloud Run Deploy Secret Check:** Cloud Run requires all referenced secrets to exist in GCP Secret Manager at deploy time. Dummy secrets (e.g. `"optional"`) must be provisioned on first deploy for optional integrations like Slack.
+- **PostgREST Client Suffix Override:** In standalone PostgREST environments, override the internal `client.rest.url` property directly to remove the `/rest/v1` path suffix.
+- **Database Role Grants:** On standard vanilla PostgreSQL deployments (like Cloud SQL), you must explicitly run `GRANT [role] TO postgres;` (specifically for `anon`, `authenticated`, and `service_role`) and set `ALTER ROLE service_role BYPASSRLS;` so PostgREST can assume those identities when parsing JWTs.
+
 
