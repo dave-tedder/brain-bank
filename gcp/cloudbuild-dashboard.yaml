@@ -1,0 +1,10 @@
+# Cloud Build config for building the dashboard only
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-dashboard
+    args: ["build", "--tag=us-east1-docker.pkg.dev/$PROJECT_ID/bb-repo/bb-dashboard:latest", "--file=gcp/Dockerfile.dashboard", "."]
+  
+  - name: "gcr.io/cloud-builders/docker"
+    id: push-dashboard
+    args: ["push", "us-east1-docker.pkg.dev/$PROJECT_ID/bb-repo/bb-dashboard:latest"]
+    waitFor: ["build-dashboard"]
