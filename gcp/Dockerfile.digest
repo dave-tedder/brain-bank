@@ -1,0 +1,14 @@
+FROM denoland/deno:alpine-2.0.6
+
+WORKDIR /app
+
+# Copy shared code and brain-digest function code
+COPY supabase/functions/_shared /app/supabase/functions/_shared
+COPY supabase/functions/brain-digest /app/supabase/functions/brain-digest
+
+# Pre-cache dependencies
+RUN deno cache supabase/functions/brain-digest/index.ts
+
+EXPOSE 8080
+
+CMD ["run", "--allow-net", "--allow-env", "--allow-read", "supabase/functions/brain-digest/index.ts"]

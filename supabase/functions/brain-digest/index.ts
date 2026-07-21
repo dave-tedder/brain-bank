@@ -20,6 +20,10 @@ const NOTION_API_TOKEN = Deno.env.get("NOTION_API_TOKEN") || "";
 
 const FUNCTION_SLUG = "brain-digest";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+if (SUPABASE_URL && (SUPABASE_URL.includes("bb-postgrest") || !SUPABASE_URL.includes("supabase.co"))) {
+  // @ts-ignore
+  supabase.rest.url = SUPABASE_URL;
+}
 
 // Daily-mode pre-brief filter: which event_types count as "client-facing"
 // for cross-referencing with the clients table. Sourced from profile so

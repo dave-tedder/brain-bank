@@ -1,61 +1,104 @@
 @import "tailwindcss";
 
 /* ------------------------------------------------------------------ */
-/*  Brain Bank Dashboard - Neural Terminal Theme                       */
-/*  Phosphor green on near-black. Matrix/DOS aesthetic.               */
+/*  Brain Bank Dashboard - Fairchild Toolworks Skin                    */
+/*  Premium Forest Green & Gold Theme. Clean, high-readability.        */
 /* ------------------------------------------------------------------ */
 
+@theme {
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: 'Inter', monospace;
+  --font-display: 'Outfit', sans-serif;
+  
+  --color-border: var(--border);
+  --color-background: var(--bg-primary);
+  --color-foreground: var(--text-body);
+}
+
 :root {
-  --bg-primary: #0a0a0a;
-  --bg-surface: #0d1117;
-  --bg-input: #0a0f14;
-  --border: #1a2332;
-  --border-active: #00ff41;
-  --text-primary: #00ff41;
-  --text-secondary: #4ade80;
-  --text-muted: #22543d;
-  --text-body: #b0c4b0;
-  --accent: #00ff41;
-  --accent-dim: rgba(0, 255, 65, 0.08);
-  --accent-glow: rgba(0, 255, 65, 0.15);
-  --warning: #fbbf24;
-  --danger: #ef4444;
-  --success: #00ff41;
-  --selection: rgba(0, 255, 65, 0.2);
-  --radius: 8px;
-  --radius-sm: 6px;
-  --phosphor-glow: #5ff79d;
+  --bg-primary: #0b130e; /* Forest Green */
+  --bg-surface: #111d15; /* Card background */
+  --bg-input: #0e221b;
+  --border: #1c2d22;
+  --border-active: #dfb15b; /* Gold Accent */
+  
+  --text-primary: #dfb15b; /* Gold */
+  --text-secondary: #a3b899; /* Sage */
+  --text-muted: #556f62; /* Muted Sage */
+  --text-body: #e2e8f0; /* Off-white */
+  
+  --accent: #dfb15b;
+  --accent-dim: rgba(223, 177, 91, 0.08);
+  --accent-glow: rgba(223, 177, 91, 0.15);
+  --warning: #f59e0b;
+  --danger: #f43f5e;
+  --success: #10b981;
+  --selection: rgba(223, 177, 91, 0.2);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --phosphor-glow: #dfb15b;
 
   /* Projects dashboard status classification (projects_rollup.status) */
-  --status-active: #00ff41;
+  --status-active: #dfb15b;
   --status-stale: #fbbf24;
-  --status-blocker: #ff8c42;
-  --status-dormant: #22543d;
-  --status-paused: #94a3a0;   /* cool grey — on hold, resumable */
-  --status-done: #2f855a;     /* settled sea-green — completed/at rest */
+  --status-blocker: #f43f5e;
+  --status-dormant: #4a5e52;
+  --status-paused: #7a8c85;   /* cool grey — on hold, resumable */
+  --status-done: #10b981;     /* optimal green — completed/at rest */
   --status-archive: #4a5568;  /* slate — filed away (hidden by default) */
 }
 
 /* ------------------------------------------------------------------ */
-/*  Base                                                               */
+/*  Fonts & Overrides                                                  */
+/* ------------------------------------------------------------------ */
+
+@font-face {
+  font-family: 'Chemvre';
+  src: url('/fonts/Chemvre.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* 
+   Override the old terminal monospaced fonts to route to the modern 
+   readable fonts globally without touching all JS/TSX layout files.
+*/
+@font-face {
+  font-family: 'IBM Plex Mono';
+  src: local('Inter'), local('sans-serif');
+}
+
+@font-face {
+  font-family: 'VT323';
+  src: local('Outfit'), local('sans-serif');
+}
+
+/* ------------------------------------------------------------------ */
+/*  Base Style Overrides                                               */
 /* ------------------------------------------------------------------ */
 
 body {
   background: var(--bg-primary);
   color: var(--text-body);
-  font-family: 'IBM Plex Mono', 'Courier New', Courier, monospace;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+h1, h2, h3, h4, h5, h6, .font-terminal {
+  font-family: 'Outfit', 'Chemvre', sans-serif;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
 a {
-  color: #00ff41;
+  color: var(--accent);
   text-decoration: none;
   transition: color 0.2s, text-shadow 0.2s;
 }
 a:hover {
-  color: #39ff6e;
-  text-shadow: 0 0 8px rgba(0, 255, 65, 0.6);
+  color: #f4b856;
+  text-shadow: 0 0 8px rgba(223, 177, 91, 0.4);
 }
 
 /* ------------------------------------------------------------------ */
@@ -70,11 +113,11 @@ a:hover {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #1a2332;
+  background: var(--border);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #2a4060;
+  background: var(--text-muted);
 }
 
 /* ------------------------------------------------------------------ */
@@ -83,7 +126,7 @@ a:hover {
 
 ::selection {
   background: var(--selection);
-  color: var(--text-primary);
+  color: #ffffff;
 }
 
 /* ------------------------------------------------------------------ */
@@ -101,42 +144,6 @@ a:hover {
   }
 }
 
-@keyframes terminalBlink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-
-@keyframes scanlineHover {
-  from {
-    background-position: 0 0;
-  }
-  to {
-    background-position: 0 4px;
-  }
-}
-
-@keyframes glowPulse {
-  0%, 100% {
-    box-shadow: 0 0 0px 0px rgba(0, 255, 65, 0);
-  }
-  50% {
-    box-shadow: 0 0 6px 2px rgba(0, 255, 65, 0.25);
-  }
-}
-
-@keyframes typewriter {
-  from {
-    max-width: 0;
-  }
-  to {
-    max-width: 100%;
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/*  Stagger / Animate-in                                               */
-/* ------------------------------------------------------------------ */
-
 .animate-in {
   animation: fadeSlideUp 0.4s ease-out both;
 }
@@ -151,23 +158,25 @@ a:hover {
 .stagger-7 { animation-delay: 420ms; }
 .stagger-8 { animation-delay: 480ms; }
 
+/* Disable cursor blink and other terminal animations */
+.digest-cursor {
+  display: none !important;
+}
+
+.scanline-hover::after {
+  display: none !important;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Utility Classes                                                    */
 /* ------------------------------------------------------------------ */
 
-.font-terminal {
-  font-family: 'VT323', monospace;
-}
-
-.text-glow {
-  text-shadow: 0 0 10px rgba(0, 255, 65, 0.5);
-}
-
 .label {
   display: block;
-  color: var(--text-muted);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.65rem;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -178,64 +187,42 @@ a:hover {
   border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-body);
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: var(--font-sans);
   font-size: 0.875rem;
   padding: 0.55rem 0.65rem;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .task-input:focus {
-  outline: 2px solid var(--accent-dim);
-  border-color: var(--accent);
+  border-color: var(--border-active);
+  box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
 .task-button {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  color: var(--text-muted);
+  color: var(--text-secondary);
   background: transparent;
-  font-family: 'VT323', monospace;
-  font-size: 0.95rem;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.875rem;
+  font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  padding: 0.35rem 0.65rem;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
   transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
 .task-button:hover:not(:disabled),
 .task-button:focus-visible:not(:disabled) {
-  color: var(--text-primary);
+  color: var(--bg-primary);
   border-color: var(--accent);
-  background: var(--accent-dim);
+  background: var(--accent);
 }
 
 .border-glow {
-  box-shadow:
-    0 0 8px rgba(0, 255, 65, 0.2),
-    inset 0 0 4px rgba(0, 255, 65, 0.05);
-}
-
-.scanline-hover {
-  position: relative;
-  overflow: hidden;
-}
-.scanline-hover::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: repeating-linear-gradient(
-    to bottom,
-    transparent 0px,
-    transparent 1px,
-    rgba(0, 255, 65, 0.03) 1px,
-    rgba(0, 255, 65, 0.03) 2px
-  );
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.3s;
-}
-.scanline-hover:hover::after {
-  opacity: 1;
-  animation: scanlineHover 0.5s linear infinite;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
 .card {
@@ -244,10 +231,11 @@ a:hover {
   border-radius: var(--radius);
   padding: 1.25rem;
   transition: all 300ms ease;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
 }
 .card:hover {
   border-color: var(--border-active);
-  box-shadow: 0 0 12px rgba(0, 255, 65, 0.1);
+  box-shadow: 0 8px 32px rgba(223, 177, 91, 0.15);
 }
 
 .backlink-chip {
@@ -258,117 +246,57 @@ a:hover {
 }
 
 /* ------------------------------------------------------------------ */
-/*  ASCII Frame (digest hero)                                          */
+/*  ASCII Frame Redirection (Format as modern cards)                   */
 /* ------------------------------------------------------------------ */
 
 .ascii-frame {
-  position: relative;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  font-family: 'IBM Plex Mono', monospace;
+  /* Inherit standard card styling */
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  transition: all 300ms ease;
 }
 
+.ascii-frame:hover {
+  border-color: var(--border-active);
+  box-shadow: 0 8px 32px rgba(223, 177, 91, 0.15);
+}
+
+/* Hide the ASCII line headers/footers completely */
 .ascii-frame__top,
 .ascii-frame__bottom {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  color: rgba(0, 255, 65, 0.55);
-  font-size: 0.8rem;
-  line-height: 1;
-  white-space: nowrap;
-  overflow: hidden;
+  display: none !important;
 }
 
-.ascii-frame__top-label,
-.ascii-frame__top-tag,
-.ascii-frame__bottom-left,
-.ascii-frame__bottom-right,
-.ascii-frame__bottom-link {
-  flex-shrink: 0;
-}
-
-.ascii-frame__top-tag {
-  color: var(--phosphor-glow);
-  text-shadow: 0 0 6px rgba(95, 247, 157, 0.4);
-}
-
-.ascii-frame__top-label {
-  color: var(--text-secondary);
-}
-
-.ascii-frame__dashes {
-  flex: 1;
-  height: 0;
-  min-width: 0.5rem;
-  border-top: 1px solid rgba(0, 255, 65, 0.25);
-}
-
+/* Format body cleanly without raw terminal borders */
 .ascii-frame__body {
-  border-left: 1px solid rgba(0, 255, 65, 0.25);
-  border-right: 1px solid rgba(0, 255, 65, 0.25);
-  padding: 1rem 1.25rem 1.25rem;
-  position: relative;
-}
-
-.ascii-frame__body-truncate {
-  max-height: 18rem;
-  overflow: hidden;
-  position: relative;
+  border: none !important;
+  padding: 0 !important;
 }
 
 .ascii-frame__body-truncate::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 6rem;
   background: linear-gradient(
     to bottom,
     transparent 0%,
     var(--bg-surface) 90%
-  );
-  pointer-events: none;
+  ) !important;
 }
 
 .ascii-frame__bottom-link {
-  color: var(--phosphor-glow);
-  text-shadow: 0 0 4px rgba(95, 247, 157, 0.4);
+  color: var(--accent);
+  font-family: 'Outfit', sans-serif;
+  font-weight: 600;
   letter-spacing: 0.05em;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Print / Mobile overrides                                           */
+/* ------------------------------------------------------------------ */
+
 @media (max-width: 640px) {
-  .ascii-frame__top,
-  .ascii-frame__bottom {
-    display: none;
-  }
   .ascii-frame__body {
-    border: 1px solid rgba(0, 255, 65, 0.3);
-    border-radius: var(--radius-sm);
-  }
-}
-
-/* Blinking cursor for "more below" indicator */
-
-@keyframes digestCursorBlink {
-  0%, 49% { opacity: 1; }
-  50%, 100% { opacity: 0; }
-}
-
-.digest-cursor {
-  display: inline-block;
-  color: var(--phosphor-glow);
-  text-shadow: 0 0 6px rgba(95, 247, 157, 0.5);
-  animation: digestCursorBlink 1s steps(2, jump-none) infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .digest-cursor {
-    animation: none;
-    opacity: 1;
-  }
-  .ascii-frame .animate-in {
-    animation: none;
+    border: none !important;
+    padding: 0 !important;
   }
 }

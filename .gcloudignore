@@ -1,0 +1,75 @@
+# .gcloudignore
+# Defines which files are ignored when uploading to Google Cloud Build.
+# Based on .gitignore but EXCLUDES profile.json rules so they are uploaded for Deno builds.
+
+.git
+.gitignore
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Deno
+.deno/
+deno.lock
+
+# Supabase CLI
+supabase/.temp/
+supabase/.branches/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Operator-specific local context
+CLAUDE.local.md
+CLAUDE.temp.md
+AGENTS.local.md
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Operator-local fixtures (live PII values; never commit)
+tests/_shared/fixtures/private/
+
+# Projects sync operator config (local paths and Notion database ID)
+integrations/projects-sync/config.json
+
+# Action-item triage operator config and generated reports
+integrations/action-item-triage/config.json
+integrations/action-item-triage/out/
+
+# Handoff scratch files
+HANDOFF-*.md
+
+# Open Engine closeout controller operator files
+scripts/open-engine/project-closeout-registry.json
+docs/handoffs/pending-closeouts/
