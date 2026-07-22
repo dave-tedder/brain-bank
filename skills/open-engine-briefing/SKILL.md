@@ -277,22 +277,35 @@ by slug and holds anything it cannot resolve.
   Agent Review sorts above a clean or unreviewed one so flagged work surfaces
   first.
 - CLAIMABILITY SPLIT. Agent Todo is NOT one thing, and rendering it as one is a
-  lie the operator acts on. Every scheduled lane claims with `max_risk=low`, so
-  `risk` is what decides whether a row moves without them:
-  - `risk = low` => it is genuinely queued. Render under "What happens next
-    without you" as happening on the next scheduled run.
+  lie the operator acts on. Two independent columns decide whether a row moves
+  without them, and BOTH have to be checked: every scheduled lane claims with
+  `max_risk=low`, and no scheduled lane passes `runtime_local`:
+  - `risk = low` AND `requires_local` is false => it is genuinely queued. Render
+    under "What happens next without you" as happening on the next scheduled run.
   - `risk = medium` or `high` => NO scheduled lane will EVER claim it. Render it
     in bucket C, worded as needing an attended session (not as queued work), WITH
     the Goal Prompt the generator already produces. Say plainly that nothing is
     coming for it on its own.
+  - `requires_local = true` => same bucket C treatment, whatever the risk. A
+    scheduled lane must not pass `runtime_local`, so these rows are invisible to
+    `claim_next_agent_task` by design. Word it as needing an attended session on
+    the local machine, not as queued work. A low-risk `requires_local` row is
+    the sneaky one: every field the operator scans reads "queued and low risk"
+    while nothing will ever pick it up.
   NEVER emit "the executors will claim these" (or any equivalent) over a set that
-  contains a medium or high row. Check the risk of every Agent Todo row before
-  writing that sentence, not after.
+  contains a medium or high row, or a `requires_local` row. Check the risk AND
+  the `requires_local` flag of every Agent Todo row before writing that sentence,
+  not after.
   Why this is a hard rule: a real briefing put Agent Todo rows in bucket C and
   told the operator the overnight executors would claim them. That was true of
   the low rows and FALSE of a medium that had been sitting in the same column for
   days. A stranded medium therefore read as handled on the one surface the
   operator actually reads, which is worse than not mentioning it at all.
+  The `requires_local` half was added after a second incident of the same shape:
+  an operator promoted six drafts and five were low-risk `requires_local` rows.
+  Under the risk-only version of this rule every one of them would have rendered
+  as happening on the next scheduled run, and the sentinel's stranded count read
+  zero at the same time, so both surfaces agreed and both were wrong.
   `claim_gating_warning` covers the promote MOMENT; this rule covers the ongoing
   state after it, and the sentinel's stranded count is the backstop for when a
   render forgets anyway.
@@ -466,11 +479,12 @@ on conflict (agent_code) do nothing;
    one-line suppressed count.
 4. **What happens next without you.** The scheduled lanes' next runs
    (executors, queue runner, closeout controller, triage), so silence reads
-   as normal instead of broken. Name ONLY the low-risk Agent Todo rows as
-   happening on the next scheduled run (per the CLAIMABILITY SPLIT rule). Never
-   describe Agent Todo as a whole here: the moment one medium sits in that
-   column, "the executors will claim these" becomes a false promise about a row
-   nothing is coming for.
+   as normal instead of broken. Name ONLY the Agent Todo rows that are low risk
+   AND not `requires_local` as happening on the next scheduled run (per the
+   CLAIMABILITY SPLIT rule). Never describe Agent Todo as a whole here: the
+   moment one medium or one `requires_local` row sits in that column, "the
+   executors will claim these" becomes a false promise about a row nothing is
+   coming for.
 
 ## Goal Prompt Generator (separate-chat items)
 

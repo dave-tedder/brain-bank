@@ -79,15 +79,55 @@ After approval and insert, verify with `read_agent_ledger(agent_code:
    - Standing drafts older than 7 days = old drafts. Report count and short
      ids. Known canaries or smoke rows can be named as known, but still list
      them.
-   - **Stranded unclaimable rows.** Count `Agent Todo` rows with `risk` in
-     (`medium`, `high`). Every scheduled lane claims with `max_risk=low`, so
-     these are never claimed by any lane and wait for an attended session while
-     looking exactly like queued work. Report the count even when 0, and name
-     ids when not. This is a COUNT, deliberately: the briefing's
-     CLAIMABILITY SPLIT rule is instruction-shaped and a render can forget it,
-     but a ledger figure the digest surfaces cannot. Report it; never grade it.
-     A stranded medium is the operator's call, not a sentinel failure, and must
-     never change the verdict word.
+   - **Stranded unclaimable rows.** Count `Agent Todo` rows that no scheduled
+     lane can claim. There are TWO independent reasons a row is unclaimable, and
+     a count that sees only one of them under-reports:
+     1. `risk` in (`medium`, `high`). Every scheduled lane claims with
+        `max_risk=low`, so these are never claimed.
+     2. `requires_local = true`. A scheduled lane must not pass `runtime_local`,
+        so LOCAL RUNTIME ONLY rows are invisible to `claim_next_agent_task` by
+        design, whatever their risk. A low-risk `requires_local` row looks
+        exactly like queued work and is not.
+     So the predicate is `risk in (medium, high) OR requires_local = true`, and
+     the reported label names both reasons: "unclaimable by scheduled lanes
+     (medium/high risk or requires_local)". The number and the label must agree;
+     never say "medium/high" over a set that also holds `requires_local` rows.
+     Report the count even when 0, and name ids when not. This is a COUNT,
+     deliberately: the briefing's CLAIMABILITY SPLIT rule is instruction-shaped
+     and a render can forget it, but a ledger figure the digest surfaces cannot.
+     Report it; never grade it. A stranded row is the operator's call, not a
+     sentinel failure, and must never change the verdict word.
+     The second reason was added after a real incident: an operator promoted six
+     drafts, five of them low-risk `requires_local`. The risk-only count reported
+     zero unclaimable rows while six sat there that nothing would ever pick up.
+     Literally true, materially false, and an under-reporting metric is the one
+     failure mode this surface cannot have.
+   - **Stale claims outside Agent Working.** The expired-claim check above only
+     looks at `Agent Working`. A row in any other status can carry a
+     `claimed_by` that no longer means anything, and the severity depends
+     entirely on the status:
+     - `Agent Needs Input` / `Agent Review` are RESUMABLE. A LIVE claim here is
+       legitimate and load-bearing: it is what makes `answer_agent_task`,
+       `resume_agent_task` and `unblock_agent_task` work at all, since each one
+       needs a caller that owns the claim. Never flag a live claim on these.
+     - A DEAD claim on a resumable row is the high-severity case. Dead means
+       `claim_expires_at < now()` OR `claim_expires_at is null` while
+       `claimed_by` is still set. Both shapes occur: the reaper's dead-letter
+       branch (max attempts) folds the row to `Agent Needs Input`, keeps
+       `claimed_by`, and NULLS `claim_expires_at` and `claim_token`, so a check
+       that keys only on `claim_expires_at < now()` will not see it. Such a row
+       is held and effectively unowned: answer, resume, unblock and
+       `update_agent_task` all refuse because none of them can act on a task
+       nobody holds, and `admin_amend_agent_task` cannot move Needs Input to
+       Done. Clearing one takes manual SQL. Report these FIRST, with ids, and
+       call them blocking.
+     - `Needs Operator`, `Agent Todo`, `Standing`, `Agent Done`: a claim here is
+       harmless leftover. Those cards close through `complete_operator_action`
+       or a fresh claim, not through the stale one. Report quietly as a count,
+       with ids when there are few.
+     Both figures are REPORTED, not graded. Whether a dead claim on a resumable
+     row should move the verdict word is a deployment decision; the default here
+     is to report it loudly and grade nothing.
 3b. **Auto-promote watch state (if the Phase 4 auto-promote lever is enabled).**
    A gate whose start condition may never occur has to say so on a read surface,
    or it silently becomes "wait forever". The 7-day watch's day-0 is the FIRST
@@ -166,10 +206,14 @@ Phase 4 row text: | <n> | <date> | natural/manual | <draft ids/count> | <mis-tie
      actionable.
      `<detail>` must end with the reported figures from step 3 / 3b, in this
      order, and every variant of this lane must match verbatim:
-     `; phase4 watch <day K of 7 | NOT STARTED, 0 auto-promotions>, <N> auto-promoted today; <M> medium/high in Agent Todo unclaimable by scheduled lanes`
-     Name the ids when M > 0. Omit the `phase4 watch` clause entirely if the
-     auto-promote lever is not enabled in this deployment. Example:
-     `OE-SENTINEL WARN 2026-01-09: 1 old Standing draft abc12345; spine + local 4/4 fresh; phase4 watch day 1 of 7, 5 auto-promoted today; 1 medium/high in Agent Todo unclaimable by scheduled lanes (def67890)`
+     `; phase4 watch <day K of 7 | NOT STARTED, 0 auto-promotions>, <N> auto-promoted today; <M> in Agent Todo unclaimable by scheduled lanes (medium/high risk or requires_local)<ids>; stale claims <X> blocking (<ids>), <Y> leftover`
+     Name the ids when M > 0, and always name the blocking ids. Omit the
+     `phase4 watch` clause entirely if the auto-promote lever is not enabled in
+     this deployment. Example:
+     `OE-SENTINEL WARN 2026-01-09: 1 old Standing draft abc12345; spine + local 4/4 fresh; phase4 watch day 1 of 7, 5 auto-promoted today; 2 in Agent Todo unclaimable by scheduled lanes (medium/high risk or requires_local) (def67890, 1a2b3c4d); stale claims 0 blocking, 1 leftover (5e6f7a8b)`
+     If the line would pass 300 characters, shorten in this order and say what
+     was dropped: leftover ids first, then unclaimable ids past the first three
+     with a `+N more`. Never drop a blocking id, and never drop a figure.
      The parser only keys on the `OE-SENTINEL ` prefix and passes the rest
      through verbatim, so extending the detail is safe.
      ALSO set `last_successful_run` on every run that completes the checks and
@@ -224,9 +268,51 @@ select jsonb_build_object(
     where archived_at is null
       and status = 'Standing'
       and created_at < now() - interval '7 days'
+  ), '[]'::jsonb),
+  'stranded_unclaimable', coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'short_id', left(id::text, 8),
+      'risk', risk,
+      'requires_local', requires_local,
+      'reason', case
+        when risk in ('medium', 'high') and requires_local then 'risk+local'
+        when risk in ('medium', 'high') then 'risk'
+        else 'local'
+      end,
+      'title', title
+    ) order by created_at)
+    from public.agent_tasks
+    where archived_at is null
+      and status = 'Agent Todo'
+      and (risk in ('medium', 'high') or requires_local)
+  ), '[]'::jsonb),
+  'stale_claims_outside_working', coalesce((
+    select jsonb_agg(jsonb_build_object(
+      'short_id', left(id::text, 8),
+      'status', status,
+      'claimed_by', claimed_by,
+      'claim_expires_at', claim_expires_at,
+      'severity', case
+        when status in ('Agent Needs Input', 'Agent Review') then 'blocking'
+        else 'leftover'
+      end,
+      'title', title
+    ) order by status, claim_expires_at nulls first)
+    from public.agent_tasks
+    where archived_at is null
+      and status <> 'Agent Working'
+      and claimed_by is not null
+      and (claim_expires_at is null or claim_expires_at < now())
   ), '[]'::jsonb)
 ) as sentinel_board_health;
 ```
+
+`stale_claims_outside_working` deliberately treats `claim_expires_at is null`
+with a live `claimed_by` as dead, not as "no claim". That is the reaper's
+dead-letter shape, and it is why this class stays invisible to a check that
+keys only on `claim_expires_at < now()`. A live claim on a resumable row has
+`claim_expires_at > now()` and is excluded by the predicate, which is correct:
+that claim is doing its job.
 
 ## Scheduling
 
