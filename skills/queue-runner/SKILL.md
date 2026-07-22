@@ -237,7 +237,14 @@ Set:
 
 - `last_queue_result`: one compact summary of the heartbeat result.
 - `last_successful_run`: current UTC datetime in `Z` form, never a `+00:00`
-  offset.
+  offset. Read it from the system clock with `date -u +%Y-%m-%dT%H:%M:%SZ` and
+  use that exact output. Never estimate it, round it to the minute or hour, or
+  derive it from this lane's scheduled slot time. A model has no clock of its
+  own: lanes whose prompts carried a `"<now ISO8601 Z>"` fill-in-the-blank
+  inside a JSON literal have invented values hours in their own future, while
+  lanes told to describe the value (as this line does) read a real clock and
+  stayed accurate. This column feeds lane-freshness checks, so a guessed value
+  makes a stale lane read fresh.
 - `local_context`: repository path and relevant branch or task ID.
 - `automation_state`: keep `manual-required` unless the runtime itself is blocked or paused.
 - `notes`: next manual checkpoint, if useful.
