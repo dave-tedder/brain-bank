@@ -3565,6 +3565,7 @@ server.registerTool(
         .enum(["installed", "manual-required", "blocked", "paused"])
         .optional(),
       last_queue_result: z.string().optional(),
+      last_successful_run: z.string().datetime().nullable().optional(),
       local_context: z.string().optional(),
       optional_skills: z.array(z.string()).optional(),
       notes: z.string().optional(),
@@ -3575,6 +3576,7 @@ server.registerTool(
       agent_code,
       automation_state,
       last_queue_result,
+      last_successful_run,
       local_context,
       optional_skills,
       notes,
@@ -3582,6 +3584,7 @@ server.registerTool(
       agent_code: string;
       automation_state?: string;
       last_queue_result?: string;
+      last_successful_run?: string | null;
       local_context?: string;
       optional_skills?: string[];
       notes?: string;
@@ -3591,6 +3594,7 @@ server.registerTool(
       agent_code,
       automation_state,
       last_queue_result,
+      last_successful_run,
       local_context,
       optional_skills,
     }, "mcp");
@@ -3601,6 +3605,7 @@ server.registerTool(
       const patch = compactObject({
         automation_state,
         last_queue_result,
+        last_successful_run,
         local_context,
         optional_skills,
         notes,
