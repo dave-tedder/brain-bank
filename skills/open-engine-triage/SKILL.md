@@ -74,7 +74,12 @@ if deferred.
    - boundaries always include: "Exit through one honest receipt. No sends,
      no canonical-file edits, no git."
 5. **Stage 4 — guarded auto-promote (auto-promote allowlist below).** AFTER all
-   drafting this run, walk ONLY the drafts you created in THIS run. For each,
+   drafting this run, walk TWO sets: the drafts you created in THIS run, and
+   your own earlier `triage-agent` Standing drafts created in the last 72 hours
+   that are still Standing (you already have these from the step-2 board read; an
+   already-promoted draft has left Standing and an archived one is excluded by
+   the default board read, so neither reappears). Do this run's drafts first,
+   then the carried-over set. For each,
    decide whether it clears every rubric-side condition (J category fit, K live-
    surface veto, L not-redoing-finished-work). For the ones that do, call
    `auto_promote_agent_task_intake(task_id, caller_agent_code: "triage",
@@ -83,8 +88,10 @@ if deferred.
    linked action item, full packet, `requires_local=false`) and the daily cap;
    you supply the category and a one-sentence reason. A refusal (any condition,
    or the cap) leaves that draft Standing - RECORD it in the summary, never
-   retry it in-run, and never fall back to `promote_agent_task_intake`. Skip this
-   step entirely if you created no drafts this run.
+   retry it in-run, and never fall back to `promote_agent_task_intake`. The new
+   drafts and the carried-over ones share the one daily cap. Skip this step only
+   when there are neither new drafts nor carried-over `triage-agent` Standing
+   drafts from the last 72 hours.
 6. **Report.** `write_agent_ledger` for `triage`:
    `last_queue_result` = "drafted N / auto-promoted N / needs-operator N / skipped N / capped N",
    `last_successful_run` = now (pass it in the `Z` datetime form,
