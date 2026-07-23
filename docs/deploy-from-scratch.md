@@ -187,15 +187,15 @@ You should see the non-`SUPABASE_` names: `OPENROUTER_API_KEY`, `MCP_ACCESS_KEY`
 supabase db push
 ```
 
-This applies every SQL file in `supabase/migrations/` to your Supabase project in order. There are twelve migrations: the `extensions` migration (pgvector, pgcrypto, pg_cron, pg_net), the core tables (`thoughts`, `action_items`, `clients`, `content_items`, `business_events`, `compiled_pages`, `notion_mappings`, `digests`), the `match_thoughts` similarity RPC, and a `drop_client_sessions` cleanup migration that removes a deprecated table from earlier in the sequence.
+This applies every SQL file in `supabase/migrations/` to your Supabase project in order. The sequence starts with the numbered core baseline — the `extensions` migration (pgvector, pgcrypto, pg_cron, pg_net), the core tables (`thoughts`, `action_items`, `clients`, `content_items`, `business_events`, `compiled_pages`, `notion_mappings`, `digests`), the `match_thoughts` similarity RPC, and a `drop_client_sessions` cleanup — and continues through the date-stamped migrations that build the wiki compilation surfaces, the projects model, and the whole Open Engine task board (schema, guards, critic verdicts, run log, watch views, auto-promote). Run them all; the Open Engine layer is inert until you schedule its lanes, so applying it costs nothing.
 
-**What success looks like:** `Applying migration 0000_extensions.sql...` through `Applying migration 0011_drop_client_sessions.sql...`, each followed by `Finished supabase db push.`
+**What success looks like:** one `Applying migration ...` line per file, starting at `0000_extensions.sql`, each followed by `Finished supabase db push.` with no errors.
 
 **If it fails:**
 - `permission denied to create extension "vector"`: the CLI is talking to a Postgres where your role lacks `CREATE EXTENSION`. On Supabase-managed Postgres this should never happen; if it does, `cat supabase/.temp/project-ref` to confirm the CLI is linked to the project ref you expect.
 - `relation "thoughts" already exists`: migrations already ran against this project from a prior attempt. Cleanest reset is to delete the project in the Supabase dashboard and create a new one. Do not try to drop tables by hand unless you know what you are doing.
 
-Verify the schema landed. In the Supabase dashboard, go to Database → Tables. You should see nine tables: `thoughts`, `action_items`, `clients`, `content_items`, `business_events`, `compiled_pages`, `notion_mappings`, `digests`, and an internal `schema_migrations`.
+Verify the schema landed. In the Supabase dashboard, go to Database → Tables. You should see the eight core tables (`thoughts`, `action_items`, `clients`, `content_items`, `business_events`, `compiled_pages`, `notion_mappings`, `digests`), the Open Engine tables (`agent_tasks`, `agent_task_events`, `agent_task_ledger`, `agent_run_log`), supporting tables like `thought_edges`, `projects`, `openrouter_calls`, and `mcp_tool_invocations`, plus an internal `schema_migrations`.
 
 **Why this matters:** `supabase db push` is idempotent for migration files but not for hand-run SQL. If you mix migration-driven schema with one-off edits in the SQL editor, future `db push` calls may fail. Stick to migrations for schema changes.
 
