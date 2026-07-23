@@ -1289,6 +1289,20 @@ export function evaluateResolutionSweep(packets, registry, options = {}) {
   return { appendable, skipped };
 }
 
+// Does one page of list_agent_tasks reach back far enough to have seen every
+// in-window resolution? list_agent_tasks orders updated_at DESC and caps at 50
+// server-side (Math.min(50, ...) — a client cannot raise it). For a terminal
+// task updated_at >= completed_at, so once the OLDEST returned row predates the
+// cutoff, everything below it is older still and the window is fully covered.
+// A full 50-row page is therefore NOT truncation by itself: it is truncation
+// only when the page never reached back past the cutoff. Getting this wrong is
+// how a flag ends up permanently true and stops being read.
+export function scanCoversWindow(rows, cutoffMs, limit) {
+  if (rows.length < limit) return true;
+  const oldestMs = new Date(rows[rows.length - 1]?.updated_at || 0).getTime();
+  return Number.isFinite(oldestMs) && oldestMs < cutoffMs;
+}
+
 // Tracker only, by design: the resolution is a status/decision record. The
 // session log already carries the executor narrative from the original
 // closeout; duplicating a long operator note into both files doubles noise
@@ -1329,7 +1343,7 @@ async function runOperatorResolutionSweep(args, registry) {
     dry_run: !!args.liveCheck,
     lookback_days: args.lookbackDays,
     scan_limit: RESOLUTION_SCAN_LIMIT,
-    scan_truncated: rows.length >= RESOLUTION_SCAN_LIMIT,
+    scan_truncated: !scanCoversWindow(rows, cutoffMs, RESOLUTION_SCAN_LIMIT),
     swept: packets.length,
     appended: [],
     skipped: evaluated.skipped,

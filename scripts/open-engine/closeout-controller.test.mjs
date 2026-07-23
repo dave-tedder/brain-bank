@@ -18,6 +18,7 @@ import {
   evaluate,
   evaluateResolutionSweep,
   extractOperatorAction,
+  scanCoversWindow,
   flipDocLineText,
   parseReceipt,
   planDocRefs,
@@ -784,4 +785,33 @@ test("resolution sweep: appendResolutionBlock is marker-idempotent", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// scan_truncated must be an HONEST signal, not a permanently-true flag. The
+// naive version (rows.length >= limit) is true forever once the board has 50
+// Agent Done tasks, which is always — a flag nobody can act on.
+test("scanCoversWindow: a short page always covers the window", () => {
+  const rows = [{ updated_at: "2026-07-22T00:00:00Z" }];
+  assert.equal(scanCoversWindow(rows, Date.parse("2026-07-16T00:00:00Z"), 50), true);
+});
+
+test("scanCoversWindow: a FULL page whose oldest row predates the cutoff still covers the window", () => {
+  const rows = Array.from({ length: 50 }, (_, i) => ({
+    updated_at: i === 49 ? "2026-07-10T00:00:00Z" : "2026-07-22T00:00:00Z",
+  }));
+  assert.equal(scanCoversWindow(rows, Date.parse("2026-07-16T00:00:00Z"), 50), true);
+});
+
+test("scanCoversWindow: a FULL page that never reached the cutoff is real truncation", () => {
+  const rows = Array.from({ length: 50 }, () => ({
+    updated_at: "2026-07-22T00:00:00Z",
+  }));
+  assert.equal(scanCoversWindow(rows, Date.parse("2026-07-16T00:00:00Z"), 50), false);
+});
+
+test("scanCoversWindow: an unparseable oldest timestamp is treated as truncated", () => {
+  const rows = Array.from({ length: 50 }, (_, i) => ({
+    updated_at: i === 49 ? "not-a-date" : "2026-07-22T00:00:00Z",
+  }));
+  assert.equal(scanCoversWindow(rows, Date.parse("2026-07-16T00:00:00Z"), 50), false);
 });
