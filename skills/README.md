@@ -14,5 +14,6 @@ Claude Code skills shipped with brain-bank. Skills are auto-discovered when a us
 | [`open-engine-triage`](open-engine-triage/SKILL.md) | Running one triage heartbeat: reads open action items and creates full-packet Standing drafts on the board. |
 | [`pg-cron-patterns`](pg-cron-patterns/SKILL.md) | Writing or editing a pg_cron job, especially a one-shot / cleanup / confirm-once job that needs to report a verdict a human will actually see. |
 | [`queue-runner`](queue-runner/SKILL.md) | Manually running one queue-runner heartbeat against the agent task board (claim, resume, block, complete, ledger receipts). |
+| [`routines-cloud-tasks`](routines-cloud-tasks/SKILL.md) | Creating, editing, or debugging the scheduled cloud routines that run the Open Engine lanes (RemoteTrigger, env vars, prompt voice, webhook triggers). |
 
 See each skill's `SKILL.md` for the full trigger description and behavior.
