@@ -197,7 +197,15 @@ Follow-up recommendation:
 
 The OE-8 closeout controller consumes these headings; a receipt missing a section is held out of auto-closeout, not guessed at. Keep receipts factual. Do not claim tracker, session-log, commit, push, or project capture work was done by a worker if the parent session still needs to do it.
 
-DELIVERABLES-TO-FILE (local runtime): when the task produces a client-facing standalone draft (a listing pack, a bio, a directory field-by-field, blog copy), write it to `deliverables/<project_slug>/<task-shortid>-<slug>.md` in the Brain Bank repo and record that exact path under "Touched files or records:". `deliverables/` is gitignored — the draft never ships to brain-bank. Do NOT use `deliverables/` for code/config changes to a project: those are a commit/diff in that project's own repo; record the repo + branch under "Touched files or records:" instead.
+DELIVERABLES-TO-FILE (local runtime): when the task produces a client-facing standalone draft (a listing pack, a bio, a directory field-by-field, blog copy), write it to `deliverables/<project_slug>/<task-shortid>-<slug>.md` in your Brain Bank checkout and record that exact path under "Touched files or records:". `deliverables/` is TRACKED in your own deployment's repo (drafts stay private to your fork; they are never contributed upstream), and you make your own file durable via the DURABILITY PUSH below; a scheduled deliverables sweep lane and the closeout sweep stay as the repair net for anything your push missed. Do NOT use `deliverables/` for code/config changes to a project: those are a commit/diff in that project's own repo; record the repo + branch under "Touched files or records:" instead.
+
+DURABILITY PUSH: if and only if this run wrote at least one file under `deliverables/`, make it durable BEFORE writing the exit receipt. Run exactly one command, with the 8-character task shortid substituted:
+
+```
+bash scripts/open-engine/deliverables-push.sh --task <task-shortid>
+```
+
+The script owns all the git: it stages ONLY `deliverables/`, refuses secret-shaped content, commits as `deliverable: <files> [OE:<shortid>]`, pulls with rebase, pushes, and prints exactly one JSON line. Read that JSON directly. On `pushed:true` you are done and nothing goes in the receipt. On `pushed:false`, append ` @ UNPUSHED (<reason>)` to the path under "Touched files or records:" so the gap stays visible, then carry on — never retry, never force, never run raw `git`, and never change the exit path over a failed push. Why this exists: an uncommitted deliverable leaves the repo dirty, so the dirty-worktree guard in the preflight above refuses to claim on every following run until a human or the sweep clears it, and a critic reading deliverables from the remote cannot see an unpushed file and flags honest work as a missing artifact.
 
 CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk calls `put_deliverable` with path `<project_slug>/<task-shortid>-<slug>.md` and the full draft, then records `Touched files or records: deliverables/<path> @ BUCKET`. If `put_deliverable` is unavailable or errors, leave the full draft inline in "Work summary" and record `Touched files or records: None written (cloud runtime — draft inline above)`. No task is ever unreviewable.
 
