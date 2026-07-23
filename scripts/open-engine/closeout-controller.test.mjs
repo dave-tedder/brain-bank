@@ -13,8 +13,10 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
+  appendResolutionBlock,
   applyDocFlip,
   evaluate,
+  evaluateResolutionSweep,
   extractOperatorAction,
   flipDocLineText,
   parseReceipt,
@@ -560,4 +562,226 @@ test("evaluate HOLDs a plan-doc task whose path cannot be resolved", () => {
     assert.equal(result.status, "HELD");
     assert.ok(result.hold[0].reasons.includes("PLAN_DOC_PATH_UNRESOLVED"));
   });
+});
+
+// ---------------------------------------------------------------------------
+// OE-8E operator-resolution sweep. Pure evaluation only — live listing and
+// fetching are exercised manually against a running Brain Bank MCP.
+// ---------------------------------------------------------------------------
+
+function operatorDonePacket(overrides = {}) {
+  const taskId = overrides.task_id ||
+    "1a2b3c4d-0000-4000-8000-000000000001";
+  const note = overrides.note ??
+    "DEFERRED by operator decision - the campaign was NOT sent. Data gap found at review time; fold the content into next month's send instead.";
+  return {
+    task: {
+      id: taskId,
+      project_slug: overrides.project_slug === undefined
+        ? "example-project"
+        : overrides.project_slug,
+      status: "Agent Done",
+      completed_at: overrides.completed_at || "2026-07-18T04:06:14.474145+00:00",
+    },
+    events: overrides.events || [
+      {
+        event_type: "AGENT DONE",
+        agent_code: "runner-a",
+        created_at: "2026-07-17T17:36:43.025486+00:00",
+        payload: { status: "Agent Review", from_status: "Agent Working" },
+      },
+      {
+        event_type: "AGENT NEEDS OPERATOR",
+        agent_code: "runner-a",
+        created_at: "2026-07-17T20:54:24.014253+00:00",
+        payload: { status: "Needs Operator", from_status: "Agent Review" },
+      },
+      {
+        event_type: "OPERATOR DONE",
+        agent_code: null,
+        created_at: "2026-07-18T04:06:14.474145+00:00",
+        payload: {
+          note,
+          status: "Agent Done",
+          from_status: "Needs Operator",
+          completed_by: "Sam Operator",
+        },
+      },
+    ],
+  };
+}
+
+function sweepRegistry() {
+  return {
+    "example-project": {
+      workspace_path: "/tmp/x",
+      tracker_path: "/tmp/x/PROJECT-TRACKER.md",
+      session_log_path: "/tmp/x/SESSION-LOG.md",
+      capture_tag: "example_project",
+    },
+  };
+}
+
+const SWEEP_NOW = "2026-07-23T12:00:00.000Z";
+
+test("resolution sweep: qualifying OPERATOR DONE task is appendable with event-date stamping", () => {
+  const result = evaluateResolutionSweep(
+    [operatorDonePacket()],
+    sweepRegistry(),
+    { now: SWEEP_NOW },
+  );
+  assert.equal(result.skipped.length, 0);
+  assert.equal(result.appendable.length, 1);
+  const item = result.appendable[0];
+  assert.equal(item.task_id, "1a2b3c4d-0000-4000-8000-000000000001");
+  assert.equal(item.tracker_path, "/tmp/x/PROJECT-TRACKER.md");
+  assert.equal(item.capture_tag, "example_project");
+  // Dated by the OPERATOR DONE event, not the sweep run date.
+  assert.equal(item.event_date, "2026-07-18");
+  assert.equal(
+    item.heading,
+    "## Operator resolution — 2026-07-18 (Open Engine OE-8E)",
+  );
+  assert.equal(
+    item.marker,
+    "<!-- open-engine operator-resolution task: 1a2b3c4d-0000-4000-8000-000000000001 -->",
+  );
+  assert.ok(item.body.startsWith("Resolved by Sam Operator on 2026-07-18: "));
+  assert.ok(item.body.includes("DEFERRED by operator decision"));
+});
+
+test("resolution sweep: task whose final status event is not OPERATOR DONE is skipped", () => {
+  const packet = operatorDonePacket({
+    events: [
+      {
+        event_type: "AGENT NEEDS OPERATOR",
+        agent_code: "runner-a",
+        created_at: "2026-07-17T20:54:24.014253+00:00",
+        payload: { status: "Needs Operator", from_status: "Agent Review" },
+      },
+      {
+        event_type: "OPERATOR DONE",
+        agent_code: null,
+        created_at: "2026-07-18T04:06:14.474145+00:00",
+        payload: {
+          note: "x".repeat(100),
+          status: "Agent Done",
+          from_status: "Needs Operator",
+          completed_by: "Sam Operator",
+        },
+      },
+      // A later ops correction moved status again — the OPERATOR DONE note is
+      // no longer the final word, so the sweep must not treat it as such.
+      {
+        event_type: "AGENT STATUS",
+        agent_code: "triage-auto",
+        created_at: "2026-07-19T04:06:14.474145+00:00",
+        payload: { status: "Agent Todo", from_status: "Agent Done" },
+      },
+    ],
+  });
+  const result = evaluateResolutionSweep([packet], sweepRegistry(), {
+    now: SWEEP_NOW,
+  });
+  assert.equal(result.appendable.length, 0);
+  assert.equal(result.skipped[0].reason, "NOT_OPERATOR_DONE");
+});
+
+test("resolution sweep: substance gate boundary — 79 chars skipped, 80 appendable", () => {
+  const short = evaluateResolutionSweep(
+    [operatorDonePacket({ note: "x".repeat(79) })],
+    sweepRegistry(),
+    { now: SWEEP_NOW },
+  );
+  assert.equal(short.appendable.length, 0);
+  assert.equal(short.skipped[0].reason, "NOTE_TOO_SHORT");
+
+  const enough = evaluateResolutionSweep(
+    [operatorDonePacket({ note: "x".repeat(80) })],
+    sweepRegistry(),
+    { now: SWEEP_NOW },
+  );
+  assert.equal(enough.appendable.length, 1);
+});
+
+test("resolution sweep: whitespace does not count toward the substance gate", () => {
+  const padded = evaluateResolutionSweep(
+    [operatorDonePacket({ note: `   ${"x".repeat(79)}   ` })],
+    sweepRegistry(),
+    { now: SWEEP_NOW },
+  );
+  assert.equal(padded.appendable.length, 0);
+  assert.equal(padded.skipped[0].reason, "NOTE_TOO_SHORT");
+});
+
+test("resolution sweep: missing completed_by is skipped (never a machine resolution)", () => {
+  const packet = operatorDonePacket();
+  packet.events[2].payload.completed_by = "";
+  const result = evaluateResolutionSweep([packet], sweepRegistry(), {
+    now: SWEEP_NOW,
+  });
+  assert.equal(result.appendable.length, 0);
+  assert.equal(result.skipped[0].reason, "NO_COMPLETED_BY");
+});
+
+test("resolution sweep: null project_slug is reported, never routed", () => {
+  const result = evaluateResolutionSweep(
+    [operatorDonePacket({ project_slug: null })],
+    sweepRegistry(),
+    { now: SWEEP_NOW },
+  );
+  assert.equal(result.appendable.length, 0);
+  assert.equal(result.skipped[0].reason, "MISSING_PROJECT_SLUG");
+});
+
+test("resolution sweep: unroutable project_slug is reported, never written", () => {
+  const result = evaluateResolutionSweep(
+    [operatorDonePacket({ project_slug: "no-such-project" })],
+    sweepRegistry(),
+    { now: SWEEP_NOW },
+  );
+  assert.equal(result.appendable.length, 0);
+  assert.equal(result.skipped[0].reason, "UNKNOWN_PROJECT_ROUTE");
+});
+
+test("resolution sweep: resolution outside the lookback window is skipped", () => {
+  const result = evaluateResolutionSweep(
+    [operatorDonePacket()],
+    sweepRegistry(),
+    { now: "2026-08-30T12:00:00.000Z", lookbackDays: 7 },
+  );
+  assert.equal(result.appendable.length, 0);
+  assert.equal(result.skipped[0].reason, "OUTSIDE_LOOKBACK");
+});
+
+test("resolution sweep: appendResolutionBlock is marker-idempotent", () => {
+  const dir = mkdtempSync(join(tmpdir(), "oe-opres-"));
+  try {
+    const tracker = join(dir, "PROJECT-TRACKER.md");
+    writeFileSync(tracker, "# Tracker\n", "utf8");
+    const item = evaluateResolutionSweep(
+      [operatorDonePacket()],
+      {
+        "example-project": {
+          workspace_path: dir,
+          tracker_path: tracker,
+          session_log_path: join(dir, "SESSION-LOG.md"),
+          capture_tag: "example_project",
+        },
+      },
+      { now: SWEEP_NOW },
+    ).appendable[0];
+
+    const first = appendResolutionBlock(item);
+    assert.equal(first.action, "appended");
+    const afterFirst = readFileSync(tracker, "utf8");
+    assert.ok(afterFirst.includes(item.marker));
+    assert.ok(afterFirst.includes("## Operator resolution — 2026-07-18"));
+
+    const second = appendResolutionBlock(item);
+    assert.equal(second.action, "unchanged");
+    assert.equal(readFileSync(tracker, "utf8"), afterFirst);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

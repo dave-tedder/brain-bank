@@ -40,6 +40,15 @@ const SAFE_STATUSES = new Set(["Agent Review"]);
 const SAFE_RISKS = new Set(["low"]);
 const EXPECTED_STATUSES = new Set(["APPLYABLE", "HELD", "MIXED"]);
 
+// OE-8E operator-resolution sweep. An OPERATOR DONE note shorter than this
+// (trimmed) is treated as non-substantive ("done", "sent") and skipped rather
+// than spamming one tracker block per trivial resolution.
+const RESOLUTION_NOTE_MIN_CHARS = 80;
+const RESOLUTION_LOOKBACK_DAYS_DEFAULT = 7;
+// list_agent_tasks caps at 50; the sweep reports this so a truncated scan is
+// never mistaken for full coverage (no-silent-caps).
+const RESOLUTION_SCAN_LIMIT = 50;
+
 function usage() {
   return `Usage:
   node scripts/open-engine/closeout-controller.mjs --fixture <file.json> [--task-id <uuid>] [--expect APPLYABLE|HELD|MIXED]
@@ -49,6 +58,7 @@ function usage() {
   node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply
   node scripts/open-engine/closeout-controller.mjs --resume <uuid>
   node scripts/open-engine/closeout-controller.mjs --capture-run-summary --remaining-agent-review <n> [--applied-task-ids <ids>] [--held-tasks <id:reason;...>] [--notable <text>] [--run-timestamp <iso>] [--summary-preview]
+  node scripts/open-engine/closeout-controller.mjs --operator-resolution-sweep [--live-check] [--lookback-days <n>] [--no-capture]
   node scripts/open-engine/closeout-controller.mjs --sql
 
 OE-8A is dry-run only. It reads saved Agent Review evidence, validates receipt
@@ -97,7 +107,20 @@ OE-8D run-summary capture is additive logging only. It calls capture_thought
 once for the whole automation run, tagged open-engine/closeout/oe-8d, using
 counts, short ids, hold reasons, remaining Agent Review count, and one notable
 clause. It never applies tasks, edits project files, changes gates, or resolves
-linked action items.`;
+linked action items.
+
+OE-8E (--operator-resolution-sweep) closes the operator-decision gap: closeout
+writes trackers at Agent Review time with the EXECUTOR's drafts, so a decision
+made later at the Needs Operator step (defer, reject, scope change) lives only
+on the OPERATOR DONE board event. The sweep lists recent Agent Done tasks,
+keeps only ones whose FINAL status-bearing event is a human OPERATOR DONE with
+a note of ${RESOLUTION_NOTE_MIN_CHARS}+ trimmed chars inside the lookback
+window (default ${RESOLUTION_LOOKBACK_DAYS_DEFAULT} days), routes by
+project_slug through the registry, and appends the note verbatim to the routed
+tracker under a per-task date-free marker (idempotent, append-only). One Brain
+Bank capture per appended task unless --no-capture. --live-check prints the
+would-append report without writing. NO board mutations, no session-log
+writes, no git, no journal (a single marker-guarded append re-runs cleanly).`;
 }
 
 function parseArgs(argv) {
@@ -120,6 +143,9 @@ function parseArgs(argv) {
     remainingAgentReview: null,
     notable: "nominal",
     runTimestamp: null,
+    operatorResolutionSweep: false,
+    lookbackDays: RESOLUTION_LOOKBACK_DAYS_DEFAULT,
+    noCapture: false,
     help: false,
   };
 
@@ -161,6 +187,12 @@ function parseArgs(argv) {
       args.notable = argv[++i] || "nominal";
     } else if (arg === "--run-timestamp") {
       args.runTimestamp = argv[++i];
+    } else if (arg === "--operator-resolution-sweep") {
+      args.operatorResolutionSweep = true;
+    } else if (arg === "--lookback-days") {
+      args.lookbackDays = argv[++i];
+    } else if (arg === "--no-capture") {
+      args.noCapture = true;
     } else if (arg === "--help" || arg === "-h") {
       args.help = true;
     } else {
@@ -196,10 +228,24 @@ function parseArgs(argv) {
       "--live-check/--apply/--resume fetch live packets; they cannot combine with --fixture, --input, or --write-drafts.",
     );
   }
-  if ((args.liveCheck || args.apply) && !args.taskId) {
+  if ((args.liveCheck || args.apply) && !args.taskId && !args.operatorResolutionSweep) {
     throw new Error(
       "--live-check/--apply require --task-id (OE-8C runs single-task).",
     );
+  }
+  if (args.operatorResolutionSweep) {
+    if (
+      args.apply || args.resumeTaskId || args.source || args.writeDrafts ||
+      args.captureRunSummary || args.printSql || args.taskId
+    ) {
+      throw new Error(
+        "--operator-resolution-sweep combines only with --live-check, --lookback-days, and --no-capture.",
+      );
+    }
+    if (!/^\d+$/.test(String(args.lookbackDays)) || Number(args.lookbackDays) < 1) {
+      throw new Error("--lookback-days must be a positive integer.");
+    }
+    args.lookbackDays = Number(args.lookbackDays);
   }
   if (args.resumeTaskId && !isUuidish(args.resumeTaskId)) {
     throw new Error("--resume requires a task id.");
@@ -1154,6 +1200,170 @@ function appendCloseoutBlock(path, heading, marker, draftContent) {
   return { path, action: "appended", bytes: Buffer.byteLength(block) };
 }
 
+// ---------------------------------------------------------------------------
+// OE-8E operator-resolution sweep. Pure evaluation is exported for tests; the
+// live runner below wires it to list_agent_tasks/get_agent_task.
+// ---------------------------------------------------------------------------
+
+export function resolutionMarker(taskId) {
+  // Date-free and per-task: a resolution happens once, so the marker must not
+  // vary with when the sweep runs (a dated marker would re-append on a later
+  // sweep of the same task).
+  return `<!-- open-engine operator-resolution task: ${taskId} -->`;
+}
+
+// packets: array of { task, events } shaped like get_agent_task output.
+// Returns { appendable: [...], skipped: [{ task_id, reason }] }. Read-only.
+export function evaluateResolutionSweep(packets, registry, options = {}) {
+  const now = options.now ? new Date(options.now) : new Date();
+  const lookbackDays = options.lookbackDays ?? RESOLUTION_LOOKBACK_DAYS_DEFAULT;
+  const noteMin = options.noteMin ?? RESOLUTION_NOTE_MIN_CHARS;
+  const cutoffMs = now.getTime() - lookbackDays * 24 * 60 * 60 * 1000;
+
+  const appendable = [];
+  const skipped = [];
+
+  for (const packet of packets) {
+    const task = packet.task || packet;
+    const events = Array.isArray(packet.events)
+      ? packet.events
+      : (task.events || []);
+    const skip = (reason) => skipped.push({ task_id: task.id, reason });
+
+    // The FINAL status-bearing event must be the OPERATOR DONE — if any later
+    // event moved status again (ops correction, C3 fold), the note is no
+    // longer the last word on this task and hand-repair owns the record.
+    const statusEvents = events
+      .filter((event) => event?.payload?.status)
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    const last = statusEvents[statusEvents.length - 1];
+    if (
+      !last || last.event_type !== "OPERATOR DONE" ||
+      last.payload.status !== "Agent Done"
+    ) {
+      skip("NOT_OPERATOR_DONE");
+      continue;
+    }
+    // The server refuses non-human completed_by on complete_operator_action;
+    // this client-side check is belt-and-suspenders, not the real gate.
+    const completedBy = String(last.payload.completed_by || "").trim();
+    if (!completedBy) {
+      skip("NO_COMPLETED_BY");
+      continue;
+    }
+    const note = String(last.payload.note || "").trim();
+    if (note.length < noteMin) {
+      skip("NOTE_TOO_SHORT");
+      continue;
+    }
+    const eventMs = new Date(last.created_at).getTime();
+    if (!Number.isFinite(eventMs) || eventMs < cutoffMs) {
+      skip("OUTSIDE_LOOKBACK");
+      continue;
+    }
+    if (!task.project_slug) {
+      skip("MISSING_PROJECT_SLUG");
+      continue;
+    }
+    const route = registry[task.project_slug];
+    if (!route) {
+      skip("UNKNOWN_PROJECT_ROUTE");
+      continue;
+    }
+
+    // Dated by the OPERATOR DONE event (the decision date), never the sweep
+    // run date — a sweep running days later must not misdate the decision.
+    const eventDate = String(last.created_at).slice(0, 10);
+    appendable.push({
+      task_id: task.id,
+      project_slug: task.project_slug,
+      tracker_path: route.tracker_path,
+      capture_tag: route.capture_tag,
+      event_date: eventDate,
+      heading: `## Operator resolution — ${eventDate} (Open Engine OE-8E)`,
+      marker: resolutionMarker(task.id),
+      body: `Resolved by ${completedBy} on ${eventDate}: ${note}`,
+    });
+  }
+
+  return { appendable, skipped };
+}
+
+// Tracker only, by design: the resolution is a status/decision record. The
+// session log already carries the executor narrative from the original
+// closeout; duplicating a long operator note into both files doubles noise
+// for zero retrieval gain.
+export function appendResolutionBlock(item) {
+  return appendCloseoutBlock(
+    item.tracker_path,
+    item.heading,
+    item.marker,
+    item.body,
+  );
+}
+
+async function runOperatorResolutionSweep(args, registry) {
+  const config = mcpConfigFromEnv();
+  const listed = await mcpCall(config, "list_agent_tasks", {
+    statuses: ["Agent Done"],
+    include_done: true,
+    limit: RESOLUTION_SCAN_LIMIT,
+  });
+  const rows = Array.isArray(listed) ? listed : (listed?.tasks || []);
+  const cutoffMs = Date.now() - args.lookbackDays * 24 * 60 * 60 * 1000;
+  const candidates = rows.filter((row) => {
+    const completedMs = new Date(row.completed_at || 0).getTime();
+    return Number.isFinite(completedMs) && completedMs >= cutoffMs;
+  });
+
+  const packets = [];
+  for (const row of candidates) {
+    packets.push(await mcpCall(config, "get_agent_task", { task_id: row.id }));
+  }
+
+  const evaluated = evaluateResolutionSweep(packets, registry, {
+    lookbackDays: args.lookbackDays,
+  });
+  const result = {
+    mode: "operator-resolution-sweep",
+    dry_run: !!args.liveCheck,
+    lookback_days: args.lookbackDays,
+    scan_limit: RESOLUTION_SCAN_LIMIT,
+    scan_truncated: rows.length >= RESOLUTION_SCAN_LIMIT,
+    swept: packets.length,
+    appended: [],
+    skipped: evaluated.skipped,
+    captures: [],
+  };
+
+  for (const item of evaluated.appendable) {
+    if (args.liveCheck) {
+      result.appended.push({
+        task_id: item.task_id,
+        path: item.tracker_path,
+        action: "would-append",
+      });
+      continue;
+    }
+    const write = appendResolutionBlock(item);
+    result.appended.push({ task_id: item.task_id, ...write });
+    // Capture only on a real first append: a marker-skipped task was already
+    // captured (or deliberately pre-seeded) on a prior run.
+    if (write.action === "appended" && !args.noCapture) {
+      const capture = await mcpCall(config, "capture_thought", {
+        content: item.body,
+        tags: [item.capture_tag, "open_engine", "operator-resolution"],
+      });
+      result.captures.push({
+        task_id: item.task_id,
+        capture_result: capture,
+      });
+    }
+  }
+
+  console.log(JSON.stringify(result, null, 2));
+}
+
 async function runLive(args, registry) {
   const config = mcpConfigFromEnv();
   const packet = await mcpCall(config, "get_agent_task", {
@@ -1478,6 +1688,10 @@ async function main() {
   }
   if (args.resumeTaskId) {
     await resumeCloseout(args);
+    return;
+  }
+  if (args.operatorResolutionSweep) {
+    await runOperatorResolutionSweep(args, loadRegistry(args.registry));
     return;
   }
   if (args.liveCheck || args.apply) {
