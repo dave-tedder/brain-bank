@@ -441,6 +441,62 @@ on conflict (agent_code) do nothing;
    counts (e.g. "moved 6 / needs-you 3 / new drafts 2"). Then
    `capture_thought` with the briefing text, tags `["open-engine","briefing"]`.
 
+## OPERATOR RENDERING CONTRACT (governs every render and every reply)
+
+Added after a session where a rules-correct render was still unworkable for
+the operator: items unnumbered, task ids buried mid-line, context assumed
+from the morning render, "spawn a session" executed as background subagents,
+and per-card board links that never landed on the card. Where these conflict
+with older habits elsewhere in this skill, these win.
+
+1. ONE GLOBAL NUMBER SEQUENCE. Number every item in the briefing 1..N in
+   render order, across "What happened" AND all four "What needs you" buckets
+   (buckets stay as subheadings). The operator works and answers by number.
+2. ID FIRST, THEN CONTEXT, EVERY ITEM. Each item opens exactly:
+   `N. <short-id> — <project>:` followed by 2-3 plain sentences covering (a)
+   which project this belongs to, (b) what the task actually is, and (c) why
+   it waits / what just happened — written so the operator can decide with
+   zero memory of any prior render. Then EXACTLY ONE next step.
+3. LINK THE EVIDENCE IN CHAT. Every deliverable or context file that helps
+   the operator decide is a clickable markdown link in the chat text
+   (relative local path, or external URL). The chat is the primary link
+   surface: it can open local files; the Artifact cannot.
+4. THE ARTIFACT CARRIES NO LINKS. Local paths cannot resolve from a hosted
+   page, and status-filtered board views rarely land the eye on the intended
+   card, so the Artifact renders ids and file paths as plain text only. It
+   is an orientation surface, not a navigation surface.
+5. EVERY LATER REPLY KEEPS THE SHAPE. For the rest of the session, any reply
+   that reports on, asks about, or acts on a board item re-introduces it as
+   `N. <short-id> — <one-or-two-sentence recap>` before the new information.
+   The operator cannot recall a task from its short-id alone, even minutes
+   later in the same chat. A bare short-id with no recap is a render bug.
+6. SIDE-SESSION VOCABULARY. When the operator says "spawn a session" (or
+   "side chat"), they mean an OPERATOR SIDE SESSION: a fresh session THEY
+   open and drive, NOT a background subagent. When the runtime exposes a
+   task-chip tool (e.g. `spawn_task` in the desktop app), prefer it: it
+   drops a chip the operator clicks once to approve and spin into a session
+   they drive — set `cwd` to the right project, `prompt` to the
+   self-contained Goal Prompt, `title` to the chip label, `tldr` to the
+   one-line what/why. Fall back to a paste-ready Goal Prompt when no chip
+   tool exists. NEVER a background subagent: those run invisibly inside the
+   briefing chat where the operator cannot steer, approve, authorize OAuth,
+   pick images, or click anything, so every interactive step dies. Use
+   background subagents only when the operator explicitly asks for
+   background work.
+7. FLAGS ARE EXPLAINED, NEVER JUST NAMED. When a card carries a critic
+   verdict of `flagged` (or any warning/limitation gating the operator's
+   decision), the render and every later reply explain each flag in plain
+   words: what the reviewer actually found, why it matters, and what the
+   operator should check or decide because of it. A bare "flagged" tag, or
+   flag text compressed past comprehension, is a render bug — the operator
+   cannot weigh a risk they cannot read.
+8. AGENT-PROPOSED CONTENT IS LABELED AS SUCH. When a deliverable contains
+   answers, facts, or copy an agent drafted ON THE OPERATOR'S BEHALF
+   (proposed answers to questions addressed to them, placeholder personal
+   memories, inferred history), the render says plainly that the operator
+   has not confirmed it and it may be wrong. Never present agent-proposed
+   answers as settled.
+
 ## Session Operating Map structure
 
 1. **Board pulse.** One line: window covered, counts by status, health flags.
@@ -561,9 +617,10 @@ kind (no CDN scripts, fonts, or remote images; inline all CSS):
 - **What needs you** as the primary section: a card list in the same
   four-bucket order as the markdown (A board decisions, B needs you present,
   C fresh Claude session, D promote from Standing), with any held questions
-  floated to the top. Each card carries its ONE action inline AND its link as a
-  real `<a href>` (the status-filtered board view, or the external/file work
-  product), plus its reviewer verdict tag when present. Bucket C items put the
+  floated to the top. Each card carries its ONE action inline, its global item
+  number and short-id, and its file path or URL as PLAIN TEXT — no links of
+  any kind in the Artifact, per the OPERATOR RENDERING CONTRACT — plus its
+  reviewer verdict tag when present. Bucket C items put the
   Goal Prompt in a `<pre>` block with a short "copy this into a fresh session"
   note above it. Bucket B cards show their `[hands-only]` / `[session-spawnable]`
   tag on the card, and every `[session-spawnable]` card gets the same `<pre>`
