@@ -309,6 +309,27 @@ by slug and holds anything it cannot resolve.
   `claim_gating_warning` covers the promote MOMENT; this rule covers the ongoing
   state after it, and the sentinel's stranded count is the backstop for when a
   render forgets anyway.
+- A DEAD CLAIM MAKES A HELD CARD UNANSWERABLE. Before handing the operator a
+  one-step action on an `Agent Needs Input` or `Agent Review` card, check
+  `claimed_by` and `claim_expires_at`. The claim is DEAD when `claimed_by` is
+  set AND `claim_expires_at` is either past or NULL — null alongside a live
+  `claimed_by` is the reaper's dead-letter shape, not an unclaimed row. On a
+  dead claim `answer_agent_task`, `resume_agent_task`, `unblock_agent_task`
+  and `update_agent_task` ALL REFUSE, because every one of them requires the
+  caller to own the claim. So the card is STUCK, not merely waiting, and the
+  render must say so.
+  The step to give instead is the release-claim fold: `admin_amend_agent_task`
+  with `release_claim: true` (which returns the row to Agent Todo and clears
+  `agent_code`), then `claim_specific_agent_task`, then the real verb. Never
+  render "answer this" or "resume this" over a dead-claimed card.
+  A LIVE claim on those two statuses is normal and is exactly what makes the
+  answer and resume calls work. Say nothing about it.
+  Why this is a hard rule: the SENTINEL already counts these (its "stale claims
+  N blocking" figure) while this skill had no claim-liveness rule at all, so the
+  two surfaces disagreed and the wrong one was the briefing, which is the
+  surface the operator actually reads each morning. A held card carrying a dead
+  claim is the same trap as a card that is held AND unclaimed: no verb can touch
+  it, and without this check the only way out anyone finds is raw SQL.
 - THE NEEDS OPERATOR DESK IS ALWAYS SHOWN. Every task in the Needs Operator column
   renders under bucket B ("Needs you present") on EVERY run, regardless of the
   watermark window, until operator closes it. Each card shows its stored
