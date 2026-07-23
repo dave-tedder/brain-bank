@@ -1,8 +1,11 @@
 -- Security advisor cleanup: clears Supabase database-linter findings for
 -- tables, views, and SECURITY DEFINER functions introduced in earlier
 -- migrations without RLS, security_invoker, or revoked anon/authenticated
--- EXECUTE. Applies the patterns documented in skills/supabase-edge-fn-patterns/
--- SKILL.md "New-migration security checklist" upstream.
+-- EXECUTE. The checklist applied here, and worth repeating in every new
+-- migration: enable RLS on each new table (service-role policies only),
+-- set security_invoker on views, pin search_path on SECURITY DEFINER
+-- functions, and revoke EXECUTE from public/anon/authenticated on any
+-- function those roles should not call.
 --
 -- All consumers in brain-bank use service_role (Edge Functions) or postgres
 -- (pg_cron). Anon and authenticated roles are not expected callers for any

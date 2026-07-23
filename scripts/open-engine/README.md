@@ -248,38 +248,21 @@ node scripts/open-engine/closeout-controller.mjs \
 Use `--summary-preview` during local verification to print the payload without
 capturing it.
 
-## OE-5 watch helper
+## OE-5 watch (historical)
 
-`verify-oe5-watch.mjs` is frozen as the local read-only evaluator for the completed 2026-06-30 through 2026-07-06 natural job `9` watch. It is intentionally not a current-board validator. Future watches should get a new helper or a renamed current-generation verifier instead of widening this one.
-
-It does not connect to Supabase, read secrets, fire cron, mutate task state, change Slack behavior, or touch Brain Bank PR #11.
-
-Print the SQL bundle:
-
-```bash
-node scripts/open-engine/verify-oe5-watch.mjs --sql
-```
-
-Run a fixture or copied-result JSON file:
-
-```bash
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-pass.json
-node scripts/open-engine/verify-oe5-watch.mjs --input /tmp/oe5-watch-results.json
-```
-
-Expected copied-result keys are `job`, `cronRuns`, `mcpInvocations`, `ledgerRows`, `taskEvents`, `taskRows`, `netResponses`, `scheduledDataChanges`, and optional `pr`. `job` may be either the single row or the SQL result array. `scheduledDataChanges` may be an object like `{ "thoughts": 0, "action_items": 0 }` or the rows from the source-table review query.
-
-For fixture verification, use `--expect`:
-
-```bash
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-pass.json --expect PASS
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-fail-missing-day.json --expect INCONCLUSIVE
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-fail-risk.json --expect FAIL
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-fail-duplicate-ledger.json --expect FAIL
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-pass-pr-head-warning.json --expect PASS
-```
-
-The post-watch checklist remains the source of truth. If this helper disagrees with `docs/handoffs/2026-06-30-brain-bank-pr11-post-watch-merge-checklist.md`, fix the helper.
+Before the scheduled queue-runner lane was promoted, it ran a seven-day
+"natural watch": the cron fired daily with no manual help, and a frozen
+read-only evaluator (fed by a read-only SQL bundle) graded each day —
+lane fired once, one ledger row per day, low-risk claims only, no
+scheduled-lane writes to canonical tables — with any missing day reading
+as INCONCLUSIVE rather than a pass. The watch passed 7/7 and the lane was
+promoted. The evaluator and its fixtures were deliberately frozen to that
+completed watch and are not shipped here; the pattern to reuse for your
+own promotion gates is the query-backed watch surface that superseded it
+(`oe_triage_watch_days` / `oe_triage_watch_streak` views, see the
+migrations), where clean-day evidence is computed from immutable run
+records instead of copied query results. A future watch should get a
+current-generation verifier with its own dates and invariants.
 
 ## Agent Done archive cadence
 
