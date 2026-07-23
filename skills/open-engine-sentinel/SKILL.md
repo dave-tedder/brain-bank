@@ -77,8 +77,17 @@ After approval and insert, verify with `read_agent_ledger(agent_code:
    - Agent Working where `claim_expires_at < now()` = would-reap rows. Report
      count and short ids; do not reap.
    - Standing drafts older than 7 days = old drafts. Report count and short
-     ids. Known canaries or smoke rows can be named as known, but still list
-     them.
+     ids. **Split perpetual canaries out of this figure.** A Standing draft
+     whose title or `desired_outcome` contains "perpetual" together with
+     "canary" or "tripwire" (case-insensitive) is a deliberate standing
+     tripwire, meant to sit there forever and never be promoted or resolved.
+     Count those separately, report them in their own clause ("1 known canary
+     (<id>)"), and never let them drive the verdict word. Match on the marker,
+     never on a hardcoded task id, so any fork's own canaries behave the same.
+     Why this matters: a permanent fixture that forces WARN every single day
+     makes the verdict word carry no information, and a watchdog that is always
+     yellow is one the reader stops reading. If you keep a standing tripwire on
+     your board, this split is what lets the check ever report PASS.
    - **Stranded unclaimable rows.** Count `Agent Todo` rows that no scheduled
      lane can claim. There are TWO independent reasons a row is unclaimable, and
      a count that sees only one of them under-reports:
@@ -174,9 +183,11 @@ order by agent_code, task_type;
    or prior tracker note; otherwise say "no trend baseline yet."
 5. **Decide.**
    - PASS: all required scheduled lanes fresh, no expired active Working claims,
-     and no unexpected old Standing drafts.
+     and no non-canary old Standing drafts. A board whose only old Standing
+     drafts are perpetual canaries is a clean board and reports PASS.
    - FAIL: any required lane stale/missing, any expired active Working claim, or
-     old Standing drafts needing the operator's decision. Name the exact cause.
+     non-canary old Standing drafts needing the operator's decision. Name the
+     exact cause. Perpetual canaries are reported in the detail, never graded.
    - INCONCLUSIVE: a required read failed or a required tool was unavailable.
 6. **Slack report.** Post exactly one line/report to the confirmed ops channel.
    If the channel has not been confirmed in this runtime, draft or print the
@@ -262,7 +273,14 @@ select jsonb_build_object(
       'short_id', left(id::text, 8),
       'created_at', created_at,
       'age_days', floor(extract(epoch from (now() - created_at)) / 86400),
-      'title', title
+      'title', title,
+      -- perpetual canaries are deliberate standing tripwires: report them,
+      -- never grade them. Marker-matched, never a hardcoded id, so any
+      -- fork's own canaries get the same split.
+      'is_canary', (coalesce(title, '') || ' ' || coalesce(desired_outcome, ''))
+                     ~* 'perpetual'
+                   and (coalesce(title, '') || ' ' || coalesce(desired_outcome, ''))
+                     ~* '(canary|tripwire)'
     ) order by created_at)
     from public.agent_tasks
     where archived_at is null

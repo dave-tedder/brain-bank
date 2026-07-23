@@ -358,9 +358,21 @@ on conflict (agent_code) do nothing;
    (Standing, Agent Todo, Agent Working, Agent Needs Input, Agent Review,
    Needs Operator, Agent Done), with `include_done: true` on the Agent Done call and
    `include_archived: true` on every call (applied closeouts may be archived
-   and still belong in the diff window). If any single call returns exactly
-   50 rows, treat that status as possibly truncated and say so in the board
-   pulse; never render silently over a truncated read. Partition the union:
+   and still belong in the diff window).
+   TRUNCATION CHECK, and read this before flagging one. Rows come back sorted
+   `updated_at desc`, so a capped call drops the OLDEST rows, never the newest.
+   A call that returns exactly 50 is therefore only a real truncation risk when
+   the OLDEST row it returned is still NEWER than the watermark, because only
+   then could a row inside the diff window have fallen off the bottom. Check
+   that oldest row before saying anything: if it is older than the watermark,
+   the window is fully covered and you say nothing. If it is newer, the status
+   is genuinely truncated, say so in the board pulse and never render silently
+   over it. Do NOT flag on the bare row count alone. Retired smoke tasks and
+   old closeouts accumulate under `include_archived` forever, and a board that
+   has been through a build phase can easily hold dozens of them in a single
+   column, so a count-only rule turns into a permanent possibly-incomplete
+   caveat on every render, which trains the reader to ignore the one case that
+   is real. Partition the union:
    - MOVED: `updated_at > watermark`. For each, `get_agent_task` and read the
      events newer than the watermark. The updated_at trigger fires on EVERY
      row update, including claim heartbeats and reaper housekeeping, so a
