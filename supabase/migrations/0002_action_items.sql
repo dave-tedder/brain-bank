@@ -1,7 +1,7 @@
 -- 0002_action_items.sql
 -- Open tasks extracted from thoughts. Each row links back to its source
 -- thought; when resolved, links forward to the thought that resolved it
--- (see the auto-resolve pipeline documented in docs/architecture/).
+-- (see the auto-resolve layer guards in skills/auto-resolve-patterns/SKILL.md).
 
 CREATE TABLE public.action_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

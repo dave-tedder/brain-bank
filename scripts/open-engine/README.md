@@ -17,42 +17,44 @@ Print the read-only SQL bundle:
 node scripts/open-engine/closeout-controller.mjs --sql
 ```
 
-Run the OE-8A fixtures (all rebuilt from real event shapes in Session 266):
+Run the fixtures. Every fixture is synthetic (zeroed UUIDs, generic slugs) and
+routes through the shipped `fixtures/test-registry.json`, so these run from a
+clean clone with no operator registry:
 
 ```bash
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-c29a181d.json --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-648e6e1c.json --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-applyable-projected.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-mixed.json --expect MIXED
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-inline-headings.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-action.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-action-only.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-marker-outside-followup.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-marker-injection.json --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-duplicate-heading.json --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-duplicate-done-latest-wins.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-task-not-found.json --task-id 9708e713-6f98-420a-9a39-22bbae011ec1 --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-needs-operator-status.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-applyable.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-missing-sections.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-standing-risk.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-mixed.json --registry scripts/open-engine/fixtures/test-registry.json --expect MIXED
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-inline-headings.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-action.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-action-only.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-marker-outside-followup.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-marker-injection.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-duplicate-heading.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-duplicate-done-latest-wins.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-task-not-found.json --registry scripts/open-engine/fixtures/test-registry.json --task-id 9708e713-6f98-420a-9a39-22bbae011ec1 --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-needs-operator-status.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-protocol-relative-target.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-unknown-route.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
 ```
 
-Heading grammar (Session 274): a canonical heading is matched at line start,
+Heading grammar: a canonical heading is matched at line start,
 case-insensitive, with the section content either inline after the colon
 ("Limitations: none beyond ...") or on the following lines. A heading string
-appearing mid-sentence never opens a section — that anchor is what keeps the
-2026-07-02 false runner receipt (inline "... task. Verification: claimed ...")
-parsing as zero sections. `closeout-controller-inline-headings.json` is the
-real Session 270 honest receipt (md5-verified) whose two inline-content
-headings the 2026-07-06 OE-8D live-check misparsed as missing.
+appearing mid-sentence never opens a section — that anchor is what keeps a
+dishonest receipt that name-drops headings inside prose (inline "... task.
+Verification: claimed ...") parsing as zero sections.
+`closeout-controller-inline-headings.json` covers the honest inverse: a
+receipt whose inline-content headings a line-only parser would misparse as
+missing.
 
-`closeout-controller-c29a181d.json` is the real manual-rep row: its receipt
-carries 6 of the 8 canonical sections (`Limitations` and `Follow-up
-recommendation` are absent), so it classifies HELD until the receipt is
-augmented via the review-note path. `closeout-controller-applyable-projected.json`
-is the one projection: no real 8-section `AGENT DONE` exists yet, so it carries
-the real Session 265 8-section hold receipt projected onto the honest
-`AGENT DONE` shape (see its `_note`).
+`closeout-controller-held-missing-sections.json` is the incomplete-receipt
+case: its receipt carries 6 of the 8 canonical sections (`Limitations` and
+`Follow-up recommendation` are absent), so it classifies HELD until the
+receipt is augmented via the review-note path.
 
-### Review-note augmentation (Session 268)
+### Review-note augmentation
 
 A human review note stored on the task row (`agent_tasks.review_reason`) may
 supply sections the `AGENT DONE` receipt is missing. The controller parses the
@@ -64,7 +66,7 @@ Merged tasks report `augmented_sections` and carry the note text into apply
 event even though `review_reason` is a mutable column.
 
 ```bash
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-c29a181d-augmented.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-augmented.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
 ```
 
 Expected copied-result input shape — the receipt lives in `payload.reason`
@@ -147,8 +149,10 @@ Rules:
   never overwritten.
 - Still zero mutations elsewhere: no `apply_agent_task_review`, no task status
   changes, no tracker/session-log edits, no Brain Bank captures, no Supabase
-  connection. Generated drafts are gitignored (they embed registry paths);
-  `docs/handoffs/pending-closeouts/README.md` documents the folder.
+  connection. Generated drafts are gitignored (they embed registry paths), and
+  the whole `docs/handoffs/pending-closeouts/` folder is operator-local for
+  the same reason — it exists only in a working deployment, never in this
+  repo.
 
 ### OE-8C live modes (`--live-check`, `--apply`)
 
@@ -207,7 +211,7 @@ node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply
   4. One `capture_thought` per project batch, tagged with the route's
      `capture_tag` plus `open_engine`.
 - The controller never runs git. Committing closeout writes stays
-  human/session-side (locked decision, Session 268).
+  human/session-side (locked design decision).
 
 ### OE-8D run-summary capture
 

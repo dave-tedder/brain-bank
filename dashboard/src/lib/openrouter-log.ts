@@ -6,9 +6,6 @@ import { supabase } from "@/lib/supabase";
 // so the dashboard reproduces just the cost-calc + insert shape. Both sides
 // write the same row layout into public.openrouter_calls so the audit table
 // answers cost questions across all surfaces.
-//
-// Driven by recommendation #1 of
-// docs/audits/2026-05-14-openrouter-budget-investigation.md.
 
 // Pricing per 1M tokens. Keep in sync with MODEL_PRICING in the Edge wrapper.
 const MODEL_PRICING: Record<string, { in: number; out: number }> = {

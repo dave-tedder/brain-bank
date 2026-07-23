@@ -1,5 +1,4 @@
 -- Backfill: topic hyphen preservation
--- Spec: docs/superpowers/specs/2026-05-14-topic-hyphen-preservation-design.md
 --
 -- Scans thoughts whose captured content has an explicit `Tags:` line,
 -- finds hyphenated tokens in that Tags line whose halves were stored

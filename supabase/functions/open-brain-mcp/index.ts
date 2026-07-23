@@ -262,7 +262,8 @@ function normalizeActionText(s: string): string {
 // "this source never resolves action items."
 // Structural prefixes are universal (every operator has these sync sources).
 // Operator-specific bridge prefixes come from profile.json — see
-// `supabase/functions/_shared/profile.example.json`.
+// `profile.example.json` at the repo root (copied to
+// `supabase/functions/_shared/profile.json` during setup).
 const MECHANICAL_CAPTURE_PREFIXES = [
   "[Calendar Sync]",
   "[Notion Sync]",
@@ -273,8 +274,7 @@ const MECHANICAL_CAPTURE_PREFIXES = [
   ...loadProfile().mechanical_capture_prefixes,
 ];
 
-// MCP tool-surface enum values sourced from profile. See task 3.8 spec at
-// docs/superpowers/specs/2026-04-20-event-type-enum-profile-wiring-design.md
+// MCP tool-surface enum values sourced from profile.
 const eventTypes = loadProfile().event_types;
 const contentTypes = loadProfile().content_types;
 

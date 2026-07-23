@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Regression tests for scripts/open-engine/deliverables-push.sh.
-# Style precedent: scripts/hooks/block-unsafe-deploys.test.sh (self-contained
-# bash, PASS/FAIL counters, exit 1 on any failure).
+# Style: self-contained bash, PASS/FAIL counters, exit 1 on any failure.
 #
 # Runs entirely in a scratch sandbox: a bare "origin" repo + a working clone
 # with the script copied in. Never touches the real Open Brain repo.

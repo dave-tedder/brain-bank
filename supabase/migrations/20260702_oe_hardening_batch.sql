@@ -1,7 +1,7 @@
 -- Post-Audit Remediation Program Session 3: OE hardening batch.
 --
--- Consolidates the seven H-* and hygiene fixes surfaced by
--- docs/audits/2026-07-02-open-brain-open-engine-full-audit.md:
+-- Consolidates the seven H-* and hygiene fixes surfaced by a full
+-- Open Engine system audit:
 --
 --   1. H-STATE: move_agent_task_status enforces FROM state per the build-plan
 --      receipt table. Prevents AGENT DONE / AGENT BLOCKED / AGENT HUMAN HOLD

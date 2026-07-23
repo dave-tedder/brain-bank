@@ -301,7 +301,8 @@ function normalizeActionText(s: string): string {
 // "this source never resolves action items."
 // Structural prefixes are universal (every operator has these sync sources).
 // Operator-specific bridge prefixes come from profile.json — see
-// `supabase/functions/_shared/profile.example.json`.
+// `profile.example.json` at the repo root (copied to
+// `supabase/functions/_shared/profile.json` during setup).
 const MECHANICAL_CAPTURE_PREFIXES = [
   "[Calendar Sync]",
   "[Notion Sync]",
