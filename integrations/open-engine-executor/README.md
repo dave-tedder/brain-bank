@@ -24,6 +24,8 @@ Run it as a Claude Code **local scheduled task** (a `SKILL.md` under `~/.claude/
 
 Operator step (once): click "Run now" on the task in the Scheduled sidebar section and approve its tool prompts, so future runs don't pause on permissions.
 
+**Running more than one slot per day.** One scheduled task claims one task per fire. If your board fills faster than one claim per day clears it, create additional local scheduled tasks from the same `local-task-skill-template.md` — byte-identical bodies apart from the cron time — so several slots run overnight (or across a day) instead of one. This is a throughput knob, not a different mechanism: each slot still claims and completes exactly one low-risk task per fire, so N slots means roughly N claims per day rather than a bigger claim.
+
 ### Cloud routine (machine-independent)
 
 `routine-prompt.txt` in this directory is a curl/JSON-RPC variant of the same heartbeat for claude.ai/code/routines, so it runs independent of any one machine. To activate: create the routine in the UI with that prompt on your chosen daily schedule, and add env vars `BRAIN_BANK_MCP_URL` + `BRAIN_BANK_MCP_KEY` in the routine settings (values from your deployment; never commit them to the repo). It is fail-closed (`NO_RECEIPT` stop) until env is set. If you activate the cloud routine, pause the local task so the two lanes don't both claim daily.
