@@ -119,21 +119,30 @@ After approval and insert, verify with `read_agent_ledger(agent_code:
        legitimate and load-bearing: it is what makes `answer_agent_task`,
        `resume_agent_task` and `unblock_agent_task` work at all, since each one
        needs a caller that owns the claim. Never flag a live claim on these.
-     - A DEAD claim on a resumable row is the high-severity case. Dead means
-       `claim_expires_at < now()` OR `claim_expires_at is null` while
-       `claimed_by` is still set. Both shapes occur: the reaper's dead-letter
-       branch (max attempts) folds the row to `Agent Needs Input`, keeps
-       `claimed_by`, and NULLS `claim_expires_at` and `claim_token`, so a check
-       that keys only on `claim_expires_at < now()` will not see it. Such a row
+     - The one BLOCKING shape is `claim_expires_at is null` while `claimed_by`
+       is still set, on `Agent Needs Input` / `Agent Review`. That is the shape
+       the reaper's dead-letter branch (max attempts) used to manufacture: it
+       kept `claimed_by` and NULLed `claim_expires_at` and `claim_token`, and a
+       check keying only on `claim_expires_at < now()` never saw it. Such a row
        is held and effectively unowned: answer, resume, unblock and
        `update_agent_task` all refuse because none of them can act on a task
        nobody holds, and `admin_amend_agent_task` cannot move Needs Input to
-       Done. Clearing one takes manual SQL. Report these FIRST, with ids, and
-       call them blocking.
-     - `Needs Operator`, `Agent Todo`, `Standing`, `Agent Done`: a claim here is
-       harmless leftover. Those cards close through `complete_operator_action`
-       or a fresh claim, not through the stale one. Report quietly as a count,
-       with ids when there are few.
+       Done. The reaper's dead-letter fix (`20260724_reaper_deadletter_clears_claim`)
+       stops it being created, so this count should read 0; if it is ever
+       non-zero, some other path minted a null-expiry claim and it needs a look.
+       Report these FIRST, with ids.
+     - A PAST (non-null) expiry with a live `claimed_by`, on ANY status
+       including `Agent Needs Input` / `Agent Review`, is LEFTOVER, not
+       blocking. It is not stuck: an `Agent Review` row is applied by the
+       closeout by task id regardless of its claim, an `Agent Needs Input` hold
+       is still resumable by its owner (resume/answer match the `claimed_by`
+       string, not the expiry), and either folds to `Agent Todo` via
+       `admin_amend_agent_task(release_claim)`. This is the class that used to
+       be over-reported as blocking. Report quietly as a count with ids.
+     - `Needs Operator`, `Agent Todo`, `Standing`, `Agent Done`: a dead claim
+       here is harmless leftover too. Those cards close through
+       `complete_operator_action` or a fresh claim, not through the stale one.
+       Report quietly as a count, with ids when there are few.
      Both figures are REPORTED, not graded. Whether a dead claim on a resumable
      row should move the verdict word is a deployment decision; the default here
      is to report it loudly and grade nothing.
@@ -311,7 +320,8 @@ select jsonb_build_object(
       'claimed_by', claimed_by,
       'claim_expires_at', claim_expires_at,
       'severity', case
-        when status in ('Agent Needs Input', 'Agent Review') then 'blocking'
+        when status in ('Agent Needs Input', 'Agent Review')
+          and claim_expires_at is null then 'blocking'
         else 'leftover'
       end,
       'title', title
@@ -325,12 +335,27 @@ select jsonb_build_object(
 ) as sentinel_board_health;
 ```
 
-`stale_claims_outside_working` deliberately treats `claim_expires_at is null`
-with a live `claimed_by` as dead, not as "no claim". That is the reaper's
-dead-letter shape, and it is why this class stays invisible to a check that
-keys only on `claim_expires_at < now()`. A live claim on a resumable row has
-`claim_expires_at > now()` and is excluded by the predicate, which is correct:
-that claim is doing its job.
+`stale_claims_outside_working` reports every non-Working row that carries a
+`claimed_by` with an expired or null expiry, but `severity` separates two
+genuinely different shapes:
+
+- **`blocking`** is reserved for `claim_expires_at is null` on a resumable
+  status. That is the reaper's manufactured-dead shape (`claimed_by` retained,
+  expiry NULLed) and the only one no verb could historically move. The
+  reaper's dead-letter fix (`20260724_reaper_deadletter_clears_claim`) stops
+  the reaper from creating it, so this count should now sit at 0; a non-zero
+  `blocking` is a real tripwire that some other path minted a null-expiry
+  claim.
+- **`leftover`** covers a `claim_expires_at < now()` (past, non-null) claim on
+  ANY status, including `Agent Needs Input` / `Agent Review`. A past expiry
+  there is NOT stuck: an `Agent Review` row is applied by the closeout by task
+  id regardless of its claim, an `Agent Needs Input` hold is still resumable by
+  its owner (resume/answer match on the `claimed_by` string, not the expiry),
+  and either is foldable to `Agent Todo` by
+  `admin_amend_agent_task(release_claim)`. Report these quietly with ids.
+
+A LIVE claim on a resumable row (`claim_expires_at > now()`) is excluded by the
+predicate entirely, which is correct: that claim is doing its job.
 
 ## Scheduling
 
