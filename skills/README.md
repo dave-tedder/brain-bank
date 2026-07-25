@@ -18,3 +18,7 @@ Claude Code skills shipped with brain-bank. Skills are auto-discovered when a us
 | [`supabase-edge-fn-patterns`](supabase-edge-fn-patterns/SKILL.md) | Editing files under `supabase/functions/`, writing supabase-js queries, debugging silent insert failures, or writing a new migration that creates a table, view, or SECURITY DEFINER function. |
 
 See each skill's `SKILL.md` for the full trigger description and behavior.
+
+## Adding a new skill
+
+Copy [`_template/SKILL.md`](_template/SKILL.md) to a new subdirectory, fill in the frontmatter (`name`, `description`, `type: skill`) and body. Triggers should be narrow — a broad description fires on irrelevant sessions and wastes context. Auto-discovery is automatic when Claude Code is active in a Brain Bank clone or Brain Bank is installed as a plugin; no manual registration step is needed.
