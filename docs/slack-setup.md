@@ -14,6 +14,8 @@ Nine steps, about twenty minutes the first time.
 - **In-channel query.** Post in a dedicated query channel (or prefix a message with `search:` or `ask:` in the capture channel) and Brain Bank replies with the top five matching thoughts.
 - **In-channel done command.** Prefix a message with `done:` in the capture channel to manually close an action item without auto-resolve.
 
+Structured capture prefixes (`DECISION:`, `CLIENT:`, `IDEA:`, `MEETING:`) work in any capture channel and improve metadata extraction accuracy — see [`docs/capture-templates.md`](capture-templates.md).
+
 ## Three channels, one app
 
 Brain Bank supports up to four Slack channels, each with a specific job. You can start with one channel (capture) and add the others later. The split exists because these modes have different signal-to-noise profiles and mixing them in one channel is frustrating after the first week.
