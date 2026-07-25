@@ -3606,14 +3606,26 @@ server.registerTool(
       if (automation_state && !isLedgerAutomationState(automation_state)) {
         throw new Error(`Invalid automation_state: ${automation_state}`);
       }
+      const nowIso = new Date().toISOString();
       const patch = compactObject({
         automation_state,
         last_queue_result,
-        last_successful_run,
+        // Server-stamp last_successful_run when the caller OMITS it. A model has
+        // no clock, so its self-reported "now" is untrusted: a lane that guesses
+        // the value future-stamps it, and a lane that omits it lets compactObject
+        // drop the field so the OLD value persists and the lane reads permanently
+        // fresh. Defaulting an omitted field to the server clock deletes the
+        // freeze mode for every lane at once, including any NEW lane a
+        // prompt-level fix has not reached. An explicit value still wins (a
+        // caller can deliberately set a PAST watermark), and an explicit null
+        // still clears the column.
+        last_successful_run: last_successful_run === undefined
+          ? nowIso
+          : last_successful_run,
         local_context,
         optional_skills,
         notes,
-        last_heartbeat: new Date().toISOString(),
+        last_heartbeat: nowIso,
       });
       const { data, error } = await supabase
         .from("agent_task_ledger")
