@@ -20,11 +20,15 @@ import {
   extractOperatorAction,
   scanCoversWindow,
   flipDocLineText,
+  parseCheckRef,
+  parseCheckSpec,
   parseReceipt,
   planDocRefs,
   receiptNamesDeliverable,
   resolvePlanDocPath,
+  runExecutedCheck,
   scanPlanDocDir,
+  wasAutoPromoted,
 } from "./closeout-controller.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -814,4 +818,419 @@ test("scanCoversWindow: an unparseable oldest timestamp is treated as truncated"
     updated_at: i === 49 ? "not-a-date" : "2026-07-22T00:00:00Z",
   }));
   assert.equal(scanCoversWindow(rows, Date.parse("2026-07-16T00:00:00Z"), 50), false);
+});
+
+// ==========================================================================
+// OE-13 Sub-phase B — executed-check lane (Tasks 1-4)
+// ==========================================================================
+
+const CHECK_SHA = "a".repeat(40);
+
+function checkSpecReceipt(ref = CHECK_SHA) {
+  return [
+    "Work summary: implemented parseThing + its test",
+    "Verification: node --test passed locally",
+    `Touched files or records: src/parse-thing.mjs\nCHECK-REF: ${ref}`,
+    "Limitations: none",
+    "Tracker draft: - [x] parseThing shipped",
+    "Session-log draft: parseThing shipped",
+    "Brain Bank capture draft: parseThing shipped",
+    "Follow-up recommendation: none",
+  ].join("\n");
+}
+
+function checkSpecTask(overrides = {}) {
+  const id = "cccccccc-e270-44dc-b414-d75e00080ae4";
+  const {
+    check_spec = { runner: "node-test", args: ["parse-thing.test.mjs"] },
+    receipt = checkSpecReceipt(),
+    events = [],
+  } = overrides;
+  return {
+    generated_at: "2026-07-15T12:00:00.000Z",
+    tasks: [{
+      id,
+      title: "check_spec code task",
+      status: "Agent Review",
+      risk: "low",
+      project_slug: "tmp-proj",
+      explicit_approval: false,
+      linked_action_item_id: null,
+      review_reason: null,
+      sources: [],
+      check_spec,
+      events: [
+        ...events,
+        {
+          task_id: id,
+          event_type: "AGENT DONE",
+          agent_code: "claude-code",
+          payload: {
+            reason: receipt,
+            status: "Agent Review",
+            from_status: "Agent Working",
+          },
+          created_at: "2026-07-15T11:00:00.000Z",
+        },
+      ],
+    }],
+    actionItems: [],
+  };
+}
+
+// --------------------------------------------------------------------------
+// Task 1 — parseCheckSpec / parseCheckRef / wasAutoPromoted (pure units)
+// --------------------------------------------------------------------------
+
+test("parseCheckSpec: absent means not present", () => {
+  assert.deepEqual(parseCheckSpec(null), { present: false });
+  assert.deepEqual(parseCheckSpec(undefined), { present: false });
+});
+
+test("parseCheckSpec: valid node-test spec builds argv", () => {
+  const parsed = parseCheckSpec({
+    runner: "node-test",
+    args: ["parse-thing.test.mjs"],
+  });
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.argv, ["node", "--test", "parse-thing.test.mjs"]);
+});
+
+test("parseCheckSpec: deno-test argv carries --no-prompt", () => {
+  const parsed = parseCheckSpec({ runner: "deno-test", args: [] });
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.argv, ["deno", "test", "--no-prompt"]);
+});
+
+test("parseCheckSpec: npm-run requires exactly one plain script name", () => {
+  assert.equal(parseCheckSpec({ runner: "npm-run", args: ["check"] }).ok, true);
+  assert.equal(parseCheckSpec({ runner: "npm-run", args: [] }).ok, false);
+  assert.equal(
+    parseCheckSpec({ runner: "npm-run", args: ["a", "b"] }).ok,
+    false,
+  );
+});
+
+test("parseCheckSpec: rejects unknown runner, shell metacharacters, extra keys, non-object", () => {
+  for (
+    const bad of [
+      { runner: "bash", args: ["-c", "true"] },
+      { runner: "node-test", args: ["a; rm -rf /"] },
+      { runner: "node-test", args: ["a b"] },
+      { runner: "node-test", args: ["$(id)"] },
+      { runner: "node-test", args: [""], },
+      { runner: "node-test", args: ["x".repeat(129)] },
+      { runner: "node-test", args: [], cwd: "/" },
+      "deno test",
+      ["deno", "test"],
+      42,
+    ]
+  ) {
+    const parsed = parseCheckSpec(bad);
+    assert.equal(parsed.present, true, JSON.stringify(bad));
+    assert.equal(parsed.ok, false, JSON.stringify(bad));
+    assert.equal(parsed.reason, "CHECK_SPEC_UNPARSEABLE");
+  }
+});
+
+test("parseCheckRef: exactly one line-anchored 40-hex marker", () => {
+  assert.deepEqual(parseCheckRef(`CHECK-REF: ${CHECK_SHA}`), {
+    ref: CHECK_SHA,
+    reasons: [],
+  });
+  assert.deepEqual(parseCheckRef("no marker here").reasons, [
+    "CHECK_REF_MISSING",
+  ]);
+  assert.deepEqual(
+    parseCheckRef(`CHECK-REF: ${CHECK_SHA}\nCHECK-REF: ${CHECK_SHA}`).reasons,
+    ["CHECK_REF_COUNT"],
+  );
+  assert.deepEqual(parseCheckRef("CHECK-REF: main").reasons, [
+    "CHECK_REF_FORMAT",
+  ]);
+  // Mid-line marker is invisible by design (line-anchored parser).
+  assert.deepEqual(
+    parseCheckRef(`the commit is CHECK-REF: ${CHECK_SHA} thanks`).reasons,
+    ["CHECK_REF_MISSING"],
+  );
+});
+
+test("wasAutoPromoted: keys on the triage-auto event author", () => {
+  assert.equal(wasAutoPromoted([]), false);
+  assert.equal(
+    wasAutoPromoted([{ event_type: "AGENT STATUS", agent_code: "triage" }]),
+    false,
+  );
+  assert.equal(
+    wasAutoPromoted([
+      {
+        event_type: "AGENT STATUS",
+        agent_code: "triage-auto",
+        payload: { action: "auto-promoted" },
+      },
+    ]),
+    true,
+  );
+});
+
+// --------------------------------------------------------------------------
+// Task 2 — check-run.sh + runExecutedCheck against a scratch git repo.
+// Integration tests; they run git + node for real. scratchCheckRepo() writes
+// a repo whose HEAD carries the named test files.
+// --------------------------------------------------------------------------
+
+function scratchCheckRepo(files) {
+  const dir = mkdtempSync(join(tmpdir(), "oe-check-repo-"));
+  execFileSync("git", ["-C", dir, "init", "-q"]);
+  for (const [name, content] of Object.entries(files)) {
+    writeFileSync(join(dir, name), content);
+  }
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", [
+    "-C",
+    dir,
+    "-c",
+    "user.email=oe@test",
+    "-c",
+    "user.name=oe-test",
+    "commit",
+    "-q",
+    "-m",
+    "scratch",
+  ]);
+  const sha = execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).trim();
+  return { dir, sha };
+}
+
+const PASSING_TEST = [
+  'import { test } from "node:test";',
+  'import assert from "node:assert/strict";',
+  'test("passes", () => { assert.equal(1 + 1, 2); });',
+  "",
+].join("\n");
+
+const FAILING_TEST = [
+  'import { test } from "node:test";',
+  'import assert from "node:assert/strict";',
+  'test("fails", () => { assert.equal(1 + 1, 3); });',
+  "",
+].join("\n");
+
+// Spec §9 probe 6 (env scrub): this check PASSES only when the credential is
+// NOT visible — if the scrub ever leaks, the check fails and the task holds.
+const ENV_SCRUB_TEST = [
+  'import { test } from "node:test";',
+  'import assert from "node:assert/strict";',
+  'test("cred is not visible in the check env", () => {',
+  "  assert.equal(process.env.BB_MCP_KEY, undefined);",
+  "});",
+  "",
+].join("\n");
+
+// Spec §9 probe 6 (network deny): the check PASSES only when an outbound
+// connect is denied by the sandbox (EPERM-class), not merely refused.
+// Discriminating only on a machine with real network access.
+const NET_DENY_TEST = [
+  'import { test } from "node:test";',
+  'import assert from "node:assert/strict";',
+  'import { connect } from "node:net";',
+  'test("outbound network is denied", async () => {',
+  "  const err = await new Promise((resolve) => {",
+  '    const sock = connect({ host: "1.1.1.1", port: 443 });',
+  '    sock.setTimeout(3000, () => { sock.destroy(); resolve(new Error("TIMEOUT")); });',
+  '    sock.on("error", (e) => resolve(e));',
+  '    sock.on("connect", () => { sock.destroy(); resolve(null); });',
+  "  });",
+  '  assert.ok(err, "connect unexpectedly succeeded - network not denied");',
+  "});",
+  "",
+].join("\n");
+
+function runCheck(repo, sha, argv) {
+  return runExecutedCheck({
+    runner: "node-test",
+    args: argv.slice(2),
+    argv,
+    ref: sha,
+    repo,
+  });
+}
+
+test("check-run.sh: passing check exits 0 in an isolated worktree", () => {
+  const { dir, sha } = scratchCheckRepo({ "pass.test.mjs": PASSING_TEST });
+  try {
+    const verdict = runCheck(dir, sha, ["node", "--test", "pass.test.mjs"]);
+    assert.equal(verdict.passed, true, verdict.output);
+    assert.equal(verdict.exit_code, 0);
+    // Teardown assert: no worktree left behind.
+    const list = execFileSync("git", ["-C", dir, "worktree", "list"], {
+      encoding: "utf8",
+    });
+    assert.equal(list.trim().split("\n").length, 1, list);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("check-run.sh: failing check maps to EXECUTED_CHECK_FAILED", () => {
+  const { dir, sha } = scratchCheckRepo({ "fail.test.mjs": FAILING_TEST });
+  try {
+    const verdict = runCheck(dir, sha, ["node", "--test", "fail.test.mjs"]);
+    assert.equal(verdict.passed, false);
+    assert.equal(verdict.reason, "EXECUTED_CHECK_FAILED");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("check-run.sh: env is scrubbed — credential never visible (probe 6)", () => {
+  const { dir, sha } = scratchCheckRepo({ "scrub.test.mjs": ENV_SCRUB_TEST });
+  const previous = process.env.BB_MCP_KEY;
+  process.env.BB_MCP_KEY = "leak-canary-not-a-real-key";
+  try {
+    const verdict = runCheck(dir, sha, ["node", "--test", "scrub.test.mjs"]);
+    assert.equal(verdict.passed, true, verdict.output);
+  } finally {
+    if (previous === undefined) delete process.env.BB_MCP_KEY;
+    else process.env.BB_MCP_KEY = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("check-run.sh: outbound network is denied (probe 6)", () => {
+  const { dir, sha } = scratchCheckRepo({ "net.test.mjs": NET_DENY_TEST });
+  try {
+    const verdict = runCheck(dir, sha, ["node", "--test", "net.test.mjs"]);
+    assert.equal(verdict.passed, true, verdict.output);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("check-run.sh: unknown ref maps to CHECK_REF_UNRESOLVED", () => {
+  const { dir } = scratchCheckRepo({ "pass.test.mjs": PASSING_TEST });
+  try {
+    const verdict = runCheck(dir, "b".repeat(40), [
+      "node",
+      "--test",
+      "pass.test.mjs",
+    ]);
+    assert.equal(verdict.passed, false);
+    assert.equal(verdict.reason, "CHECK_REF_UNRESOLVED");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --------------------------------------------------------------------------
+// Task 3 — evaluate() classification branch (probes 2, 3, 4, 5 + eligibility)
+// --------------------------------------------------------------------------
+
+test("evaluate: eligible check_spec task is APPLYABLE with pending executed_check", () => {
+  withTempCopy((dir) => {
+    const result = evaluate(checkSpecTask(), tmpRegistry(dir), {});
+    assert.equal(result.status, "APPLYABLE", JSON.stringify(result.hold));
+    const check = result.apply[0].executed_check;
+    assert.equal(check.pending, true);
+    assert.equal(check.ref, CHECK_SHA);
+    assert.equal(check.repo, dir);
+    assert.deepEqual(check.argv, ["node", "--test", "parse-thing.test.mjs"]);
+  });
+});
+
+test("evaluate: task without check_spec has null executed_check (additive)", () => {
+  withTempCopy((dir) => {
+    const input = checkSpecTask({ check_spec: null });
+    const result = evaluate(input, tmpRegistry(dir), {});
+    assert.equal(result.status, "APPLYABLE");
+    assert.equal(result.apply[0].executed_check, null);
+  });
+});
+
+test("evaluate: malformed check_spec holds CHECK_SPEC_UNPARSEABLE (probe 2)", () => {
+  withTempCopy((dir) => {
+    const input = checkSpecTask({
+      check_spec: { runner: "bash", args: ["-c", "true"] },
+    });
+    const result = evaluate(input, tmpRegistry(dir), {});
+    assert.equal(result.status, "HELD");
+    assert.ok(result.hold[0].reasons.includes("CHECK_SPEC_UNPARSEABLE"));
+  });
+});
+
+test("evaluate: auto-promoted check_spec task holds (probe 5, do-not-stack)", () => {
+  withTempCopy((dir) => {
+    const input = checkSpecTask({
+      events: [{
+        task_id: "cccccccc-e270-44dc-b414-d75e00080ae4",
+        event_type: "AGENT STATUS",
+        agent_code: "triage-auto",
+        payload: { action: "auto-promoted" },
+        created_at: "2026-07-15T08:35:00.000Z",
+      }],
+    });
+    const result = evaluate(input, tmpRegistry(dir), {});
+    assert.equal(result.status, "HELD");
+    assert.ok(
+      result.hold[0].reasons.includes("AUTO_PROMOTED_CHECK_TASK_EXCLUDED"),
+    );
+  });
+});
+
+test("evaluate: check_spec on a deliverables content task holds (probe 4)", () => {
+  withTempCopy((dir) => {
+    const receipt = checkSpecReceipt().replace(
+      "src/parse-thing.mjs",
+      "deliverables/tmp-proj/cccccccc-draft.md",
+    );
+    const result = evaluate(
+      checkSpecTask({ receipt }),
+      tmpRegistry(dir),
+      {},
+    );
+    assert.equal(result.status, "HELD");
+    assert.ok(result.hold[0].reasons.includes("CHECK_SPEC_ON_CONTENT_TASK"));
+  });
+});
+
+test("evaluate: check_spec task with no CHECK-REF line holds (authorship: receipt cannot substitute)", () => {
+  withTempCopy((dir) => {
+    const receipt = checkSpecReceipt().replace(/^CHECK-REF: .*$/m, "");
+    const result = evaluate(checkSpecTask({ receipt }), tmpRegistry(dir), {});
+    assert.equal(result.status, "HELD");
+    assert.ok(result.hold[0].reasons.includes("CHECK_REF_MISSING"));
+  });
+});
+
+// Probe 3 (authorship): the receipt echoing a DIFFERENT check is irrelevant —
+// the argv the gate will run comes from the packet's check_spec, never from
+// receipt prose. Assert the proposed argv matches the packet.
+test("evaluate: proposed argv comes from the packet, not the receipt's claim (probe 3)", () => {
+  withTempCopy((dir) => {
+    const receipt = checkSpecReceipt().replace(
+      "Verification: node --test passed locally",
+      "Verification: ran `bash -c 'exit 0'` as my check, exit 0",
+    );
+    const result = evaluate(checkSpecTask({ receipt }), tmpRegistry(dir), {});
+    assert.equal(result.status, "APPLYABLE");
+    assert.deepEqual(result.apply[0].executed_check.argv, [
+      "node",
+      "--test",
+      "parse-thing.test.mjs",
+    ]);
+  });
+});
+
+// Probe 7 shape: a green check never bypasses the existing preconditions —
+// risk stays gating exactly as before.
+test("evaluate: check_spec task with medium risk still holds RISK_NOT_LOW (probe 7)", () => {
+  withTempCopy((dir) => {
+    const input = checkSpecTask();
+    input.tasks[0].risk = "medium";
+    const result = evaluate(input, tmpRegistry(dir), {});
+    assert.equal(result.status, "HELD");
+    assert.ok(result.hold[0].reasons.includes("RISK_NOT_LOW"));
+  });
 });

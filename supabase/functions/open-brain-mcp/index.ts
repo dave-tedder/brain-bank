@@ -754,7 +754,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local, check_spec";
 
 // Internal load for the receipt-guard path only: includes claim_token so
 // assertClaimTokenMatches can pre-check. Never use for list/get responses.
@@ -1967,6 +1967,9 @@ server.registerTool(
       title: z.string().min(1).optional(),
       source_thought_id: z.string().uuid().optional(),
       linked_action_item_id: z.string().uuid().optional(),
+      check_spec: z.record(z.unknown()).optional().describe(
+        "OE-13 executed-check spec ({runner, args[]}) from the fixed runner allowlist. Immutable after intake; only set it when the closeout gate should re-run this check in isolation and auto-apply on ITS exit 0. Leave unset for the normal human-read gate.",
+      ),
     },
   },
   async (
@@ -1989,6 +1992,7 @@ server.registerTool(
       title?: string;
       source_thought_id?: string;
       linked_action_item_id?: string;
+      check_spec?: Record<string, unknown>;
     },
   ) => {
     logToolInvocation("create_agent_task_intake", {

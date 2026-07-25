@@ -13,6 +13,7 @@ import {
   buildThoughtIntakeRecord,
   FOLLOW_UP_TEMPLATE_BOUNDARIES,
   FOLLOW_UP_TEMPLATE_DO_STEPS,
+  validateCheckSpec,
 } from "./_agent_intake.ts";
 
 const baseInput = {
@@ -683,4 +684,70 @@ Deno.test("promote guard leaves action-item stubs alone (warn-only stays)", () =
     },
     false,
   ); // must not throw — D3 refuses only the follow-up template
+});
+
+// --------------------------------------------------------------------------
+// OE-13 Sub-phase B — check_spec intake validator (server mirror of the
+// controller's parseCheckSpec: same runners, same bounds, same arg pattern).
+// --------------------------------------------------------------------------
+
+Deno.test("validateCheckSpec: null/undefined pass through as null", () => {
+  assertEquals(validateCheckSpec(null), null);
+  assertEquals(validateCheckSpec(undefined), null);
+});
+
+Deno.test("validateCheckSpec: accepts allowlisted runner with bounded args", () => {
+  assertEquals(
+    validateCheckSpec({ runner: "deno-check", args: ["index.ts"] }),
+    { runner: "deno-check", args: ["index.ts"] },
+  );
+});
+
+Deno.test("validateCheckSpec: rejects unknown runner", () => {
+  assertThrows(
+    () => validateCheckSpec({ runner: "bash", args: ["-c", "true"] }),
+    Error,
+    "check_spec.runner",
+  );
+});
+
+Deno.test("validateCheckSpec: rejects shell metacharacters and whitespace", () => {
+  assertThrows(() =>
+    validateCheckSpec({ runner: "node-test", args: ["a; rm -rf /"] })
+  );
+  assertThrows(() =>
+    validateCheckSpec({ runner: "node-test", args: ["$(id)"] })
+  );
+  assertThrows(() => validateCheckSpec({ runner: "node-test", args: ["a b"] }));
+});
+
+Deno.test("validateCheckSpec: rejects unknown keys and arg-count violations", () => {
+  assertThrows(() =>
+    validateCheckSpec({ runner: "node-test", args: [], cwd: "/" })
+  );
+  assertThrows(() => validateCheckSpec({ runner: "npm-run", args: [] }));
+  assertThrows(() => validateCheckSpec({ runner: "npm-test", args: ["x"] }));
+});
+
+Deno.test("buildAgentTaskIntakeRecord: carries a validated check_spec; defaults to null", () => {
+  const base = {
+    desired_outcome: "ship parseThing",
+    context: "ctx",
+    sources: [],
+    do_steps: "do",
+    acceptance_criteria: "ok",
+    output_handoff: "handoff",
+    boundaries: "none",
+    intake_source: "handoff-doc" as const,
+  };
+  const withCheck = buildAgentTaskIntakeRecord({
+    ...base,
+    check_spec: { runner: "node-test", args: ["parse-thing.test.mjs"] },
+  });
+  assertEquals(withCheck.check_spec, {
+    runner: "node-test",
+    args: ["parse-thing.test.mjs"],
+  });
+  const without = buildAgentTaskIntakeRecord(base);
+  assertEquals(without.check_spec, null);
 });

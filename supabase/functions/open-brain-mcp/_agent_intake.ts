@@ -17,6 +17,76 @@ export const AGENT_TASK_INTAKE_SOURCES = [
 
 export type AgentTaskIntakeSource = (typeof AGENT_TASK_INTAKE_SOURCES)[number];
 
+// OE-13 Sub-phase B (spec §3.1, Fork B): check_spec is a fixed allowlist of
+// runner commands with bounded args. This is the SERVER mirror of the
+// controller's parseCheckSpec (scripts/open-engine/closeout-controller.mjs):
+// same runners, same bounds, same arg pattern. It THROWS (intake rejects
+// loudly); the controller version classifies (gate holds quietly). If either
+// allowlist ever changes, change BOTH (mirror-style discipline, same as the
+// capture-path mirror rule).
+export const CHECK_SPEC_RUNNERS: Record<
+  string,
+  { minArgs: number; maxArgs: number }
+> = {
+  "deno-test": { minArgs: 0, maxArgs: 8 },
+  "deno-check": { minArgs: 1, maxArgs: 8 },
+  "node-test": { minArgs: 0, maxArgs: 8 },
+  "npm-test": { minArgs: 0, maxArgs: 0 },
+  "npm-run": { minArgs: 1, maxArgs: 1 },
+};
+
+const CHECK_SPEC_ARG_PATTERN = /^[A-Za-z0-9@._/:=,-]+$/;
+
+export interface AgentTaskCheckSpec {
+  runner: string;
+  args: string[];
+}
+
+export function validateCheckSpec(
+  value: unknown,
+): AgentTaskCheckSpec | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("check_spec must be a {runner, args[]} object.");
+  }
+  const record = value as Record<string, unknown>;
+  const unknownKeys = Object.keys(record).filter(
+    (key) => key !== "runner" && key !== "args",
+  );
+  if (unknownKeys.length > 0) {
+    throw new Error(`check_spec has unknown keys: ${unknownKeys.join(", ")}.`);
+  }
+  const runner = record.runner;
+  if (typeof runner !== "string" || !(runner in CHECK_SPEC_RUNNERS)) {
+    throw new Error(
+      `check_spec.runner must be one of: ${
+        Object.keys(CHECK_SPEC_RUNNERS).join(", ")
+      }.`,
+    );
+  }
+  const bounds = CHECK_SPEC_RUNNERS[runner];
+  const args = record.args === undefined ? [] : record.args;
+  if (!Array.isArray(args)) {
+    throw new Error("check_spec.args must be an array of strings.");
+  }
+  if (args.length < bounds.minArgs || args.length > bounds.maxArgs) {
+    throw new Error(
+      `check_spec.args for ${runner} must have between ${bounds.minArgs} and ${bounds.maxArgs} entries.`,
+    );
+  }
+  for (const arg of args) {
+    if (
+      typeof arg !== "string" || arg.length === 0 || arg.length > 128 ||
+      !CHECK_SPEC_ARG_PATTERN.test(arg)
+    ) {
+      throw new Error(
+        "check_spec.args entries must be short plain tokens (no spaces or shell metacharacters).",
+      );
+    }
+  }
+  return { runner, args: args as string[] };
+}
+
 export interface AgentTaskIntakeInput {
   desired_outcome: string;
   context: string;
@@ -37,6 +107,7 @@ export interface AgentTaskIntakeInput {
   source_thought_id?: string | null;
   linked_action_item_id?: string | null;
   parent_task_id?: string | null;
+  check_spec?: unknown;
 }
 
 export interface AgentTaskIntakeRecord {
@@ -62,6 +133,7 @@ export interface AgentTaskIntakeRecord {
   source_thought_id: string | null;
   linked_action_item_id: string | null;
   parent_task_id: string | null;
+  check_spec: AgentTaskCheckSpec | null;
 }
 
 export interface ActionItemPromotionRow {
@@ -243,6 +315,7 @@ export function buildAgentTaskIntakeRecord(
     source_thought_id: input.source_thought_id?.trim() || null,
     linked_action_item_id: input.linked_action_item_id?.trim() || null,
     parent_task_id: input.parent_task_id?.trim() || null,
+    check_spec: validateCheckSpec(input.check_spec),
   };
 }
 

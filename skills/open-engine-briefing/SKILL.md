@@ -509,6 +509,16 @@ with older habits elsewhere in this skill, these win.
    filed item, name the operator's resulting next step in the same breath (it
    is repeated as an action in "What needs you"); a filed research/draft task
    is rarely the end of the line.
+   - **Executed-check auto-applies (OE-13B).** Surface any AGENT APPLIED event
+     whose `closeout_evidence.executed_check` is present as its own line:
+     "auto-applied on executed check (exit 0): <task short-id> <title> —
+     <runner> @ <ref-short>". This is the post-hoc watch surface — a low-risk
+     code task that closed WITHOUT a human reading the receipt because the
+     controller re-ran the packet's check in isolation and it exited 0.
+     Weight it: read the change and, if the auto-apply looks wrong (a
+     suspected false-pass), flag it as a **stop-the-lane** event — flip
+     `EXECUTED_CHECK_ENABLED = false` in `closeout-controller.mjs` (a one-line
+     commit, no deploy) and re-open the task for a human read.
 3. **What needs you.** Group every waiting item into one of four buckets, in
    this order. Each item: one plain-language line of what it is and why it
    waits, EXACTLY ONE next step, and a link to the actual work (or the inline

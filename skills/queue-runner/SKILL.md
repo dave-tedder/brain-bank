@@ -227,6 +227,14 @@ Stamp the install target at completion time; the run already knows it (it is the
 
 The closeout-controller reads the marker verbatim to route the task to the Needs Operator desk. It HOLDS any receipt that names a `deliverables/` file but carries no marker (`DELIVERABLE_WITHOUT_OPERATOR_ACTION`), and any receipt whose marker is mid-line (`OPERATOR_MARKER_NOT_LINE_ANCHORED`) — held and visible, never applied-and-lost. No deliverable and no operator step => terminal task, closes to Agent Done. The marker is valid ONLY inside "Follow-up recommendation:" — a marker in any other section holds the task (`OPERATOR_MARKER_OUTSIDE_FOLLOW_UP`) instead of closing it, so the step is never silently lost.
 
+CHECK-REF (OE-13B executed-check tasks): if the task's packet carries a `check_spec` (a low-risk code task the closeout gate re-runs in isolation), the receipt MUST end its "Touched files or records:" section with exactly one line-anchored marker naming the commit the session created in the target repo:
+
+```text
+CHECK-REF: <40-hex sha of the produced commit>
+```
+
+Commit the code to a FEATURE BRANCH — the human still merges (never a commit by the controller). The controller runs the PACKET's check against that commit in a cred-scrubbed no-network worktree and applies ONLY on its own exit 0; the receipt's own verification prose is never trusted for these tasks. A missing, duplicated, or non-40-hex CHECK-REF HOLDs the task (`CHECK_REF_MISSING|COUNT|FORMAT`) — held and visible, never applied on the agent's word.
+
 VOICE RULES for any drafted client-facing or operator-voice content inside a task
 (blog drafts, emails, titles/metas): no em dashes; never use the words
 "inked", "inking", "tapestry", "delve", "delving", "realm", metaphorical

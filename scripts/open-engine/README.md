@@ -292,3 +292,59 @@ where status = 'Agent Done'
     -- '00000000-0000-0000-0000-000000000000'
   ]::uuid[]);
 ```
+
+## Executed-check lane (OE-13B)
+
+For a narrow class of low-risk code task, the closeout controller re-runs a
+packet-authored check in isolation and gates `Agent Review -> Agent Done` on
+ITS OWN exit 0 — "trust the check, not the agent's word".
+
+**`check_spec`** is an immutable packet field written ONLY by
+`create_agent_task_intake` (`{runner, args[]}` from a fixed allowlist: `deno-test`,
+`deno-check`, `node-test`, `npm-test`, `npm-run`; args are bounded plain tokens,
+no shell metacharacters). A DB trigger makes it immutable after intake — the
+correction path is archive + re-intake. A task with no `check_spec` uses the
+existing human-read gate byte-for-byte.
+
+**`CHECK-REF` receipt line.** A worker completing a `check_spec` task MUST end
+its "Touched files or records" receipt section with exactly one line-anchored
+marker naming the commit it produced in the target repo:
+
+```
+CHECK-REF: <40-hex commit sha>
+```
+
+The controller runs the PACKET's check against that commit — the receipt's own
+verification prose is never trusted for these tasks. Missing / duplicate /
+malformed CHECK-REF is a HOLD, not a silent skip.
+
+**Isolation (`check-run.sh`).** `--apply` runs the check via
+`scripts/open-engine/check-run.sh` in a fresh detached git worktree of the
+target project at the CHECK-REF commit, under a deny-by-default env allowlist
+(no MCP key, no Supabase secrets, no other operator credentials) with outbound
+network denied by `sandbox-exec`. Missing `sandbox-exec` REFUSES (exit 67) — it
+never degrades to scrub-only. exit 0 gates ONLY the closeout; commit, deploy,
+migration, and every live surface stay human-gated.
+
+Wrapper exit codes → controller hold reasons:
+
+| exit | reason |
+|------|--------|
+| 0 | check passed |
+| 64 | `CHECK_INFRA_USAGE` |
+| 65 | `CHECK_REF_UNRESOLVED` |
+| 66 | `CHECK_INFRA_WORKTREE` |
+| 67 | `CHECK_ISOLATION_UNAVAILABLE` (sandbox-exec missing) |
+| 68 | `CHECK_RUNNER_MISSING` |
+| other | `EXECUTED_CHECK_FAILED` (the check's own non-zero exit) |
+
+Classification / apply hold reasons: `EXECUTED_CHECK_DISABLED` (kill switch off),
+`CHECK_SPEC_UNPARSEABLE`, `AUTO_PROMOTED_CHECK_TASK_EXCLUDED` (do-not-stack: a
+Phase 4 auto-promoted task never machine-applies), `CHECK_SPEC_ON_CONTENT_TASK`
+(receipt stages a `deliverables/` file), `CHECK_REF_MISSING|COUNT|FORMAT`.
+
+**Kill switch.** `EXECUTED_CHECK_ENABLED` (a `const` at the top of
+`closeout-controller.mjs`, default `true`). Flip to `false` and every
+`check_spec` task HOLDs (`EXECUTED_CHECK_DISABLED`) — a one-line commit, no
+deploy. This is the stop-the-lane response to any suspected live false-pass.
+Tasks without `check_spec` are unaffected either way.

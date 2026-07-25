@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -48,6 +49,36 @@ const RESOLUTION_LOOKBACK_DAYS_DEFAULT = 7;
 // list_agent_tasks caps at 50; the sweep reports this so a truncated scan is
 // never mistaken for full coverage (no-silent-caps).
 const RESOLUTION_SCAN_LIMIT = 50;
+
+// OE-13 Sub-phase B kill switch (spec §12 rollback level 2). false = every
+// check_spec task HOLDs (EXECUTED_CHECK_DISABLED) and nothing auto-applies on
+// a check; tasks without check_spec are unaffected either way. Flipping this
+// is a one-line commit, no deploy — it is the stop-the-lane response to any
+// live false-pass (spec §10).
+const EXECUTED_CHECK_ENABLED = true;
+
+// Fork B (spec §3.1): check_spec is a fixed allowlist of runner commands with
+// bounded args — never an arbitrary shell string. argv is built as an array
+// and executed via spawnSync without a shell, so there is no injection
+// surface; the arg pattern additionally rejects whitespace and shell
+// metacharacters so specs stay legible and statically vettable.
+const CHECK_RUNNERS = {
+  "deno-test": { minArgs: 0, maxArgs: 8, argv: (args) => ["deno", "test", "--no-prompt", ...args] },
+  "deno-check": { minArgs: 1, maxArgs: 8, argv: (args) => ["deno", "check", ...args] },
+  "node-test": { minArgs: 0, maxArgs: 8, argv: (args) => ["node", "--test", ...args] },
+  "npm-test": { minArgs: 0, maxArgs: 0, argv: () => ["npm", "test"] },
+  "npm-run": { minArgs: 1, maxArgs: 1, argv: (args) => ["npm", "run", args[0]] },
+};
+const CHECK_ARG_PATTERN = /^[A-Za-z0-9@._/:=,-]+$/;
+const CHECK_RUN_SH = join(__dirname, "check-run.sh");
+const CHECK_TIMEOUT_MS = 600_000;
+const CHECK_INFRA_REASONS = {
+  64: "CHECK_INFRA_USAGE",
+  65: "CHECK_REF_UNRESOLVED",
+  66: "CHECK_INFRA_WORKTREE",
+  67: "CHECK_ISOLATION_UNAVAILABLE",
+  68: "CHECK_RUNNER_MISSING",
+};
 
 function usage() {
   return `Usage:
@@ -101,7 +132,15 @@ calls the board, it
 writes a local journal under docs/handoffs/pending-closeouts/journal/. If board
 apply succeeds but file/capture closeout fails, --resume <uuid> confirms the
 live task has an AGENT APPLIED event and replays the pending file/capture phase
-from that journal.
+from that journal. A task carrying a packet-authored check_spec is an OE-13
+executed-check task: --apply re-runs the packet's check via check-run.sh in an
+isolated cred-scrubbed no-network worktree of the target project at the
+receipt's CHECK-REF commit, and applies ONLY on the controller's own exit 0
+(never the receipt's claim). Any other outcome — check failed, spec malformed,
+task auto-promoted, deliverables-shaped, CHECK-REF missing, lane disabled —
+HOLDs the task in Agent Review with a legible reason. exit 0 gates ONLY the
+Agent Review -> Agent Done closeout; commit, deploy, migration, and every live
+surface stay human-gated.
 
 OE-8D run-summary capture is additive logging only. It calls capture_thought
 once for the whole automation run, tagged open-engine/closeout/oe-8d, using
@@ -478,6 +517,46 @@ function evaluateTask(task, registry, actionItems) {
   // The scan is read-only here; the actual flip runs only in the apply path.
   const planDocFlip = evaluatePlanDocGate(task, route, reasons);
 
+  // OE-13 Sub-phase B: executed-check classification (spec §3/§7/§8).
+  // check_spec present => this task NEVER applies on the receipt alone. It
+  // applies only via the controller's own executed check (Fork A), and every
+  // other outcome is a HOLD with a legible reason — fail closed, task stays in
+  // Agent Review. check_spec absent => byte-for-byte the existing gate.
+  // Classification only here; the check itself runs in the apply path.
+  let executedCheck = null;
+  const checkSpec = parseCheckSpec(task.check_spec);
+  if (checkSpec.present) {
+    if (!EXECUTED_CHECK_ENABLED) {
+      // Rollback level 2 (spec §12): lane off, check tasks wait for a human.
+      reasons.push("EXECUTED_CHECK_DISABLED");
+    } else if (!checkSpec.ok) {
+      // Malformed / outside the allowlist: never executed (spec §9 probe 2).
+      reasons.push(checkSpec.reason);
+    } else if (wasAutoPromoted(task.events)) {
+      // §8 do-not-stack: a machine-promoted task never machine-applies. This is
+      // the sole structural separation from Phase 4 under gate-from-launch, so
+      // it is a hard predicate here, not a convention (spec §9 probe 5).
+      reasons.push("AUTO_PROMOTED_CHECK_TASK_EXCLUDED");
+    } else if (stagedDeliverable) {
+      // A staged deliverables/ file means content-shaped work — there is no
+      // executable check for it (spec §7, §9 probe 4).
+      reasons.push("CHECK_SPEC_ON_CONTENT_TASK");
+    } else {
+      const checkRef = parseCheckRef(receiptText);
+      reasons.push(...checkRef.reasons);
+      if (checkRef.ref && route && route.workspace_path) {
+        executedCheck = {
+          runner: checkSpec.runner,
+          args: checkSpec.args,
+          argv: checkSpec.argv,
+          ref: checkRef.ref,
+          repo: route.workspace_path,
+          pending: true,
+        };
+      }
+    }
+  }
+
   const uniqueReasons = [...new Set(reasons)];
   if (uniqueReasons.length > 0) {
     return {
@@ -506,6 +585,10 @@ function evaluateTask(task, registry, actionItems) {
       // Set when the task carries a locatable plan-doc line; the apply path
       // flips its checkbox + carded->done tag. Null for captured-work tasks.
       plan_doc_flip: planDocFlip,
+      // OE-13: non-null only for an eligible check_spec task. pending:true —
+      // the check has NOT run yet; the apply path runs it (Fork A) and keys
+      // the apply on its own exit 0.
+      executed_check: executedCheck,
       receipt_sections: augmentation.sections,
       augmented_sections: augmentation.augmented,
       augmentation_text: augmentation.augmented.length > 0
@@ -707,6 +790,84 @@ export function receiptNamesDeliverable(text) {
   return DELIVERABLE_PATH.test(String(text || ""));
 }
 
+// OE-13 Sub-phase B — pure parsers + predicates (spec §3/§8). No side effects,
+// never throw: evaluate() must classify, not crash.
+
+// Parses the immutable packet field agent_tasks.check_spec. Returns one of:
+//   { present: false }                                      — no check on this task
+//   { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" }
+//   { present: true, ok: true, runner, args, argv }
+export function parseCheckSpec(value) {
+  if (value === null || value === undefined) return { present: false };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+  }
+  const unknownKeys = Object.keys(value).filter(
+    (key) => key !== "runner" && key !== "args",
+  );
+  if (unknownKeys.length > 0) {
+    return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+  }
+  const runner = value.runner;
+  const definition = CHECK_RUNNERS[runner];
+  if (!definition) {
+    return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+  }
+  const args = value.args === undefined ? [] : value.args;
+  if (
+    !Array.isArray(args) || args.length < definition.minArgs ||
+    args.length > definition.maxArgs
+  ) {
+    return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+  }
+  for (const arg of args) {
+    if (
+      typeof arg !== "string" || arg.length === 0 || arg.length > 128 ||
+      !CHECK_ARG_PATTERN.test(arg)
+    ) {
+      return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+    }
+  }
+  return {
+    present: true,
+    ok: true,
+    runner,
+    args: [...args],
+    argv: definition.argv(args),
+  };
+}
+
+// Locates the commit the executing session produced, from the receipt.
+// Explicit line-anchored marker only (the OPERATOR-ACTION precedent):
+//   CHECK-REF: <40-hex commit sha>
+// The REF locates the agent's own code — trusting it is fine; the CHECK comes
+// from the packet (spec §3). Exactly one marker, full 40-hex sha, or HOLD.
+export function parseCheckRef(receiptText) {
+  const lines = String(receiptText || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^CHECK-REF:/i.test(line));
+  if (lines.length === 0) return { ref: null, reasons: ["CHECK_REF_MISSING"] };
+  if (lines.length > 1) return { ref: null, reasons: ["CHECK_REF_COUNT"] };
+  const ref = lines[0].replace(/^CHECK-REF:/i, "").trim();
+  if (!/^[0-9a-f]{40}$/i.test(ref)) {
+    return { ref: null, reasons: ["CHECK_REF_FORMAT"] };
+  }
+  return { ref: ref.toLowerCase(), reasons: [] };
+}
+
+// §8 do-not-stack predicate: a task whose history carries ANY event authored
+// by triage-auto was machine-promoted (Phase 4). triage-auto is an
+// event-author identity that exists ONLY for the auto-promote audit event, so
+// keying on the author alone (not payload.action) is the broader, fail-closed
+// reading: if that identity ever authors a new event type, the task still
+// counts as machine-touched and stays off the machine-apply lane.
+export function wasAutoPromoted(events) {
+  return (Array.isArray(events) ? events : []).some(
+    (event) => event.agent_code === "triage-auto",
+  );
+}
+
 function parseOperatorAction(followUpText) {
   // Explicit marker only — never fuzzy NLP. Line form:
   //   OPERATOR-ACTION: <step> || OPERATOR-TARGET: <url-or-path>
@@ -858,6 +1019,24 @@ function holdMessage(reasons, receipt) {
   }
   if (reasons.includes("PLAN_DOC_LINE_NOT_FOUND")) {
     return "Task carries a plan-doc source but no [OE:<shortid>] carded line was found in that plan-doc folder; held so applying cannot silently skip the doc sync. Restore the tagged doc line (or flip it by hand) and re-run.";
+  }
+  if (reasons.includes("EXECUTED_CHECK_FAILED")) {
+    return "The packet's executed check ran in isolation and exited non-zero; held, not applied. Fix the code (or the check) and post a fresh AGENT DONE with a new CHECK-REF.";
+  }
+  if (reasons.includes("EXECUTED_CHECK_DISABLED")) {
+    return "Task carries a check_spec but the executed-check lane is disabled (EXECUTED_CHECK_ENABLED=false); held for the human-read gate.";
+  }
+  if (reasons.includes("CHECK_SPEC_UNPARSEABLE")) {
+    return "Task carries a check_spec that is not a valid allowlisted {runner, args[]} value; held and never executed. Fix the packet's check_spec.";
+  }
+  if (reasons.includes("AUTO_PROMOTED_CHECK_TASK_EXCLUDED")) {
+    return "Task was auto-promoted (triage-auto) and also carries a check_spec; machine-promote and machine-apply never stack (spec §8), so it is held for a human.";
+  }
+  if (reasons.includes("CHECK_SPEC_ON_CONTENT_TASK")) {
+    return "Task carries a check_spec but its receipt stages a deliverables/ file — content work has no executable check; held for the human-read gate.";
+  }
+  if (reasons.some((reason) => reason.startsWith("CHECK_REF"))) {
+    return "Task carries a check_spec but the receipt does not carry exactly one line-anchored 'CHECK-REF: <40-hex commit sha>'; held. Add the marker line naming the produced commit and re-run.";
   }
   return `Task held by dry-run safety gates: ${reasons.join(", ")}.`;
 }
@@ -1170,6 +1349,57 @@ function liveInputFromPacket(packet) {
   };
 }
 
+// OE-13 Sub-phase B — apply-time executor (Fork A). Runs the packet's check via
+// check-run.sh and returns the controller's OWN verdict. options.scriptPath /
+// options.timeoutMs exist for tests only. Exported so the test suite can drive
+// it against a scratch git repo.
+export function runExecutedCheck(check, options = {}) {
+  const script = options.scriptPath || CHECK_RUN_SH;
+  const argv = [
+    script,
+    "--repo",
+    check.repo,
+    "--ref",
+    check.ref,
+    "--",
+    ...check.argv,
+  ];
+  const run = spawnSync("bash", argv, {
+    encoding: "utf8",
+    timeout: options.timeoutMs ?? CHECK_TIMEOUT_MS,
+  });
+  const output = `${run.stdout || ""}\n${run.stderr || ""}`.trim().slice(-4000);
+  if (run.error) {
+    const reason = run.error.code === "ETIMEDOUT"
+      ? "CHECK_TIMEOUT"
+      : "CHECK_INFRA_SPAWN";
+    return {
+      passed: false,
+      exit_code: null,
+      reason,
+      message: `check-run.sh did not complete: ${run.error.message}`,
+      output,
+    };
+  }
+  if (run.status === 0) {
+    return {
+      passed: true,
+      exit_code: 0,
+      reason: null,
+      message: "executed check passed",
+      output,
+    };
+  }
+  const reason = CHECK_INFRA_REASONS[run.status] || "EXECUTED_CHECK_FAILED";
+  return {
+    passed: false,
+    exit_code: run.status,
+    reason,
+    message: `executed check exited ${run.status} (${reason})`,
+    output,
+  };
+}
+
 function closeoutMarker(batch, draftDate) {
   return `<!-- open-engine closeout ${draftDate} tasks: ${
     batch.tasks.join(", ")
@@ -1407,6 +1637,44 @@ async function runLive(args, registry) {
     throw new Error(`Expected ${args.expect}, got ${result.status}.`);
   }
 
+  // OE-13 Sub-phase B (Fork A): re-run the packet's check in isolation and key
+  // the apply on the controller's OWN exit 0 — the receipt's verification claim
+  // is never trusted for a check_spec task. Non-zero => print + refuse; the
+  // task stays in Agent Review untouched. Runs before the journal exists so a
+  // failed check leaves zero apply residue (no journal, no board write, no
+  // file append).
+  for (const item of [...result.apply]) {
+    if (!item.executed_check) continue;
+    const verdict = runExecutedCheck(item.executed_check);
+    item.executed_check = {
+      runner: item.executed_check.runner,
+      args: item.executed_check.args,
+      ref: item.executed_check.ref,
+      repo: item.executed_check.repo,
+      pending: false,
+      passed: verdict.passed,
+      exit_code: verdict.exit_code,
+      reason: verdict.reason,
+      output_tail: verdict.output,
+    };
+    if (!verdict.passed) {
+      result.status = "HELD";
+      result.hold.push({
+        task_id: item.task_id,
+        project_slug: item.project_slug || null,
+        reasons: [verdict.reason],
+        message: verdict.message,
+      });
+      result.apply = result.apply.filter(
+        (entry) => entry.task_id !== item.task_id,
+      );
+      printResult(result);
+      throw new Error(
+        "Refusing to apply: the executed check did not pass. The task stays in Agent Review.",
+      );
+    }
+  }
+
   const journal = writeApplyJournal(args.journalDir, args.taskId, result);
   result.journal = { path: journal.path, state: journal.state };
 
@@ -1434,6 +1702,17 @@ async function runLive(args, registry) {
           required_sections_present: REQUIRED_RECEIPT_SECTIONS,
           augmented_sections: item.augmented_sections,
           review_note_augmentation: item.augmentation_text || undefined,
+          // OE-13: the controller's own executed-check verdict (spec §10 watch
+          // surface — the briefing reads it off this immutable event).
+          executed_check: item.executed_check
+            ? {
+              runner: item.executed_check.runner,
+              args: item.executed_check.args,
+              ref: item.executed_check.ref,
+              exit_code: item.executed_check.exit_code,
+              output_tail: item.executed_check.output_tail,
+            }
+            : undefined,
         },
       });
       result.applied.push({ task_id: item.task_id, apply_result: applyResult });
