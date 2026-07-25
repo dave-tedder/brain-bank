@@ -1,0 +1,52 @@
+---
+name: supabase-edge-fn-patterns
+description: Use when editing any file under supabase/functions/, when writing supabase-js queries (.insert, .update, .upsert, .select, .contains, .not), when debugging silent insert failures, when making cross-Edge-Function calls, or when handling thoughts/metadata that may be null. Also fires on writing or editing post-capture hooks. Also fires when writing a new migration in supabase/migrations/ that creates a TABLE, VIEW, or SECURITY DEFINER FUNCTION.
+type: skill
+---
+
+# Supabase Edge Function Patterns
+
+## Query patterns
+
+- Use `.insert().select("id").single()` to get back the inserted row's ID. Plain `.insert()` returns no data. Needed whenever post-insert processing depends on the row ID.
+- `.not("metadata->dates_mentioned", "is", null)` filters for non-null JSONB key but returns empty arrays too. Filter array contents client-side after the query.
+- Edge Functions can call other Edge Functions on the same project using `SUPABASE_URL` + `MCP_ACCESS_KEY` (already in the runtime). No new secrets needed.
+- `.contains("metadata", { gcal_event_id: value })` works for JSONB key matching on upsert dedup. No raw SQL or custom RPC needed.
+
+## Null metadata guard
+
+**`/search` and MCP `search_thoughts` can return rows with `metadata: null`** (older captures, failed extractions). Any consumer reading nested fields (`meta.type`, `meta.project`, `meta.topics`) must default to `{}` first: `const meta = t.metadata ?? {};`.
+
+## Post-capture hooks
+
+**Plumb extracted metadata through post-capture hooks as a parameter, not re-read from the DB.** All capture paths already have the `metadata` object in hand by the time `postCaptureHook()` runs. Pass it into `checkAutoResolve()` — saves one DB round-trip and keeps scoping self-contained.
+
+## Combined context rule
+
+**Combined context for embedding ≠ combined context for decisions.** Thread replies combine parent + reply for richer embeddings (correct), but that combined text must NOT go to LLM decision functions (auto-resolve) where parent language creates false signal. Raw input text for decisions; combined for search only.
+
+## Auto-resolve self-exclusion
+
+**Auto-resolve self-exclusion is mandatory.** Every capture path must pass `[inserted.id]` (and parent thought ID for thread replies) as exclusions to `checkAutoResolve()`. The thought's own action items are inserted before auto-resolve runs.
+
+## New-migration security checklist
+
+Supabase has no auto-RLS for tables/views/functions created via raw SQL — only the dashboard's Table Editor UI ticks "Enable RLS" by default. Migrations have to opt in explicitly. Three things every new migration in `supabase/migrations/` must include where applicable, or the security advisor will flag it:
+
+- **`CREATE TABLE`** → follow with `ALTER TABLE public.<name> ENABLE ROW LEVEL SECURITY;` plus an explicit service_role policy:
+  ```sql
+  CREATE POLICY "Service role full access on <name>"
+    ON public.<name> FOR ALL
+    USING (auth.role() = 'service_role'::text);
+  ```
+  Even if no other policies exist (service_role bypasses RLS regardless), the explicit policy matches every other table in this schema and silences the `rls_enabled_no_policy` lint.
+
+- **`CREATE VIEW`** → add `WITH (security_invoker = true)`. Postgres views default to definer-style behavior — they run with the view owner's privileges and bypass RLS on referenced tables. Setting `security_invoker = true` makes the view honor the caller's RLS context. Without it, anon-role queries against the view can read data they couldn't read directly.
+
+- **`CREATE FUNCTION ... SECURITY DEFINER`** → immediately follow with `REVOKE EXECUTE ON FUNCTION ... FROM anon, authenticated, public;`. Postgres grants EXECUTE to PUBLIC by default. If the function is only meant for service_role or pg_cron (which runs as `postgres`), revoke from the web-exposed roles. Also pin `SET search_path = pg_catalog, public` on every function (definer or invoker) to avoid the `function_search_path_mutable` lint.
+
+After applying any migration that creates schema objects, call `mcp__*__get_advisors` with `type: 'security'` to confirm zero new lints.
+
+## Five capture paths — verify each independently
+
+`processCaptureMessage` (Slack #open-brain), `processCaptureThreadReply` (Slack thread replies), `processBrainMessage` (Slack #second-brain) in `ingest-thought/index.ts`; `handleRestCapture` (REST /capture) and `capture_thought` (MCP tool) in `open-brain-mcp/index.ts`. Both files have parallel `extractMetadata()`, `checkAutoResolve()`, `extractAndStoreActionItems()`, `postCaptureHook()` — any fix must be mirrored. Verification must exercise at least one path per file.
