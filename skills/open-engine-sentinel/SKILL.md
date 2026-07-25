@@ -23,9 +23,11 @@ ToolSearch when deferred.
   2. one `write_agent_ledger` heartbeat for `sentinel`;
   3. one `capture_thought` summary.
 - Scheduled runs do NOT edit `PROJECT-TRACKER.md` or `SESSION-LOG.md`.
-  Report the Phase 4 readiness streak from `oe_triage_watch_streak`
-  (read-only `execute_sql`) instead of a paste-row: the views are the system
-  of record now. Flag any `MISSING` day in `oe_triage_watch_days` loudly —
+  Report the Phase 4 readiness figure as observed auto-promotions, not a day
+  streak: read the authoritative `oe_phase4_watch_tally` per the detailed step
+  below (the day-shaped `oe_triage_watch_*` views are retained for rollback
+  only and are no longer the reported readiness figure). Still flag any
+  `MISSING` day in `oe_triage_watch_days` loudly as a lane run-record check —
   a MISSING day means a scheduled lane left no durable run record, and this
   flag is the check that would have caught a dead triage lane the same
   morning rather than days later in conversation.
@@ -146,30 +148,51 @@ After approval and insert, verify with `read_agent_ledger(agent_code:
      Both figures are REPORTED, not graded. Whether a dead claim on a resumable
      row should move the verdict word is a deployment decision; the default here
      is to report it loudly and grade nothing.
-3b. **Auto-promote watch state (if the Phase 4 auto-promote lever is enabled).**
-   A gate whose start condition may never occur has to say so on a read surface,
-   or it silently becomes "wait forever". The 7-day watch's day-0 is the FIRST
-   auto-promotion, so if the intake funnel is in steady state and triage drafts
-   nothing, the clock never starts and nothing reports that fact. Compute it:
+3b. **Auto-promote watch state (if the Phase 4 auto-promote lever is enabled),
+   measured in OBSERVED AUTO-PROMOTIONS, not calendar days.** A rep count asks
+   "have we seen enough?" where a day streak asks "has enough time passed?". A
+   gate whose start condition may never occur still has to say so on a read
+   surface, or it silently becomes "wait forever" — so NOT STARTED is still
+   reported when zero promotions exist. A local run with `execute_sql` reads
+   the authoritative tally directly:
 
 ```sql
-select
-  (select count(*) from agent_task_events
-    where payload->>'action' = 'auto-promoted')     as auto_promotions_ever,
-  (select min(created_at) from agent_task_events
-    where payload->>'action' = 'auto-promoted')     as day0,
-  (select enabled from oe_auto_promote_config)      as enabled,
-  (select daily_cap from oe_auto_promote_config)    as daily_cap;
+select observed, vetoed, clean_observed, target, remaining_to_target, day0_et
+from oe_phase4_watch_tally;
 ```
 
-   - `auto_promotions_ever = 0`: report `phase4 watch NOT STARTED, N days since
-     enable, 0 auto-promotions`. Do not report a day count.
-   - Otherwise day K = (today - day0::date) + 1; report `phase4 watch day K of
-     7`. K > 7 means the window elapsed and awaits the operator's ruling.
-   A cloud/curl-only variant of this lane cannot run SQL. It should instead read
-   a `PHASE4_WATCH_DAY0=YYYY-MM-DD` marker from the `triage-auto` ledger row's
-   notes, and report NOT STARTED when the marker is absent (the correct
-   fail-safe). If both exist and disagree, the marker is the one that is wrong.
+   - `observed = 0`: report `phase4 watch NOT STARTED, 0 auto-promotions`. Do
+     not report a day count.
+   - Otherwise report `phase4 watch <observed> of <target> observed, <vetoed>
+     vetoed`. `target` comes from the `PHASE4_WATCH_TARGET` marker via the
+     view; if it is null the marker is missing, so report `target unset` and
+     flag it. Reaching the target only makes the gate ELIGIBLE for the
+     operator's go; it never graduates on its own, and this run must never
+     imply it did.
+   - Each auto-promotion is INDIVIDUALLY rulable, not merely counted. List the
+     un-ruled ones from `oe_phase4_promotions where verdict = 'unruled'`
+     (task short-id, ET day, rationale) so the operator can rule each good or
+     vetoed via `oe_promotion_rulings`. A veto is the operator's cue to reset
+     `PHASE4_WATCH_DAY0`; it never silently reduces a total, it shows as the M
+     in "N observed, M vetoed".
+   Cross-check that `day0_et` matches the `PHASE4_WATCH_DAY0` marker in the
+   `triage-auto` ledger notes (that marker is what a no-SQL cloud sentinel
+   variant reads). If they disagree, the marker is the one that is wrong: say
+   so plainly and correct it. The day-shaped views (`oe_triage_watch_days`,
+   `oe_triage_watch_streak`, `oe_watch_rulings`) are left intact for rollback
+   but are no longer the reported readiness figure; read them only when
+   diagnosing the old streak.
+   TRANSITIONAL: if `oe_phase4_watch_tally` does not exist yet (migration
+   `20260725_oe_phase4_promotion_watch.sql` not applied), report the
+   `PHASE4_WATCH_TARGET` + `PHASE4_WATCH_DAY0` markers and today's
+   auto-promotions as a best-effort line and flag the pending migration; never
+   fabricate a tally.
+   A cloud/curl-only variant of this lane cannot run SQL. It should instead
+   read the `PHASE4_WATCH_TARGET` + `PHASE4_WATCH_DAY0=YYYY-MM-DD` markers from
+   the `triage-auto` ledger row's notes, report a best-effort
+   `target T, day0 D, N auto-promoted today`, and defer the authoritative
+   observed/vetoed tally to the briefing. Report NOT STARTED when the day0
+   marker is absent (the correct fail-safe).
 4. **Learning eval.** Query `public.agent_scorecard` with `execute_sql`:
 
 ```sql
@@ -225,12 +248,19 @@ Phase 4 row text: | <n> | <date> | natural/manual | <draft ids/count> | <mis-tie
      vocabulary is only PASS/WARN/FAIL. Notes only if there is something
      actionable.
      `<detail>` must end with the reported figures from step 3 / 3b, in this
-     order, and every variant of this lane must match verbatim:
-     `; phase4 watch <day K of 7 | NOT STARTED, 0 auto-promotions>, <N> auto-promoted today; <M> in Agent Todo unclaimable by scheduled lanes (medium/high risk or requires_local)<ids>; stale claims <X> blocking (<ids>), <Y> leftover`
+     order:
+     `; phase4 watch <observed> of <target> observed, <vetoed> vetoed | NOT STARTED, 0 auto-promotions; <M> in Agent Todo unclaimable by scheduled lanes (medium/high risk or requires_local)<ids>; stale claims <X> blocking (<ids>), <Y> leftover`
+     The phase4 figure is the ONE field that legitimately differs between a
+     local run and a cloud routine variant: a local run has `execute_sql`, so
+     it reports the AUTHORITATIVE `N of T observed, M vetoed` from
+     `oe_phase4_watch_tally`; a cloud routine has no SQL, so it reports a
+     best-effort `target T, day0 D, N auto-promoted today` and defers the
+     observed/vetoed tally to the briefing. The other two figures (unclaimable,
+     stale claims) still match verbatim between variants.
      Name the ids when M > 0, and always name the blocking ids. Omit the
      `phase4 watch` clause entirely if the auto-promote lever is not enabled in
      this deployment. Example:
-     `OE-SENTINEL WARN 2026-01-09: 1 old Standing draft abc12345; spine + local 4/4 fresh; phase4 watch day 1 of 7, 5 auto-promoted today; 2 in Agent Todo unclaimable by scheduled lanes (medium/high risk or requires_local) (def67890, 1a2b3c4d); stale claims 0 blocking, 1 leftover (5e6f7a8b)`
+     `OE-SENTINEL WARN 2026-01-09: 1 old Standing draft abc12345; spine + local 4/4 fresh; phase4 watch 6 of 15 observed, 0 vetoed; 2 in Agent Todo unclaimable by scheduled lanes (medium/high risk or requires_local) (def67890, 1a2b3c4d); stale claims 0 blocking, 1 leftover (5e6f7a8b)`
      If the line would pass 300 characters, shorten in this order and say what
      was dropped: leftover ids first, then unclaimable ids past the first three
      with a `+N more`. Never drop a blocking id, and never drop a figure.

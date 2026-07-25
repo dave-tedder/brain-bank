@@ -410,27 +410,39 @@ on conflict (agent_code) do nothing;
    (`AGENT CLAIMED` with no terminal receipt), promoted on its own
    (`AGENT STATUS` with `payload.action='auto-promoted'`).
 4. **Render the Session Operating Map** (structure below).
-5. **Phase 4 readiness streak (query-backed).** Read the watch views via
-   Supabase `execute_sql` (read-only):
+5. **Phase 4 readiness (query-backed, promotion-shaped).** The readiness
+   figure the operator reads is OBSERVED AUTO-PROMOTIONS, not calendar days: a
+   rep count asks "have we seen enough?" where the old day streak mostly
+   measured time passing. Read the authoritative tally via Supabase
+   `execute_sql` (read-only):
 
    ```sql
-   select clean_streak, terminated_by_day, terminated_by_verdict, latest_settled_day
-   from oe_triage_watch_streak;
-   select et_day, drafts_created, mechanical_verdict, effective_verdict
-   from oe_triage_watch_days
-   where effective_verdict <> 'CLEAN' or et_day > (now() at time zone 'America/New_York')::date - 7
-   order by et_day;
+   select observed, vetoed, clean_observed, target, remaining_to_target, day0_et
+   from oe_phase4_watch_tally;
+   select task_id, promoted_et_day, allowlist_category, rationale, verdict
+   from oe_phase4_promotions
+   order by promoted_at;
    ```
 
-   Render the streak WITH its terminating day and verdict, never as a bare
-   integer — verdicts are retroactive (a draft archived days later can drop
-   the number without anyone editing anything), and a drop must be legible
-   instead of alarming. Any `PENDING_REVIEW` day is a "needs you" item: the
-   operator rules it via `oe_watch_rulings` (promoted draft → clean; archived
-   unpromoted → dirty; untouched → leave pending). The views are the system
-   of record for the streak; do NOT transcribe rows into PROJECT-TRACKER.md.
-   The gate itself is unchanged: 5 consecutive CLEAN days AND the operator's
-   explicit go.
+   Render it as "phase4 readiness: N of `<target>` observed, M vetoed" (N is
+   `observed`, the target is the `PHASE4_WATCH_TARGET` marker surfaced by the
+   view). If `target` is null the marker is missing, say so plainly. Each
+   auto-promotion is INDIVIDUALLY rulable, not merely counted: every row in
+   `oe_phase4_promotions` with verdict `unruled` is a "needs you" item, and the
+   operator rules it good or vetoed via `oe_promotion_rulings` (good counts as
+   a clean rep; vetoed shows as an M and is the operator's cue to reset
+   `PHASE4_WATCH_DAY0`). A veto is visible as M, never a silent reduction of
+   the total. Do NOT transcribe the tally into PROJECT-TRACKER.md; the view is
+   the system of record.
+   The gate itself is UNCHANGED: reaching the target only makes it ELIGIBLE for
+   the operator's explicit go. Nothing self-graduates and there is no
+   graduation code path anywhere; this section only reports.
+   The day-shaped views (`oe_triage_watch_streak`, `oe_triage_watch_days`,
+   `oe_watch_rulings`) are left intact for rollback but are no longer the
+   reported readiness figure; query them only when diagnosing the old streak.
+   TRANSITIONAL: if `oe_phase4_watch_tally` does not exist yet (migration
+   `20260725_oe_phase4_promotion_watch.sql` not applied), fall back to the day
+   views above and note the migration is pending rather than erroring.
 6. **Close out, only after a successful render:** `write_agent_ledger` for
    `briefing` with `last_successful_run` = the MAXIMUM event/task
    timestamp observed this run (not now()), converted to UTC `Z` datetime form
