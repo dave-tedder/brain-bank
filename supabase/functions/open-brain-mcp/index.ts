@@ -760,6 +760,19 @@ const AGENT_TASK_SELECT =
 // assertClaimTokenMatches can pre-check. Never use for list/get responses.
 const AGENT_TASK_LOAD_SELECT = `${AGENT_TASK_SELECT}, claim_token`;
 
+// Scan projection for lanes that sweep the whole board and only need to decide
+// WHICH cards to act on, not to read them. Full packets stop fitting once the
+// board has history: a 26-row Needs Operator listing measured 296,561
+// characters and blew the MCP response cap, and 152,858 of the 254,239 content
+// characters were review_reason alone (the AGENT DONE receipts), with context
+// and do_steps next. Every dropped column is long-form prose a scanning lane
+// never reads; check_spec is KEPT because it is an eligibility question, and
+// operator_action because it is what makes a board row legible to a human. A
+// lane that needs the full packet for one card calls get_agent_task on that id.
+// Default stays "full" so no existing caller moves.
+const AGENT_TASK_COMPACT_SELECT =
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec";
+
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
 
@@ -1838,6 +1851,9 @@ server.registerTool(
         "Set true to include archived (retired smoke/history) tasks. Default excludes them.",
       ),
       limit: z.number().int().min(1).max(50).optional(),
+      view: z.enum(["full", "compact"]).optional().describe(
+        'Response projection. "full" (default) returns whole packets. "compact" drops the long prose fields (review_reason, context, do_steps, acceptance_criteria, desired_outcome, boundaries, sources, output_handoff, critic_flags, blocked_reason, last_failure_reason) and keeps identifiers, routing, operator_action and check_spec. Use it for whole-board scans: a full 26-row listing measured 296K characters and exceeds the response cap. Fetch any single packet you actually need with get_agent_task.',
+      ),
     },
   },
   async (
@@ -1849,6 +1865,7 @@ server.registerTool(
       include_done,
       include_archived,
       limit,
+      view,
     }: {
       statuses?: AgentTaskStatus[];
       agent_code?: string;
@@ -1857,6 +1874,7 @@ server.registerTool(
       include_done?: boolean;
       include_archived?: boolean;
       limit?: number;
+      view?: "full" | "compact";
     },
   ) => {
     logToolInvocation("list_agent_tasks", {
@@ -1867,12 +1885,22 @@ server.registerTool(
       include_done,
       include_archived,
       limit,
+      view,
     }, "mcp");
     try {
       const cap = Math.max(1, Math.min(50, limit ?? 20));
+      // Annotated `string`, not the inferred literal union. supabase-js parses
+      // the select list at the TYPE level, so handing .select() a ternary makes
+      // it represent both parsed row shapes at once and the compiler gives up
+      // (TS2589 "excessively deep", TS2590 "union too complex"). Widening to
+      // string drops row-type inference here, which costs nothing: this handler
+      // serializes `data` straight to JSON and never reads a field off it.
+      const selectColumns: string = view === "compact"
+        ? AGENT_TASK_COMPACT_SELECT
+        : AGENT_TASK_SELECT;
       let query = supabase
         .from("agent_tasks")
-        .select(AGENT_TASK_SELECT)
+        .select(selectColumns)
         .order("updated_at", { ascending: false })
         .limit(cap);
       if (statuses && statuses.length > 0) {
@@ -1889,7 +1917,11 @@ server.registerTool(
 
       const { data, error } = await query;
       if (error) throw error;
-      return textToolResponse({ count: data?.length ?? 0, tasks: data ?? [] });
+      return textToolResponse({
+        count: data?.length ?? 0,
+        view: view ?? "full",
+        tasks: data ?? [],
+      });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error listing agent tasks: ${(err as Error).message}`,
