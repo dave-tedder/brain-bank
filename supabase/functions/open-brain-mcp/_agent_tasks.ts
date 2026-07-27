@@ -190,6 +190,31 @@ export function assertPromotionCallerAllowed(
   }
 }
 
+// OE board-hygiene: the reconciler lane is the ONE non-human identity permitted
+// to close a Needs Operator card. complete_operator_action otherwise refuses any
+// registered agent code, which is correct for every other lane -- but this lane's
+// whole job is to close desk cards, and it needs a ledger row for the events FK,
+// so the ledger row is precisely what makes the generic guard refuse the lane's
+// own close. The carve-out resolves that, narrowly.
+//
+// An OPERATOR DONE from this lane means "observed evidence that the step was
+// performed", with the probe, the assertion, what was measured, and measured_by
+// carried in the note. completed_by names the LANE, never the operator, so the
+// audit trail never claims a human reported something they did not.
+//
+// Deliberately NOT a general "any lane may close operator work" relaxation, and
+// deliberately a separate function rather than a parameter on the human guard, so
+// the two lanes cannot be confused at a call site. Same shape as
+// assertAutoPromotionCallerAllowed below.
+export const RECONCILER_AGENT_CODE = "reconciler";
+
+export function isReconcilerCloser(
+  completedBy: string | null | undefined,
+): boolean {
+  const value = typeof completedBy === "string" ? completedBy.trim() : "";
+  return value === RECONCILER_AGENT_CODE;
+}
+
 // OE-12 Phase 4 auto-promote is the INVERSE of the human promote check: it is
 // the one path where an agent runtime IS the allowed caller — but ONLY the
 // triage identity, and only as the tool-layer echo of the SQL's condition G.

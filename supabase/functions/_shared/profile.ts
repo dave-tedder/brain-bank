@@ -15,6 +15,13 @@ export interface Profile {
   client_event_types: string[];
   content_types: string[];
   mechanical_capture_prefixes: string[];
+  // OE board-hygiene: WordPress site handles a `wp_post_status` close_check may
+  // name. Optional and FAIL-CLOSED: leave it unset and every wp_post_status
+  // probe is refused at authorship, which is the correct default for a fork
+  // that has not wired any WordPress credentials. A probe naming an unlisted
+  // site is refused rather than silently attempted, so a typo cannot become a
+  // network call.
+  wordpress_sites?: string[];
 }
 
 let cached: Profile | null = null;

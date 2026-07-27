@@ -54,4 +54,6 @@ ever fire.
 
 ## Related
 
-- `docs/architecture/` for the digest and scheduling surfaces a job can report into.
+- `docs/deploy-from-scratch.md` (cron wrapper + job setup) and
+  `skills/brain-bank-setup/references/cron-branch.md` for the digest and
+  scheduling surfaces a job can report into.

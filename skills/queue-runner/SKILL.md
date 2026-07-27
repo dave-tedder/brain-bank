@@ -90,6 +90,14 @@ Task drafts are born UNASSIGNED (`agent_code = NULL`) so any local executor can 
 
 **C2 hard runtime constraint.** A task flagged `requires_local = true` (LOCAL RUNTIME ONLY: needs git + local files) is claimable ONLY by a claim that asserts `runtime_local: true` on `claim_next_agent_task` / `claim_specific_agent_task`. A scheduled/cloud heartbeat MUST NOT pass `runtime_local` — omit it (defaults false), so local-only tasks are invisible to the heartbeat by design and can never be mis-claimed. Only an attended local session working a specific known-local task passes `runtime_local: true`. This is distinct from `preferred_agent`: `requires_local` is a HARD filter, `preferred_agent` only reorders. Ops corrections that need to set `requires_local`, `project_slug`, `sources`, or operator fields, move a terminal task to Needs Operator, or release a stuck claim use `admin_amend_agent_task` (human/ops only — never from a heartbeat).
 
+**Repairing a card the closeout controller HELD on `OPS_AMEND_NEWER_THAN_DONE`.** The hold means a human posted an ops-amend correction AFTER the AGENT DONE, so the tracker drafts the apply would use may be stale. Clearing it needs a corrected receipt, and there is exactly ONE route to post one: `complete_agent_task` REFUSES from Agent Review, because `Agent Review -> Agent Review` is not a legal edge in `move_agent_task_status` and the call returns `Invalid transition`. Do this instead, three calls back to back:
+
+1. `admin_amend_agent_task(<id>, reason, release_claim: true)` — returns the row to Agent Todo and clears `agent_code`.
+2. `claim_specific_agent_task(<id>, <agent_code>, runtime_local: true)` if the card is `requires_local`.
+3. `complete_agent_task(<id>, <agent_code>, claim_token, result)` with the corrected receipt folding the ops-amend in, then re-run the controller.
+
+It never touches `attempt_count` and leaves a clean release-then-claim-then-done audit trail. Run the three without pausing on a card that is NOT `requires_local`: the row sits unclaimed in Agent Todo between steps 1 and 2, and an awake lane can claim it mid-repair. Do NOT reach for raw SQL; retiring that improvisation is why the C3 verb exists.
+
 ## Mandatory Preflight
 
 Before touching a task:
@@ -197,7 +205,15 @@ Follow-up recommendation:
 
 The OE-8 closeout controller consumes these headings; a receipt missing a section is held out of auto-closeout, not guessed at. Keep receipts factual. Do not claim tracker, session-log, commit, push, or project capture work was done by a worker if the parent session still needs to do it.
 
-DELIVERABLES-TO-FILE (local runtime): when the task produces a client-facing standalone draft (a listing pack, a bio, a directory field-by-field, blog copy), write it to `deliverables/<project_slug>/<task-shortid>-<slug>.md` in the Brain Bank repo and record that exact path under "Touched files or records:". `deliverables/` is gitignored — the draft never ships to brain-bank. Do NOT use `deliverables/` for code/config changes to a project: those are a commit/diff in that project's own repo; record the repo + branch under "Touched files or records:" instead.
+DELIVERABLES-TO-FILE (local runtime): when the task produces a client-facing standalone draft (a listing pack, a bio, a directory field-by-field, blog copy), write it to `deliverables/<project_slug>/<task-shortid>-<slug>.md` in your Brain Bank checkout and record that exact path under "Touched files or records:". `deliverables/` is TRACKED in your own deployment's repo (drafts stay private to your fork; they are never contributed upstream), and you make your own file durable via the DURABILITY PUSH below; a scheduled deliverables sweep lane and the closeout sweep stay as the repair net for anything your push missed. Do NOT use `deliverables/` for code/config changes to a project: those are a commit/diff in that project's own repo; record the repo + branch under "Touched files or records:" instead.
+
+DURABILITY PUSH: if and only if this run wrote at least one file under `deliverables/`, make it durable BEFORE writing the exit receipt. Run exactly one command, with the 8-character task shortid substituted:
+
+```
+bash scripts/open-engine/deliverables-push.sh --task <task-shortid>
+```
+
+The script owns all the git: it stages ONLY `deliverables/`, refuses secret-shaped content, commits as `deliverable: <files> [OE:<shortid>]`, pulls with rebase, pushes, and prints exactly one JSON line. Read that JSON directly. On `pushed:true` you are done and nothing goes in the receipt. On `pushed:false`, append ` @ UNPUSHED (<reason>)` to the path under "Touched files or records:" so the gap stays visible, then carry on — never retry, never force, never run raw `git`, and never change the exit path over a failed push. Why this exists: an uncommitted deliverable leaves the repo dirty, so the dirty-worktree guard in the preflight above refuses to claim on every following run until a human or the sweep clears it, and a critic reading deliverables from the remote cannot see an unpushed file and flags honest work as a missing artifact.
 
 CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk calls `put_deliverable` with path `<project_slug>/<task-shortid>-<slug>.md` and the full draft, then records `Touched files or records: deliverables/<path> @ BUCKET`. If `put_deliverable` is unavailable or errors, leave the full draft inline in "Work summary" and record `Touched files or records: None written (cloud runtime — draft inline above)`. No task is ever unreviewable.
 
@@ -219,6 +235,14 @@ Stamp the install target at completion time; the run already knows it (it is the
 
 The closeout-controller reads the marker verbatim to route the task to the Needs Operator desk. It HOLDS any receipt that names a `deliverables/` file but carries no marker (`DELIVERABLE_WITHOUT_OPERATOR_ACTION`), and any receipt whose marker is mid-line (`OPERATOR_MARKER_NOT_LINE_ANCHORED`) — held and visible, never applied-and-lost. No deliverable and no operator step => terminal task, closes to Agent Done. The marker is valid ONLY inside "Follow-up recommendation:" — a marker in any other section holds the task (`OPERATOR_MARKER_OUTSIDE_FOLLOW_UP`) instead of closing it, so the step is never silently lost.
 
+CHECK-REF (OE-13B executed-check tasks): if the task's packet carries a `check_spec` (a low-risk code task the closeout gate re-runs in isolation), the receipt MUST end its "Touched files or records:" section with exactly one line-anchored marker naming the commit the session created in the target repo:
+
+```text
+CHECK-REF: <40-hex sha of the produced commit>
+```
+
+Commit the code to a FEATURE BRANCH — the human still merges (never a commit by the controller). The controller runs the PACKET's check against that commit in a cred-scrubbed no-network worktree and applies ONLY on its own exit 0; the receipt's own verification prose is never trusted for these tasks. A missing, duplicated, or non-40-hex CHECK-REF HOLDs the task (`CHECK_REF_MISSING|COUNT|FORMAT`) — held and visible, never applied on the agent's word.
+
 VOICE RULES for any drafted client-facing or operator-voice content inside a task
 (blog drafts, emails, titles/metas): no em dashes; never use the words
 "inked", "inking", "tapestry", "delve", "delving", "realm", metaphorical
@@ -237,7 +261,14 @@ Set:
 
 - `last_queue_result`: one compact summary of the heartbeat result.
 - `last_successful_run`: current UTC datetime in `Z` form, never a `+00:00`
-  offset.
+  offset. Read it from the system clock with `date -u +%Y-%m-%dT%H:%M:%SZ` and
+  use that exact output. Never estimate it, round it to the minute or hour, or
+  derive it from this lane's scheduled slot time. A model has no clock of its
+  own: lanes whose prompts carried a `"<now ISO8601 Z>"` fill-in-the-blank
+  inside a JSON literal have invented values hours in their own future, while
+  lanes told to describe the value (as this line does) read a real clock and
+  stayed accurate. This column feeds lane-freshness checks, so a guessed value
+  makes a stale lane read fresh.
 - `local_context`: repository path and relevant branch or task ID.
 - `automation_state`: keep `manual-required` unless the runtime itself is blocked or paused.
 - `notes`: next manual checkpoint, if useful.

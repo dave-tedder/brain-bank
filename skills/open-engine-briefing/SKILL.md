@@ -277,25 +277,77 @@ by slug and holds anything it cannot resolve.
   Agent Review sorts above a clean or unreviewed one so flagged work surfaces
   first.
 - CLAIMABILITY SPLIT. Agent Todo is NOT one thing, and rendering it as one is a
-  lie the operator acts on. Every scheduled lane claims with `max_risk=low`, so
-  `risk` is what decides whether a row moves without them:
-  - `risk = low` => it is genuinely queued. Render under "What happens next
-    without you" as happening on the next scheduled run.
+  lie the operator acts on. Two independent columns decide whether a row moves
+  without them, and BOTH have to be checked: every scheduled lane claims with
+  `max_risk=low`, and no scheduled lane passes `runtime_local`:
+  - `risk = low` AND `requires_local` is false => it is genuinely queued. Render
+    under "What happens next without you" as happening on the next scheduled run.
   - `risk = medium` or `high` => NO scheduled lane will EVER claim it. Render it
     in bucket C, worded as needing an attended session (not as queued work), WITH
     the Goal Prompt the generator already produces. Say plainly that nothing is
     coming for it on its own.
+  - `requires_local = true` => same bucket C treatment, whatever the risk. A
+    scheduled lane must not pass `runtime_local`, so these rows are invisible to
+    `claim_next_agent_task` by design. Word it as needing an attended session on
+    the local machine, not as queued work. A low-risk `requires_local` row is
+    the sneaky one: every field the operator scans reads "queued and low risk"
+    while nothing will ever pick it up.
   NEVER emit "the executors will claim these" (or any equivalent) over a set that
-  contains a medium or high row. Check the risk of every Agent Todo row before
-  writing that sentence, not after.
+  contains a medium or high row, or a `requires_local` row. Check the risk AND
+  the `requires_local` flag of every Agent Todo row before writing that sentence,
+  not after.
   Why this is a hard rule: a real briefing put Agent Todo rows in bucket C and
   told the operator the overnight executors would claim them. That was true of
   the low rows and FALSE of a medium that had been sitting in the same column for
   days. A stranded medium therefore read as handled on the one surface the
   operator actually reads, which is worse than not mentioning it at all.
+  The `requires_local` half was added after a second incident of the same shape:
+  an operator promoted six drafts and five were low-risk `requires_local` rows.
+  Under the risk-only version of this rule every one of them would have rendered
+  as happening on the next scheduled run, and the sentinel's stranded count read
+  zero at the same time, so both surfaces agreed and both were wrong.
   `claim_gating_warning` covers the promote MOMENT; this rule covers the ongoing
   state after it, and the sentinel's stranded count is the backstop for when a
   render forgets anyway.
+- A DEAD CLAIM MAKES A HELD CARD UNANSWERABLE. Before handing the operator a
+  one-step action on an `Agent Needs Input` or `Agent Review` card, check
+  `claimed_by` and `claim_expires_at`. The claim is DEAD when `claimed_by` is
+  set AND `claim_expires_at` is either past or NULL — null alongside a live
+  `claimed_by` is the reaper's dead-letter shape, not an unclaimed row. On a
+  dead claim `answer_agent_task`, `resume_agent_task`, `unblock_agent_task`
+  and `update_agent_task` ALL REFUSE, because every one of them requires the
+  caller to own the claim. So the card is STUCK, not merely waiting, and the
+  render must say so.
+  The step to give instead is the release-claim fold: `admin_amend_agent_task`
+  with `release_claim: true` (which returns the row to Agent Todo and clears
+  `agent_code`), then `claim_specific_agent_task`, then the real verb. Never
+  render "answer this" or "resume this" over a dead-claimed card.
+  A LIVE claim on those two statuses is normal and is exactly what makes the
+  answer and resume calls work. Say nothing about it.
+  Why this is a hard rule: the SENTINEL already counts these (its "stale claims
+  N blocking" figure) while this skill had no claim-liveness rule at all, so the
+  two surfaces disagreed and the wrong one was the briefing, which is the
+  surface the operator actually reads each morning. A held card carrying a dead
+  claim is the same trap as a card that is held AND unclaimed: no verb can touch
+  it, and without this check the only way out anyone finds is raw SQL.
+- A CARD HELD ON `OPS_AMEND_NEWER_THAN_DONE` TAKES THE SAME FOLD, and there is
+  exactly one route. The trigger is different from the dead-claim case above:
+  here a human posted an ops-amend correction AFTER the AGENT DONE, so the
+  closeout controller holds because the tracker drafts it would apply may be
+  stale. A corrected receipt is what clears it, and `complete_agent_task`
+  REFUSES to post one from Agent Review: `Agent Review -> Agent Review` is not
+  a legal edge in `move_agent_task_status`, so the call returns
+  `Invalid transition`. Give the fold instead: `admin_amend_agent_task` with
+  `release_claim: true`, then `claim_specific_agent_task`, then
+  `complete_agent_task` with the corrected receipt, then re-run the controller.
+  Run the three back to back on a card that is not `requires_local`, because
+  the row sits unclaimed in Agent Todo between the fold and the re-claim and an
+  awake lane could take it mid-repair.
+  Why this is a hard rule: the controller's own hold message used to tell the
+  reader to post a superseding AGENT DONE, which is the transition the RPC
+  refuses. A hold message is read by whoever is unblocking a stuck card, usually
+  in a hurry, and sending that reader into a refusal is how sessions end up
+  improvising with raw SQL — the exact outcome the C3 ops verb exists to retire.
 - THE NEEDS OPERATOR DESK IS ALWAYS SHOWN. Every task in the Needs Operator column
   renders under bucket B ("Needs you present") on EVERY run, regardless of the
   watermark window, until operator closes it. Each card shows its stored
@@ -345,9 +397,21 @@ on conflict (agent_code) do nothing;
    (Standing, Agent Todo, Agent Working, Agent Needs Input, Agent Review,
    Needs Operator, Agent Done), with `include_done: true` on the Agent Done call and
    `include_archived: true` on every call (applied closeouts may be archived
-   and still belong in the diff window). If any single call returns exactly
-   50 rows, treat that status as possibly truncated and say so in the board
-   pulse; never render silently over a truncated read. Partition the union:
+   and still belong in the diff window).
+   TRUNCATION CHECK, and read this before flagging one. Rows come back sorted
+   `updated_at desc`, so a capped call drops the OLDEST rows, never the newest.
+   A call that returns exactly 50 is therefore only a real truncation risk when
+   the OLDEST row it returned is still NEWER than the watermark, because only
+   then could a row inside the diff window have fallen off the bottom. Check
+   that oldest row before saying anything: if it is older than the watermark,
+   the window is fully covered and you say nothing. If it is newer, the status
+   is genuinely truncated, say so in the board pulse and never render silently
+   over it. Do NOT flag on the bare row count alone. Retired smoke tasks and
+   old closeouts accumulate under `include_archived` forever, and a board that
+   has been through a build phase can easily hold dozens of them in a single
+   column, so a count-only rule turns into a permanent possibly-incomplete
+   caveat on every render, which trains the reader to ignore the one case that
+   is real. Partition the union:
    - MOVED: `updated_at > watermark`. For each, `get_agent_task` and read the
      events newer than the watermark. The updated_at trigger fires on EVERY
      row update, including claim heartbeats and reaper housekeeping, so a
@@ -364,27 +428,39 @@ on conflict (agent_code) do nothing;
    (`AGENT CLAIMED` with no terminal receipt), promoted on its own
    (`AGENT STATUS` with `payload.action='auto-promoted'`).
 4. **Render the Session Operating Map** (structure below).
-5. **Phase 4 readiness streak (query-backed).** Read the watch views via
-   Supabase `execute_sql` (read-only):
+5. **Phase 4 readiness (query-backed, promotion-shaped).** The readiness
+   figure the operator reads is OBSERVED AUTO-PROMOTIONS, not calendar days: a
+   rep count asks "have we seen enough?" where the old day streak mostly
+   measured time passing. Read the authoritative tally via Supabase
+   `execute_sql` (read-only):
 
    ```sql
-   select clean_streak, terminated_by_day, terminated_by_verdict, latest_settled_day
-   from oe_triage_watch_streak;
-   select et_day, drafts_created, mechanical_verdict, effective_verdict
-   from oe_triage_watch_days
-   where effective_verdict <> 'CLEAN' or et_day > (now() at time zone 'America/New_York')::date - 7
-   order by et_day;
+   select observed, vetoed, clean_observed, target, remaining_to_target, day0_et
+   from oe_phase4_watch_tally;
+   select task_id, promoted_et_day, allowlist_category, rationale, verdict
+   from oe_phase4_promotions
+   order by promoted_at;
    ```
 
-   Render the streak WITH its terminating day and verdict, never as a bare
-   integer — verdicts are retroactive (a draft archived days later can drop
-   the number without anyone editing anything), and a drop must be legible
-   instead of alarming. Any `PENDING_REVIEW` day is a "needs you" item: the
-   operator rules it via `oe_watch_rulings` (promoted draft → clean; archived
-   unpromoted → dirty; untouched → leave pending). The views are the system
-   of record for the streak; do NOT transcribe rows into PROJECT-TRACKER.md.
-   The gate itself is unchanged: 5 consecutive CLEAN days AND the operator's
-   explicit go.
+   Render it as "phase4 readiness: N of `<target>` observed, M vetoed" (N is
+   `observed`, the target is the `PHASE4_WATCH_TARGET` marker surfaced by the
+   view). If `target` is null the marker is missing, say so plainly. Each
+   auto-promotion is INDIVIDUALLY rulable, not merely counted: every row in
+   `oe_phase4_promotions` with verdict `unruled` is a "needs you" item, and the
+   operator rules it good or vetoed via `oe_promotion_rulings` (good counts as
+   a clean rep; vetoed shows as an M and is the operator's cue to reset
+   `PHASE4_WATCH_DAY0`). A veto is visible as M, never a silent reduction of
+   the total. Do NOT transcribe the tally into PROJECT-TRACKER.md; the view is
+   the system of record.
+   The gate itself is UNCHANGED: reaching the target only makes it ELIGIBLE for
+   the operator's explicit go. Nothing self-graduates and there is no
+   graduation code path anywhere; this section only reports.
+   The day-shaped views (`oe_triage_watch_streak`, `oe_triage_watch_days`,
+   `oe_watch_rulings`) are left intact for rollback but are no longer the
+   reported readiness figure; query them only when diagnosing the old streak.
+   TRANSITIONAL: if `oe_phase4_watch_tally` does not exist yet (migration
+   `20260725_oe_phase4_promotion_watch.sql` not applied), fall back to the day
+   views above and note the migration is pending rather than erroring.
 6. **Close out, only after a successful render:** `write_agent_ledger` for
    `briefing` with `last_successful_run` = the MAXIMUM event/task
    timestamp observed this run (not now()), converted to UTC `Z` datetime form
@@ -394,6 +470,62 @@ on conflict (agent_code) do nothing;
    following run. Set `last_queue_result` = compact
    counts (e.g. "moved 6 / needs-you 3 / new drafts 2"). Then
    `capture_thought` with the briefing text, tags `["open-engine","briefing"]`.
+
+## OPERATOR RENDERING CONTRACT (governs every render and every reply)
+
+Added after a session where a rules-correct render was still unworkable for
+the operator: items unnumbered, task ids buried mid-line, context assumed
+from the morning render, "spawn a session" executed as background subagents,
+and per-card board links that never landed on the card. Where these conflict
+with older habits elsewhere in this skill, these win.
+
+1. ONE GLOBAL NUMBER SEQUENCE. Number every item in the briefing 1..N in
+   render order, across "What happened" AND all four "What needs you" buckets
+   (buckets stay as subheadings). The operator works and answers by number.
+2. ID FIRST, THEN CONTEXT, EVERY ITEM. Each item opens exactly:
+   `N. <short-id> — <project>:` followed by 2-3 plain sentences covering (a)
+   which project this belongs to, (b) what the task actually is, and (c) why
+   it waits / what just happened — written so the operator can decide with
+   zero memory of any prior render. Then EXACTLY ONE next step.
+3. LINK THE EVIDENCE IN CHAT. Every deliverable or context file that helps
+   the operator decide is a clickable markdown link in the chat text
+   (relative local path, or external URL). The chat is the primary link
+   surface: it can open local files; the Artifact cannot.
+4. THE ARTIFACT CARRIES NO LINKS. Local paths cannot resolve from a hosted
+   page, and status-filtered board views rarely land the eye on the intended
+   card, so the Artifact renders ids and file paths as plain text only. It
+   is an orientation surface, not a navigation surface.
+5. EVERY LATER REPLY KEEPS THE SHAPE. For the rest of the session, any reply
+   that reports on, asks about, or acts on a board item re-introduces it as
+   `N. <short-id> — <one-or-two-sentence recap>` before the new information.
+   The operator cannot recall a task from its short-id alone, even minutes
+   later in the same chat. A bare short-id with no recap is a render bug.
+6. SIDE-SESSION VOCABULARY. When the operator says "spawn a session" (or
+   "side chat"), they mean an OPERATOR SIDE SESSION: a fresh session THEY
+   open and drive, NOT a background subagent. When the runtime exposes a
+   task-chip tool (e.g. `spawn_task` in the desktop app), prefer it: it
+   drops a chip the operator clicks once to approve and spin into a session
+   they drive — set `cwd` to the right project, `prompt` to the
+   self-contained Goal Prompt, `title` to the chip label, `tldr` to the
+   one-line what/why. Fall back to a paste-ready Goal Prompt when no chip
+   tool exists. NEVER a background subagent: those run invisibly inside the
+   briefing chat where the operator cannot steer, approve, authorize OAuth,
+   pick images, or click anything, so every interactive step dies. Use
+   background subagents only when the operator explicitly asks for
+   background work.
+7. FLAGS ARE EXPLAINED, NEVER JUST NAMED. When a card carries a critic
+   verdict of `flagged` (or any warning/limitation gating the operator's
+   decision), the render and every later reply explain each flag in plain
+   words: what the reviewer actually found, why it matters, and what the
+   operator should check or decide because of it. A bare "flagged" tag, or
+   flag text compressed past comprehension, is a render bug — the operator
+   cannot weigh a risk they cannot read.
+8. AGENT-PROPOSED CONTENT IS LABELED AS SUCH. When a deliverable contains
+   answers, facts, or copy an agent drafted ON THE OPERATOR'S BEHALF
+   (proposed answers to questions addressed to them, placeholder personal
+   memories, inferred history), the render says plainly that the operator
+   has not confirmed it and it may be wrong. Never present agent-proposed
+   answers as settled.
 
 ## Session Operating Map structure
 
@@ -407,6 +539,16 @@ on conflict (agent_code) do nothing;
    filed item, name the operator's resulting next step in the same breath (it
    is repeated as an action in "What needs you"); a filed research/draft task
    is rarely the end of the line.
+   - **Executed-check auto-applies (OE-13B).** Surface any AGENT APPLIED event
+     whose `closeout_evidence.executed_check` is present as its own line:
+     "auto-applied on executed check (exit 0): <task short-id> <title> —
+     <runner> @ <ref-short>". This is the post-hoc watch surface — a low-risk
+     code task that closed WITHOUT a human reading the receipt because the
+     controller re-ran the packet's check in isolation and it exited 0.
+     Weight it: read the change and, if the auto-apply looks wrong (a
+     suspected false-pass), flag it as a **stop-the-lane** event — flip
+     `EXECUTED_CHECK_ENABLED = false` in `closeout-controller.mjs` (a one-line
+     commit, no deploy) and re-open the task for a human read.
 3. **What needs you.** Group every waiting item into one of four buckets, in
    this order. Each item: one plain-language line of what it is and why it
    waits, EXACTLY ONE next step, and a link to the actual work (or the inline
@@ -464,13 +606,38 @@ on conflict (agent_code) do nothing;
      `allow_template_body: true` is passed deliberately.
    Paused-project items are excluded per the hard rule and shown only as the
    one-line suppressed count.
+3.5. **Closed without you.** Desk cards the reconciler lane auto-closed in the
+   last 7 days, rendered id first with a one-line recap and the evidence (the
+   probe, the assertion, what was measured, and `measured_by`, all carried in
+   the `OPERATOR DONE` note). Read the events rather than the card body: the
+   closer is the `reconciler` lane, never the operator.
+
+   Skip this section entirely if the reconciler lane is not installed, and omit
+   it when the 7-day window is empty. Never render an empty heading.
+
+   A 7-day window, not a single morning, so the operator has a standing chance
+   to dispute rather than one shot at catching it.
+
+   State the undo inline, every time:
+   `admin_amend_agent_task(<id>, reason, move_to_needs_operator: true)` returns
+   a wrongly closed card to the desk, and
+   `admin_amend_agent_task(<id>, reason, clear_close_check: true)` disarms a bad
+   probe so it is never run against that card again.
+
+   **A single disputed close is a stop-the-lane event.** Say so in the section.
+   Disable the cron, diagnose whether the fault was probe quality or lane
+   behavior, and re-enable only on the operator's explicit go. Same posture as
+   the executed check's first false pass, because the failure mode is the same
+   in kind: a machine retired work on evidence that did not mean what it
+   appeared to mean.
 4. **What happens next without you.** The scheduled lanes' next runs
    (executors, queue runner, closeout controller, triage), so silence reads
-   as normal instead of broken. Name ONLY the low-risk Agent Todo rows as
-   happening on the next scheduled run (per the CLAIMABILITY SPLIT rule). Never
-   describe Agent Todo as a whole here: the moment one medium sits in that
-   column, "the executors will claim these" becomes a false promise about a row
-   nothing is coming for.
+   as normal instead of broken. Name ONLY the Agent Todo rows that are low risk
+   AND not `requires_local` as happening on the next scheduled run (per the
+   CLAIMABILITY SPLIT rule). Never describe Agent Todo as a whole here: the
+   moment one medium or one `requires_local` row sits in that column, "the
+   executors will claim these" becomes a false promise about a row nothing is
+   coming for.
 
 ## Goal Prompt Generator (separate-chat items)
 
@@ -514,9 +681,10 @@ kind (no CDN scripts, fonts, or remote images; inline all CSS):
 - **What needs you** as the primary section: a card list in the same
   four-bucket order as the markdown (A board decisions, B needs you present,
   C fresh Claude session, D promote from Standing), with any held questions
-  floated to the top. Each card carries its ONE action inline AND its link as a
-  real `<a href>` (the status-filtered board view, or the external/file work
-  product), plus its reviewer verdict tag when present. Bucket C items put the
+  floated to the top. Each card carries its ONE action inline, its global item
+  number and short-id, and its file path or URL as PLAIN TEXT — no links of
+  any kind in the Artifact, per the OPERATOR RENDERING CONTRACT — plus its
+  reviewer verdict tag when present. Bucket C items put the
   Goal Prompt in a `<pre>` block with a short "copy this into a fresh session"
   note above it. Bucket B cards show their `[hands-only]` / `[session-spawnable]`
   tag on the card, and every `[session-spawnable]` card gets the same `<pre>`

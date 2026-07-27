@@ -100,6 +100,14 @@ Without `execute_sql`, use `list_agent_tasks` for `Agent Review` and
 `Needs Operator`, then read `claimed_by` / the receipt agent code and
 `read_agent_ledger` to map runtime.
 
+**Pass `view: "compact"` on both listings.** The full projection returns each
+card's `review_reason` (the AGENT DONE receipt), and once a board has history
+these listings exceed the MCP response cap. This step only PICKS ids, and
+compact keeps what the picking rule reads (`critic_verdict`, `claimed_by`,
+`status`, `agent_code`). The review step below re-reads each chosen card in
+full via `get_agent_task`, so no evidence is lost — the receipt you review
+still comes from the full packet.
+
 ## The adversarial review
 
 For each eligible task, read the whole picture before judging:
@@ -133,6 +141,20 @@ Check, defaulting to FLAG on any doubt:
 - Voice/brand: banned words (inked, tapestry, delve, realm, metaphorical
   landscape, leverage-as-verb, synergy, holistic, robust), em dashes in
   operator-facing copy, hype/marketing language, pricing framed as hidden/gated.
+- REGISTER, client-facing narrative posts only (blog / cornerstone / story
+  posts, where the project's voice calls for narrative rather than reference):
+  the piece must read the way that voice is meant to sound, not like an essay
+  or a research write-up. FLAG on abstract thesis openings; meta framing ("the
+  question this post asks is"); explainer connective tissue ("this matters
+  because"); source or citation framing leaking into the prose ("recorded in
+  March 2018", "in the archive") or a Sources footer listing raw source IDs;
+  stacked analytical labels ("that is not X, it is Y") used as the main mode.
+  PASSING THE BANNED-WORD AND EM-DASH SCAN IS NOT ENOUGH: a draft can be
+  voice-clean and still be clinical, and in practice that is how a clinical
+  draft earns a clean verdict and gets rejected by the operator afterwards. If
+  the project defines a voice skill or style guide, read it before judging
+  register. Does NOT apply to reference briefs, source indexes, receipts, or
+  SEO metadata, which are correctly citation-dense.
 - Unverified or hallucinated facts: any specific claim (dates like "since
   1983", awards, counts, addresses) not supported by the task's sources.
 - Scope drift: output that does not match the task's acceptance_criteria /

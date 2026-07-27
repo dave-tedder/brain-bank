@@ -8,6 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -40,6 +41,45 @@ const SAFE_STATUSES = new Set(["Agent Review"]);
 const SAFE_RISKS = new Set(["low"]);
 const EXPECTED_STATUSES = new Set(["APPLYABLE", "HELD", "MIXED"]);
 
+// OE-8E operator-resolution sweep. An OPERATOR DONE note shorter than this
+// (trimmed) is treated as non-substantive ("done", "sent") and skipped rather
+// than spamming one tracker block per trivial resolution.
+const RESOLUTION_NOTE_MIN_CHARS = 80;
+const RESOLUTION_LOOKBACK_DAYS_DEFAULT = 7;
+// list_agent_tasks caps at 50; the sweep reports this so a truncated scan is
+// never mistaken for full coverage (no-silent-caps).
+const RESOLUTION_SCAN_LIMIT = 50;
+
+// OE-13 Sub-phase B kill switch (spec §12 rollback level 2). false = every
+// check_spec task HOLDs (EXECUTED_CHECK_DISABLED) and nothing auto-applies on
+// a check; tasks without check_spec are unaffected either way. Flipping this
+// is a one-line commit, no deploy — it is the stop-the-lane response to any
+// live false-pass (spec §10).
+const EXECUTED_CHECK_ENABLED = true;
+
+// Fork B (spec §3.1): check_spec is a fixed allowlist of runner commands with
+// bounded args — never an arbitrary shell string. argv is built as an array
+// and executed via spawnSync without a shell, so there is no injection
+// surface; the arg pattern additionally rejects whitespace and shell
+// metacharacters so specs stay legible and statically vettable.
+const CHECK_RUNNERS = {
+  "deno-test": { minArgs: 0, maxArgs: 8, argv: (args) => ["deno", "test", "--no-prompt", ...args] },
+  "deno-check": { minArgs: 1, maxArgs: 8, argv: (args) => ["deno", "check", ...args] },
+  "node-test": { minArgs: 0, maxArgs: 8, argv: (args) => ["node", "--test", ...args] },
+  "npm-test": { minArgs: 0, maxArgs: 0, argv: () => ["npm", "test"] },
+  "npm-run": { minArgs: 1, maxArgs: 1, argv: (args) => ["npm", "run", args[0]] },
+};
+const CHECK_ARG_PATTERN = /^[A-Za-z0-9@._/:=,-]+$/;
+const CHECK_RUN_SH = join(__dirname, "check-run.sh");
+const CHECK_TIMEOUT_MS = 600_000;
+const CHECK_INFRA_REASONS = {
+  64: "CHECK_INFRA_USAGE",
+  65: "CHECK_REF_UNRESOLVED",
+  66: "CHECK_INFRA_WORKTREE",
+  67: "CHECK_ISOLATION_UNAVAILABLE",
+  68: "CHECK_RUNNER_MISSING",
+};
+
 function usage() {
   return `Usage:
   node scripts/open-engine/closeout-controller.mjs --fixture <file.json> [--task-id <uuid>] [--expect APPLYABLE|HELD|MIXED]
@@ -49,6 +89,7 @@ function usage() {
   node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply
   node scripts/open-engine/closeout-controller.mjs --resume <uuid>
   node scripts/open-engine/closeout-controller.mjs --capture-run-summary --remaining-agent-review <n> [--applied-task-ids <ids>] [--held-tasks <id:reason;...>] [--notable <text>] [--run-timestamp <iso>] [--summary-preview]
+  node scripts/open-engine/closeout-controller.mjs --operator-resolution-sweep [--live-check] [--lookback-days <n>] [--no-capture]
   node scripts/open-engine/closeout-controller.mjs --sql
 
 OE-8A is dry-run only. It reads saved Agent Review evidence, validates receipt
@@ -91,13 +132,34 @@ calls the board, it
 writes a local journal under docs/handoffs/pending-closeouts/journal/. If board
 apply succeeds but file/capture closeout fails, --resume <uuid> confirms the
 live task has an AGENT APPLIED event and replays the pending file/capture phase
-from that journal.
+from that journal. A task carrying a packet-authored check_spec is an OE-13
+executed-check task: --apply re-runs the packet's check via check-run.sh in an
+isolated cred-scrubbed no-network worktree of the target project at the
+receipt's CHECK-REF commit, and applies ONLY on the controller's own exit 0
+(never the receipt's claim). Any other outcome — check failed, spec malformed,
+task auto-promoted, deliverables-shaped, CHECK-REF missing, lane disabled —
+HOLDs the task in Agent Review with a legible reason. exit 0 gates ONLY the
+Agent Review -> Agent Done closeout; commit, deploy, migration, and every live
+surface stay human-gated.
 
 OE-8D run-summary capture is additive logging only. It calls capture_thought
 once for the whole automation run, tagged open-engine/closeout/oe-8d, using
 counts, short ids, hold reasons, remaining Agent Review count, and one notable
 clause. It never applies tasks, edits project files, changes gates, or resolves
-linked action items.`;
+linked action items.
+
+OE-8E (--operator-resolution-sweep) closes the operator-decision gap: closeout
+writes trackers at Agent Review time with the EXECUTOR's drafts, so a decision
+made later at the Needs Operator step (defer, reject, scope change) lives only
+on the OPERATOR DONE board event. The sweep lists recent Agent Done tasks,
+keeps only ones whose FINAL status-bearing event is a human OPERATOR DONE with
+a note of ${RESOLUTION_NOTE_MIN_CHARS}+ trimmed chars inside the lookback
+window (default ${RESOLUTION_LOOKBACK_DAYS_DEFAULT} days), routes by
+project_slug through the registry, and appends the note verbatim to the routed
+tracker under a per-task date-free marker (idempotent, append-only). One Brain
+Bank capture per appended task unless --no-capture. --live-check prints the
+would-append report without writing. NO board mutations, no session-log
+writes, no git, no journal (a single marker-guarded append re-runs cleanly).`;
 }
 
 function parseArgs(argv) {
@@ -120,6 +182,9 @@ function parseArgs(argv) {
     remainingAgentReview: null,
     notable: "nominal",
     runTimestamp: null,
+    operatorResolutionSweep: false,
+    lookbackDays: RESOLUTION_LOOKBACK_DAYS_DEFAULT,
+    noCapture: false,
     help: false,
   };
 
@@ -161,6 +226,12 @@ function parseArgs(argv) {
       args.notable = argv[++i] || "nominal";
     } else if (arg === "--run-timestamp") {
       args.runTimestamp = argv[++i];
+    } else if (arg === "--operator-resolution-sweep") {
+      args.operatorResolutionSweep = true;
+    } else if (arg === "--lookback-days") {
+      args.lookbackDays = argv[++i];
+    } else if (arg === "--no-capture") {
+      args.noCapture = true;
     } else if (arg === "--help" || arg === "-h") {
       args.help = true;
     } else {
@@ -196,10 +267,24 @@ function parseArgs(argv) {
       "--live-check/--apply/--resume fetch live packets; they cannot combine with --fixture, --input, or --write-drafts.",
     );
   }
-  if ((args.liveCheck || args.apply) && !args.taskId) {
+  if ((args.liveCheck || args.apply) && !args.taskId && !args.operatorResolutionSweep) {
     throw new Error(
       "--live-check/--apply require --task-id (OE-8C runs single-task).",
     );
+  }
+  if (args.operatorResolutionSweep) {
+    if (
+      args.apply || args.resumeTaskId || args.source || args.writeDrafts ||
+      args.captureRunSummary || args.printSql || args.taskId
+    ) {
+      throw new Error(
+        "--operator-resolution-sweep combines only with --live-check, --lookback-days, and --no-capture.",
+      );
+    }
+    if (!/^\d+$/.test(String(args.lookbackDays)) || Number(args.lookbackDays) < 1) {
+      throw new Error("--lookback-days must be a positive integer.");
+    }
+    args.lookbackDays = Number(args.lookbackDays);
   }
   if (args.resumeTaskId && !isUuidish(args.resumeTaskId)) {
     throw new Error("--resume requires a task id.");
@@ -358,8 +443,14 @@ function evaluateTask(task, registry, actionItems) {
   // reads only the latest AGENT DONE; review-note augmentation fills only
   // missing sections). If an ops-amend is NEWER than the receipt about to be
   // applied, the tracker draft may be stale — hold for a human instead of
-  // silently applying it. Author fix: post a superseding AGENT DONE that folds
-  // the corrections in, then re-run.
+  // silently applying it.
+  //
+  // Author fix: NOT a superseding AGENT DONE. complete_agent_task refuses that
+  // (Agent Review -> Agent Review is not a legal edge in move_agent_task_status),
+  // so the repair is the C3 fold: admin_amend_agent_task with release_claim,
+  // which returns the row to Agent Todo and clears agent_code, then
+  // claim_specific_agent_task, then complete_agent_task with the corrected
+  // receipt. See holdMessage below, which is what the reader actually sees.
   if (latestDoneEvent) {
     const doneAt = new Date(latestDoneEvent.created_at).getTime();
     const hasNewerOpsAmend = task.events.some((event) =>
@@ -432,6 +523,46 @@ function evaluateTask(task, registry, actionItems) {
   // The scan is read-only here; the actual flip runs only in the apply path.
   const planDocFlip = evaluatePlanDocGate(task, route, reasons);
 
+  // OE-13 Sub-phase B: executed-check classification (spec §3/§7/§8).
+  // check_spec present => this task NEVER applies on the receipt alone. It
+  // applies only via the controller's own executed check (Fork A), and every
+  // other outcome is a HOLD with a legible reason — fail closed, task stays in
+  // Agent Review. check_spec absent => byte-for-byte the existing gate.
+  // Classification only here; the check itself runs in the apply path.
+  let executedCheck = null;
+  const checkSpec = parseCheckSpec(task.check_spec);
+  if (checkSpec.present) {
+    if (!EXECUTED_CHECK_ENABLED) {
+      // Rollback level 2 (spec §12): lane off, check tasks wait for a human.
+      reasons.push("EXECUTED_CHECK_DISABLED");
+    } else if (!checkSpec.ok) {
+      // Malformed / outside the allowlist: never executed (spec §9 probe 2).
+      reasons.push(checkSpec.reason);
+    } else if (wasAutoPromoted(task.events)) {
+      // §8 do-not-stack: a machine-promoted task never machine-applies. This is
+      // the sole structural separation from Phase 4 under gate-from-launch, so
+      // it is a hard predicate here, not a convention (spec §9 probe 5).
+      reasons.push("AUTO_PROMOTED_CHECK_TASK_EXCLUDED");
+    } else if (stagedDeliverable) {
+      // A staged deliverables/ file means content-shaped work — there is no
+      // executable check for it (spec §7, §9 probe 4).
+      reasons.push("CHECK_SPEC_ON_CONTENT_TASK");
+    } else {
+      const checkRef = parseCheckRef(receiptText);
+      reasons.push(...checkRef.reasons);
+      if (checkRef.ref && route && route.workspace_path) {
+        executedCheck = {
+          runner: checkSpec.runner,
+          args: checkSpec.args,
+          argv: checkSpec.argv,
+          ref: checkRef.ref,
+          repo: route.workspace_path,
+          pending: true,
+        };
+      }
+    }
+  }
+
   const uniqueReasons = [...new Set(reasons)];
   if (uniqueReasons.length > 0) {
     return {
@@ -460,6 +591,10 @@ function evaluateTask(task, registry, actionItems) {
       // Set when the task carries a locatable plan-doc line; the apply path
       // flips its checkbox + carded->done tag. Null for captured-work tasks.
       plan_doc_flip: planDocFlip,
+      // OE-13: non-null only for an eligible check_spec task. pending:true —
+      // the check has NOT run yet; the apply path runs it (Fork A) and keys
+      // the apply on its own exit 0.
+      executed_check: executedCheck,
       receipt_sections: augmentation.sections,
       augmented_sections: augmentation.augmented,
       augmentation_text: augmentation.augmented.length > 0
@@ -661,6 +796,84 @@ export function receiptNamesDeliverable(text) {
   return DELIVERABLE_PATH.test(String(text || ""));
 }
 
+// OE-13 Sub-phase B — pure parsers + predicates (spec §3/§8). No side effects,
+// never throw: evaluate() must classify, not crash.
+
+// Parses the immutable packet field agent_tasks.check_spec. Returns one of:
+//   { present: false }                                      — no check on this task
+//   { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" }
+//   { present: true, ok: true, runner, args, argv }
+export function parseCheckSpec(value) {
+  if (value === null || value === undefined) return { present: false };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+  }
+  const unknownKeys = Object.keys(value).filter(
+    (key) => key !== "runner" && key !== "args",
+  );
+  if (unknownKeys.length > 0) {
+    return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+  }
+  const runner = value.runner;
+  const definition = CHECK_RUNNERS[runner];
+  if (!definition) {
+    return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+  }
+  const args = value.args === undefined ? [] : value.args;
+  if (
+    !Array.isArray(args) || args.length < definition.minArgs ||
+    args.length > definition.maxArgs
+  ) {
+    return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+  }
+  for (const arg of args) {
+    if (
+      typeof arg !== "string" || arg.length === 0 || arg.length > 128 ||
+      !CHECK_ARG_PATTERN.test(arg)
+    ) {
+      return { present: true, ok: false, reason: "CHECK_SPEC_UNPARSEABLE" };
+    }
+  }
+  return {
+    present: true,
+    ok: true,
+    runner,
+    args: [...args],
+    argv: definition.argv(args),
+  };
+}
+
+// Locates the commit the executing session produced, from the receipt.
+// Explicit line-anchored marker only (the OPERATOR-ACTION precedent):
+//   CHECK-REF: <40-hex commit sha>
+// The REF locates the agent's own code — trusting it is fine; the CHECK comes
+// from the packet (spec §3). Exactly one marker, full 40-hex sha, or HOLD.
+export function parseCheckRef(receiptText) {
+  const lines = String(receiptText || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^CHECK-REF:/i.test(line));
+  if (lines.length === 0) return { ref: null, reasons: ["CHECK_REF_MISSING"] };
+  if (lines.length > 1) return { ref: null, reasons: ["CHECK_REF_COUNT"] };
+  const ref = lines[0].replace(/^CHECK-REF:/i, "").trim();
+  if (!/^[0-9a-f]{40}$/i.test(ref)) {
+    return { ref: null, reasons: ["CHECK_REF_FORMAT"] };
+  }
+  return { ref: ref.toLowerCase(), reasons: [] };
+}
+
+// §8 do-not-stack predicate: a task whose history carries ANY event authored
+// by triage-auto was machine-promoted (Phase 4). triage-auto is an
+// event-author identity that exists ONLY for the auto-promote audit event, so
+// keying on the author alone (not payload.action) is the broader, fail-closed
+// reading: if that identity ever authors a new event type, the task still
+// counts as machine-touched and stays off the machine-apply lane.
+export function wasAutoPromoted(events) {
+  return (Array.isArray(events) ? events : []).some(
+    (event) => event.agent_code === "triage-auto",
+  );
+}
+
 function parseOperatorAction(followUpText) {
   // Explicit marker only — never fuzzy NLP. Line form:
   //   OPERATOR-ACTION: <step> || OPERATOR-TARGET: <url-or-path>
@@ -805,13 +1018,31 @@ function holdMessage(reasons, receipt) {
     }.`;
   }
   if (reasons.includes("OPS_AMEND_NEWER_THAN_DONE")) {
-    return "A human correction (ops-amend) was posted after the AGENT DONE this apply would use; its Tracker/Session-log drafts may be stale. Post a superseding AGENT DONE folding the corrections in, then re-run.";
+    return "A human correction (ops-amend) was posted after the AGENT DONE this apply would use; its Tracker/Session-log drafts may be stale. A superseding AGENT DONE will NOT work from here: complete_agent_task refuses Agent Review -> Agent Review. Repair route, three calls: admin_amend_agent_task with release_claim true (returns the row to Agent Todo and clears agent_code), then claim_specific_agent_task, then complete_agent_task with the corrected receipt folding the ops-amend in. Then re-run. The row sits unclaimed in Agent Todo between the fold and the re-claim, so run the three back to back if the task is not requires_local and a lane could be awake.";
   }
   if (reasons.includes("PLAN_DOC_PATH_UNRESOLVED")) {
     return "Task carries a plan-doc source whose path cannot be resolved to a project folder; held so the doc line is not left un-synced. Fix the plan-doc source path and re-run.";
   }
   if (reasons.includes("PLAN_DOC_LINE_NOT_FOUND")) {
     return "Task carries a plan-doc source but no [OE:<shortid>] carded line was found in that plan-doc folder; held so applying cannot silently skip the doc sync. Restore the tagged doc line (or flip it by hand) and re-run.";
+  }
+  if (reasons.includes("EXECUTED_CHECK_FAILED")) {
+    return "The packet's executed check ran in isolation and exited non-zero; held, not applied. Fix the code (or the check) and post a fresh AGENT DONE with a new CHECK-REF.";
+  }
+  if (reasons.includes("EXECUTED_CHECK_DISABLED")) {
+    return "Task carries a check_spec but the executed-check lane is disabled (EXECUTED_CHECK_ENABLED=false); held for the human-read gate.";
+  }
+  if (reasons.includes("CHECK_SPEC_UNPARSEABLE")) {
+    return "Task carries a check_spec that is not a valid allowlisted {runner, args[]} value; held and never executed. Fix the packet's check_spec.";
+  }
+  if (reasons.includes("AUTO_PROMOTED_CHECK_TASK_EXCLUDED")) {
+    return "Task was auto-promoted (triage-auto) and also carries a check_spec; machine-promote and machine-apply never stack (spec §8), so it is held for a human.";
+  }
+  if (reasons.includes("CHECK_SPEC_ON_CONTENT_TASK")) {
+    return "Task carries a check_spec but its receipt stages a deliverables/ file — content work has no executable check; held for the human-read gate.";
+  }
+  if (reasons.some((reason) => reason.startsWith("CHECK_REF"))) {
+    return "Task carries a check_spec but the receipt does not carry exactly one line-anchored 'CHECK-REF: <40-hex commit sha>'; held. Add the marker line naming the produced commit and re-run.";
   }
   return `Task held by dry-run safety gates: ${reasons.join(", ")}.`;
 }
@@ -1124,6 +1355,57 @@ function liveInputFromPacket(packet) {
   };
 }
 
+// OE-13 Sub-phase B — apply-time executor (Fork A). Runs the packet's check via
+// check-run.sh and returns the controller's OWN verdict. options.scriptPath /
+// options.timeoutMs exist for tests only. Exported so the test suite can drive
+// it against a scratch git repo.
+export function runExecutedCheck(check, options = {}) {
+  const script = options.scriptPath || CHECK_RUN_SH;
+  const argv = [
+    script,
+    "--repo",
+    check.repo,
+    "--ref",
+    check.ref,
+    "--",
+    ...check.argv,
+  ];
+  const run = spawnSync("bash", argv, {
+    encoding: "utf8",
+    timeout: options.timeoutMs ?? CHECK_TIMEOUT_MS,
+  });
+  const output = `${run.stdout || ""}\n${run.stderr || ""}`.trim().slice(-4000);
+  if (run.error) {
+    const reason = run.error.code === "ETIMEDOUT"
+      ? "CHECK_TIMEOUT"
+      : "CHECK_INFRA_SPAWN";
+    return {
+      passed: false,
+      exit_code: null,
+      reason,
+      message: `check-run.sh did not complete: ${run.error.message}`,
+      output,
+    };
+  }
+  if (run.status === 0) {
+    return {
+      passed: true,
+      exit_code: 0,
+      reason: null,
+      message: "executed check passed",
+      output,
+    };
+  }
+  const reason = CHECK_INFRA_REASONS[run.status] || "EXECUTED_CHECK_FAILED";
+  return {
+    passed: false,
+    exit_code: run.status,
+    reason,
+    message: `executed check exited ${run.status} (${reason})`,
+    output,
+  };
+}
+
 function closeoutMarker(batch, draftDate) {
   return `<!-- open-engine closeout ${draftDate} tasks: ${
     batch.tasks.join(", ")
@@ -1152,6 +1434,184 @@ function appendCloseoutBlock(path, heading, marker, draftContent) {
     "utf8",
   );
   return { path, action: "appended", bytes: Buffer.byteLength(block) };
+}
+
+// ---------------------------------------------------------------------------
+// OE-8E operator-resolution sweep. Pure evaluation is exported for tests; the
+// live runner below wires it to list_agent_tasks/get_agent_task.
+// ---------------------------------------------------------------------------
+
+export function resolutionMarker(taskId) {
+  // Date-free and per-task: a resolution happens once, so the marker must not
+  // vary with when the sweep runs (a dated marker would re-append on a later
+  // sweep of the same task).
+  return `<!-- open-engine operator-resolution task: ${taskId} -->`;
+}
+
+// packets: array of { task, events } shaped like get_agent_task output.
+// Returns { appendable: [...], skipped: [{ task_id, reason }] }. Read-only.
+export function evaluateResolutionSweep(packets, registry, options = {}) {
+  const now = options.now ? new Date(options.now) : new Date();
+  const lookbackDays = options.lookbackDays ?? RESOLUTION_LOOKBACK_DAYS_DEFAULT;
+  const noteMin = options.noteMin ?? RESOLUTION_NOTE_MIN_CHARS;
+  const cutoffMs = now.getTime() - lookbackDays * 24 * 60 * 60 * 1000;
+
+  const appendable = [];
+  const skipped = [];
+
+  for (const packet of packets) {
+    const task = packet.task || packet;
+    const events = Array.isArray(packet.events)
+      ? packet.events
+      : (task.events || []);
+    const skip = (reason) => skipped.push({ task_id: task.id, reason });
+
+    // The FINAL status-bearing event must be the OPERATOR DONE — if any later
+    // event moved status again (ops correction, C3 fold), the note is no
+    // longer the last word on this task and hand-repair owns the record.
+    const statusEvents = events
+      .filter((event) => event?.payload?.status)
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    const last = statusEvents[statusEvents.length - 1];
+    if (
+      !last || last.event_type !== "OPERATOR DONE" ||
+      last.payload.status !== "Agent Done"
+    ) {
+      skip("NOT_OPERATOR_DONE");
+      continue;
+    }
+    // The server refuses non-human completed_by on complete_operator_action;
+    // this client-side check is belt-and-suspenders, not the real gate.
+    const completedBy = String(last.payload.completed_by || "").trim();
+    if (!completedBy) {
+      skip("NO_COMPLETED_BY");
+      continue;
+    }
+    const note = String(last.payload.note || "").trim();
+    if (note.length < noteMin) {
+      skip("NOTE_TOO_SHORT");
+      continue;
+    }
+    const eventMs = new Date(last.created_at).getTime();
+    if (!Number.isFinite(eventMs) || eventMs < cutoffMs) {
+      skip("OUTSIDE_LOOKBACK");
+      continue;
+    }
+    if (!task.project_slug) {
+      skip("MISSING_PROJECT_SLUG");
+      continue;
+    }
+    const route = registry[task.project_slug];
+    if (!route) {
+      skip("UNKNOWN_PROJECT_ROUTE");
+      continue;
+    }
+
+    // Dated by the OPERATOR DONE event (the decision date), never the sweep
+    // run date — a sweep running days later must not misdate the decision.
+    const eventDate = String(last.created_at).slice(0, 10);
+    appendable.push({
+      task_id: task.id,
+      project_slug: task.project_slug,
+      tracker_path: route.tracker_path,
+      capture_tag: route.capture_tag,
+      event_date: eventDate,
+      heading: `## Operator resolution — ${eventDate} (Open Engine OE-8E)`,
+      marker: resolutionMarker(task.id),
+      body: `Resolved by ${completedBy} on ${eventDate}: ${note}`,
+    });
+  }
+
+  return { appendable, skipped };
+}
+
+// Does one page of list_agent_tasks reach back far enough to have seen every
+// in-window resolution? list_agent_tasks orders updated_at DESC and caps at 50
+// server-side (Math.min(50, ...) — a client cannot raise it). For a terminal
+// task updated_at >= completed_at, so once the OLDEST returned row predates the
+// cutoff, everything below it is older still and the window is fully covered.
+// A full 50-row page is therefore NOT truncation by itself: it is truncation
+// only when the page never reached back past the cutoff. Getting this wrong is
+// how a flag ends up permanently true and stops being read.
+export function scanCoversWindow(rows, cutoffMs, limit) {
+  if (rows.length < limit) return true;
+  const oldestMs = new Date(rows[rows.length - 1]?.updated_at || 0).getTime();
+  return Number.isFinite(oldestMs) && oldestMs < cutoffMs;
+}
+
+// Tracker only, by design: the resolution is a status/decision record. The
+// session log already carries the executor narrative from the original
+// closeout; duplicating a long operator note into both files doubles noise
+// for zero retrieval gain.
+export function appendResolutionBlock(item) {
+  return appendCloseoutBlock(
+    item.tracker_path,
+    item.heading,
+    item.marker,
+    item.body,
+  );
+}
+
+async function runOperatorResolutionSweep(args, registry) {
+  const config = mcpConfigFromEnv();
+  const listed = await mcpCall(config, "list_agent_tasks", {
+    statuses: ["Agent Done"],
+    include_done: true,
+    limit: RESOLUTION_SCAN_LIMIT,
+  });
+  const rows = Array.isArray(listed) ? listed : (listed?.tasks || []);
+  const cutoffMs = Date.now() - args.lookbackDays * 24 * 60 * 60 * 1000;
+  const candidates = rows.filter((row) => {
+    const completedMs = new Date(row.completed_at || 0).getTime();
+    return Number.isFinite(completedMs) && completedMs >= cutoffMs;
+  });
+
+  const packets = [];
+  for (const row of candidates) {
+    packets.push(await mcpCall(config, "get_agent_task", { task_id: row.id }));
+  }
+
+  const evaluated = evaluateResolutionSweep(packets, registry, {
+    lookbackDays: args.lookbackDays,
+  });
+  const result = {
+    mode: "operator-resolution-sweep",
+    dry_run: !!args.liveCheck,
+    lookback_days: args.lookbackDays,
+    scan_limit: RESOLUTION_SCAN_LIMIT,
+    scan_truncated: !scanCoversWindow(rows, cutoffMs, RESOLUTION_SCAN_LIMIT),
+    swept: packets.length,
+    appended: [],
+    skipped: evaluated.skipped,
+    captures: [],
+  };
+
+  for (const item of evaluated.appendable) {
+    if (args.liveCheck) {
+      result.appended.push({
+        task_id: item.task_id,
+        path: item.tracker_path,
+        action: "would-append",
+      });
+      continue;
+    }
+    const write = appendResolutionBlock(item);
+    result.appended.push({ task_id: item.task_id, ...write });
+    // Capture only on a real first append: a marker-skipped task was already
+    // captured (or deliberately pre-seeded) on a prior run.
+    if (write.action === "appended" && !args.noCapture) {
+      const capture = await mcpCall(config, "capture_thought", {
+        content: item.body,
+        tags: [item.capture_tag, "open_engine", "operator-resolution"],
+      });
+      result.captures.push({
+        task_id: item.task_id,
+        capture_result: capture,
+      });
+    }
+  }
+
+  console.log(JSON.stringify(result, null, 2));
 }
 
 async function runLive(args, registry) {
@@ -1183,6 +1643,44 @@ async function runLive(args, registry) {
     throw new Error(`Expected ${args.expect}, got ${result.status}.`);
   }
 
+  // OE-13 Sub-phase B (Fork A): re-run the packet's check in isolation and key
+  // the apply on the controller's OWN exit 0 — the receipt's verification claim
+  // is never trusted for a check_spec task. Non-zero => print + refuse; the
+  // task stays in Agent Review untouched. Runs before the journal exists so a
+  // failed check leaves zero apply residue (no journal, no board write, no
+  // file append).
+  for (const item of [...result.apply]) {
+    if (!item.executed_check) continue;
+    const verdict = runExecutedCheck(item.executed_check);
+    item.executed_check = {
+      runner: item.executed_check.runner,
+      args: item.executed_check.args,
+      ref: item.executed_check.ref,
+      repo: item.executed_check.repo,
+      pending: false,
+      passed: verdict.passed,
+      exit_code: verdict.exit_code,
+      reason: verdict.reason,
+      output_tail: verdict.output,
+    };
+    if (!verdict.passed) {
+      result.status = "HELD";
+      result.hold.push({
+        task_id: item.task_id,
+        project_slug: item.project_slug || null,
+        reasons: [verdict.reason],
+        message: verdict.message,
+      });
+      result.apply = result.apply.filter(
+        (entry) => entry.task_id !== item.task_id,
+      );
+      printResult(result);
+      throw new Error(
+        "Refusing to apply: the executed check did not pass. The task stays in Agent Review.",
+      );
+    }
+  }
+
   const journal = writeApplyJournal(args.journalDir, args.taskId, result);
   result.journal = { path: journal.path, state: journal.state };
 
@@ -1210,6 +1708,17 @@ async function runLive(args, registry) {
           required_sections_present: REQUIRED_RECEIPT_SECTIONS,
           augmented_sections: item.augmented_sections,
           review_note_augmentation: item.augmentation_text || undefined,
+          // OE-13: the controller's own executed-check verdict (spec §10 watch
+          // surface — the briefing reads it off this immutable event).
+          executed_check: item.executed_check
+            ? {
+              runner: item.executed_check.runner,
+              args: item.executed_check.args,
+              ref: item.executed_check.ref,
+              exit_code: item.executed_check.exit_code,
+              output_tail: item.executed_check.output_tail,
+            }
+            : undefined,
         },
       });
       result.applied.push({ task_id: item.task_id, apply_result: applyResult });
@@ -1478,6 +1987,10 @@ async function main() {
   }
   if (args.resumeTaskId) {
     await resumeCloseout(args);
+    return;
+  }
+  if (args.operatorResolutionSweep) {
+    await runOperatorResolutionSweep(args, loadRegistry(args.registry));
     return;
   }
   if (args.liveCheck || args.apply) {

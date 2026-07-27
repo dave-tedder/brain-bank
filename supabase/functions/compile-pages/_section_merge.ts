@@ -6,8 +6,6 @@
 // and reserializes the result. Compile output cost is O(change_size), not
 // O(page_size), which is what kept high-traffic pages in the 2026-05-11
 // timeout death loop.
-//
-// See docs/superpowers/specs/2026-05-11-structured-edit-synthesis-refactor.md.
 
 export type EditAction = "prepend" | "update" | "append" | "create";
 

@@ -20,9 +20,11 @@ Schedule the executor slot ahead of the closeout controller so an executed task 
 
 ### Local scheduled task (full local toolset)
 
-Run it as a Claude Code **local scheduled task** (a `SKILL.md` under `~/.claude/scheduled-tasks/`, e.g. cron `0 7 * * *` local time). This runs with the full local MCP toolset — direct `mcp__*` board calls, no curl/env plumbing. Trade-off: local tasks only run while the Claude app is open on the host machine (a missed slot fires on next launch).
+Run it as a Claude Code **local scheduled task** (a `SKILL.md` under `~/.claude/scheduled-tasks/`, e.g. cron `0 7 * * *` local time). This runs with the full local MCP toolset — direct `mcp__*` board calls, no curl/env plumbing. Trade-off: local tasks only run while the Claude app is open on the host machine (a missed slot fires on next launch). Start from `local-task-skill-template.md` in this directory: it is the hardened SKILL body (unattended-safe tool discipline, the three permission gates, the write-safe policy, deliverables durability push, the receipt contract) with placeholders for your agent code, paths, and voice rules.
 
 Operator step (once): click "Run now" on the task in the Scheduled sidebar section and approve its tool prompts, so future runs don't pause on permissions.
+
+**Running more than one slot per day.** One scheduled task claims one task per fire. If your board fills faster than one claim per day clears it, create additional local scheduled tasks from the same `local-task-skill-template.md` — byte-identical bodies apart from the cron time — so several slots run overnight (or across a day) instead of one. This is a throughput knob, not a different mechanism: each slot still claims and completes exactly one low-risk task per fire, so N slots means roughly N claims per day rather than a bigger claim.
 
 ### Cloud routine (machine-independent)
 

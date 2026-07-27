@@ -41,6 +41,7 @@ import {
   buildAgentTaskIntakeRecord,
   buildFollowUpTaskRecord,
   buildThoughtIntakeRecord,
+  validateCloseCheck,
   THOUGHT_TEMPLATE_PREFIX,
 } from "./_agent_intake.ts";
 import {
@@ -52,6 +53,7 @@ import {
   type AgentTaskToolAction,
   assertAgentCanWriteTask,
   assertAutoPromotionCallerAllowed,
+  isReconcilerCloser,
   assertClaimTokenMatches,
   assertClaimAllowed,
   assertIntakePromotionAllowed,
@@ -262,7 +264,8 @@ function normalizeActionText(s: string): string {
 // "this source never resolves action items."
 // Structural prefixes are universal (every operator has these sync sources).
 // Operator-specific bridge prefixes come from profile.json — see
-// `supabase/functions/_shared/profile.example.json`.
+// `profile.example.json` at the repo root (copied to
+// `supabase/functions/_shared/profile.json` during setup).
 const MECHANICAL_CAPTURE_PREFIXES = [
   "[Calendar Sync]",
   "[Notion Sync]",
@@ -273,8 +276,7 @@ const MECHANICAL_CAPTURE_PREFIXES = [
   ...loadProfile().mechanical_capture_prefixes,
 ];
 
-// MCP tool-surface enum values sourced from profile. See task 3.8 spec at
-// docs/superpowers/specs/2026-04-20-event-type-enum-profile-wiring-design.md
+// MCP tool-surface enum values sourced from profile.
 const eventTypes = loadProfile().event_types;
 const contentTypes = loadProfile().content_types;
 
@@ -754,11 +756,35 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local, check_spec, close_check";
 
 // Internal load for the receipt-guard path only: includes claim_token so
 // assertClaimTokenMatches can pre-check. Never use for list/get responses.
 const AGENT_TASK_LOAD_SELECT = `${AGENT_TASK_SELECT}, claim_token`;
+
+// Scan projection for lanes that sweep the whole board and only need to decide
+// WHICH cards to act on, not to read them. Full packets stop fitting once the
+// board has history: a 26-row Needs Operator listing measured 296,561
+// characters and blew the MCP response cap, and 152,858 of the 254,239 content
+// characters were review_reason alone (the AGENT DONE receipts), with context
+// and do_steps next. Every dropped column is long-form prose a scanning lane
+// never reads; check_spec is KEPT because it is an eligibility question, and
+// operator_action because it is what makes a board row legible to a human. A
+// lane that needs the full packet for one card calls get_agent_task on that id.
+// Default stays "full" so no existing caller moves.
+//
+// desired_outcome is the one prose field KEPT, and deliberately. It is an
+// eligibility input, not a receipt: the sentinel's perpetual-canary rule
+// matches "perpetual" plus "canary"/"tripwire" against title OR
+// desired_outcome, so dropping it would silently break canary detection and
+// make a standing tripwire read as an ordinary old draft. It is also bounded
+// by design (345 characters average, 831 max, ~9K across a 26-row board)
+// because it holds the one-line "what is true when this is done", not the
+// work. Keeping it costs a fraction of review_reason's ~5,900 bytes/row and
+// gives one projection every scanning lane uses unmodified, instead of a
+// per-status special case in three separate routine prompts.
+const AGENT_TASK_COMPACT_SELECT =
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec, close_check";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -1838,6 +1864,9 @@ server.registerTool(
         "Set true to include archived (retired smoke/history) tasks. Default excludes them.",
       ),
       limit: z.number().int().min(1).max(50).optional(),
+      view: z.enum(["full", "compact"]).optional().describe(
+        'Response projection. "full" (default) returns whole packets. "compact" drops the long prose fields (review_reason, context, do_steps, acceptance_criteria, desired_outcome, boundaries, sources, output_handoff, critic_flags, blocked_reason, last_failure_reason) and keeps identifiers, routing, desired_outcome, operator_action, check_spec and close_check. Use it for whole-board scans: a full 26-row listing measured 296K characters and exceeds the response cap. Fetch any single packet you actually need with get_agent_task.',
+      ),
     },
   },
   async (
@@ -1849,6 +1878,7 @@ server.registerTool(
       include_done,
       include_archived,
       limit,
+      view,
     }: {
       statuses?: AgentTaskStatus[];
       agent_code?: string;
@@ -1857,6 +1887,7 @@ server.registerTool(
       include_done?: boolean;
       include_archived?: boolean;
       limit?: number;
+      view?: "full" | "compact";
     },
   ) => {
     logToolInvocation("list_agent_tasks", {
@@ -1867,12 +1898,22 @@ server.registerTool(
       include_done,
       include_archived,
       limit,
+      view,
     }, "mcp");
     try {
       const cap = Math.max(1, Math.min(50, limit ?? 20));
+      // Annotated `string`, not the inferred literal union. supabase-js parses
+      // the select list at the TYPE level, so handing .select() a ternary makes
+      // it represent both parsed row shapes at once and the compiler gives up
+      // (TS2589 "excessively deep", TS2590 "union too complex"). Widening to
+      // string drops row-type inference here, which costs nothing: this handler
+      // serializes `data` straight to JSON and never reads a field off it.
+      const selectColumns: string = view === "compact"
+        ? AGENT_TASK_COMPACT_SELECT
+        : AGENT_TASK_SELECT;
       let query = supabase
         .from("agent_tasks")
-        .select(AGENT_TASK_SELECT)
+        .select(selectColumns)
         .order("updated_at", { ascending: false })
         .limit(cap);
       if (statuses && statuses.length > 0) {
@@ -1889,7 +1930,11 @@ server.registerTool(
 
       const { data, error } = await query;
       if (error) throw error;
-      return textToolResponse({ count: data?.length ?? 0, tasks: data ?? [] });
+      return textToolResponse({
+        count: data?.length ?? 0,
+        view: view ?? "full",
+        tasks: data ?? [],
+      });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error listing agent tasks: ${(err as Error).message}`,
@@ -1967,6 +2012,12 @@ server.registerTool(
       title: z.string().min(1).optional(),
       source_thought_id: z.string().uuid().optional(),
       linked_action_item_id: z.string().uuid().optional(),
+      check_spec: z.record(z.unknown()).optional().describe(
+        "OE-13 executed-check spec ({runner, args[]}) from the fixed runner allowlist. Immutable after intake; only set it when the closeout gate should re-run this check in isolation and auto-apply on ITS exit 0. Leave unset for the normal human-read gate.",
+      ),
+      close_check: z.record(z.unknown()).optional().describe(
+        "Board-hygiene reconciliation probe ({probe, ...}) from the fixed four-verb allowlist: http_contains, wp_post_status, git_path_exists, git_commit_contains. Write-once. Read by the scheduled reconciler lane, which may only ever auto-close a Needs Operator card, never reopen or re-flag one. Operator-authored only in first scope: a triage-agent intake carrying one is refused. Leave unset for the normal human-read desk.",
+      ),
     },
   },
   async (
@@ -1989,6 +2040,8 @@ server.registerTool(
       title?: string;
       source_thought_id?: string;
       linked_action_item_id?: string;
+      check_spec?: Record<string, unknown>;
+      close_check?: Record<string, unknown>;
     },
   ) => {
     logToolInvocation("create_agent_task_intake", {
@@ -2002,7 +2055,10 @@ server.registerTool(
       linked_action_item_id: args.linked_action_item_id,
     }, "mcp");
     try {
-      const record = buildAgentTaskIntakeRecord(args);
+      const record = buildAgentTaskIntakeRecord({
+        ...args,
+        wordpress_sites: loadProfile().wordpress_sites ?? [],
+      });
       const { data, error } = await supabase
         .from("agent_tasks")
         .insert(record)
@@ -3065,7 +3121,7 @@ server.registerTool(
   {
     title: "Complete Operator Action",
     description:
-      "Close a Needs Operator task after the operator has done the outside-system step. Moves Needs Operator to Agent Done with an OPERATOR DONE receipt and resolves the linked action item when one exists. completed_by must name the human operator; anonymous callers, registered agent codes, and automated-runtime identities are refused.",
+      "Close a Needs Operator task after the operator has done the outside-system step. Moves Needs Operator to Agent Done with an OPERATOR DONE receipt and resolves the linked action item when one exists. completed_by must name the human operator; anonymous callers, registered agent codes, and automated-runtime identities are refused. ONE exception: the reconciler lane, which closes a card only on a packet-authored close_check probe returning an exact match, and must carry the probe, the assertion, what was measured, and measured_by in the note. An OPERATOR DONE from that lane means 'evidence was observed', not 'a human reported it'.",
     inputSchema: {
       task_id: z.string().uuid(),
       completed_by: z.string().min(1).describe(
@@ -3088,14 +3144,38 @@ server.registerTool(
       completed_by,
     }, "mcp");
     try {
-      const { data: ledgerRows, error: ledgerError } = await supabase
-        .from("agent_task_ledger")
-        .select("agent_code");
-      if (ledgerError) throw ledgerError;
-      assertPromotionCallerAllowed(
-        completed_by,
-        (ledgerRows ?? []).map((row: { agent_code: string }) => row.agent_code),
-      );
+      if (isReconcilerCloser(completed_by)) {
+        // The reconciler carve-out is scoped to cards that OPTED IN. A desk card
+        // with no close_check was never eligible for reconciliation, so the lane
+        // has no business closing it, and anything presenting the lane's identity
+        // against a non-opted-in card is refused here rather than trusted.
+        // Server-side, so it holds even if the SKILL is edited or misread.
+        const { data: taskRow, error: taskError } = await supabase
+          .from("agent_tasks")
+          .select("id, close_check")
+          .eq("id", task_id)
+          .single();
+        if (taskError) throw taskError;
+        if (!taskRow?.close_check) {
+          throw new Error(
+            "The reconciler lane may only close a card carrying a packet-authored close_check. This card has none, so it is not reconciliation-eligible and stays on the human-read desk.",
+          );
+        }
+        if (!note || note.trim().length === 0) {
+          throw new Error(
+            "The reconciler lane must supply a note carrying the probe, the assertion, what was measured, and measured_by. A silent auto-close is worse than a re-surfacing card.",
+          );
+        }
+      } else {
+        const { data: ledgerRows, error: ledgerError } = await supabase
+          .from("agent_task_ledger")
+          .select("agent_code");
+        if (ledgerError) throw ledgerError;
+        assertPromotionCallerAllowed(
+          completed_by,
+          (ledgerRows ?? []).map((row: { agent_code: string }) => row.agent_code),
+        );
+      }
       const { data, error } = await supabase.rpc("complete_operator_action", {
         p_task_id: task_id,
         p_completed_by: completed_by,
@@ -3153,7 +3233,7 @@ server.registerTool(
   {
     title: "Admin Amend Agent Task",
     description:
-      "Ops-correction escape hatch (C3). One honest verb for board fixes that otherwise need raw SQL: set project_slug, append sources, set operator_action/operator_target, set requires_local, move a terminal Agent Done or Agent Review task back onto the Needs Operator desk, and/or release a stuck claim (the folded handoff). Never touches attempt_count, never writes a false AGENT FAILED, never edits an existing event. Writes exactly one honest audit event (AGENT NEEDS OPERATOR when moving to the desk, else AGENT STATUS). Human/ops use only — not for executor lanes.",
+      "Ops-correction escape hatch (C3). One honest verb for board fixes that otherwise need raw SQL: set project_slug, append sources, set operator_action/operator_target, set requires_local, move a held or terminal task onto the Needs Operator desk, author or clear a close_check, and/or release a stuck claim (the folded handoff). Never touches attempt_count, never writes a false AGENT FAILED, never edits an existing event. Writes exactly one honest audit event (AGENT NEEDS OPERATOR when moving to the desk, else AGENT STATUS). Human/ops use only — not for executor lanes.",
     inputSchema: {
       task_id: z.string().uuid(),
       reason: z.string().min(1).describe(
@@ -3172,10 +3252,16 @@ server.registerTool(
         "Set the C2 hard runtime constraint on this task.",
       ),
       move_to_needs_operator: z.boolean().optional().describe(
-        "Move an Agent Done or Agent Review task to Needs Operator. Requires an operator_action (existing or set in this call).",
+        "Move a task to Needs Operator. Legal from Agent Done, Agent Review, Agent Needs Input, Agent Todo, and Agent Working. Requires an operator_action (existing or set in this call), which is the honesty guard: the closer must state which step was performed. A live claim on an Agent Working row is refused unless release_claim is passed in the same call. This is the honest route for work finished OUT OF BAND: desk-move with a stated operator_action, then complete_operator_action with the evidence in the note. Never a claim plus a fabricated AGENT DONE receipt.",
       ),
       release_claim: z.boolean().optional().describe(
         "Clear claimed_by/claim_token/claim_expires_at without a status change or a false AGENT FAILED — the honest cross-runtime handoff.",
+      ),
+      set_close_check: z.record(z.unknown()).optional().describe(
+        "Author the reconciliation probe on a card already on the desk ({probe, ...} from the fixed four-verb allowlist). WRITE-ONCE: a close_check can be authored once and cleared, but never re-aimed at a different assertion. To correct one, clear it first, then author the corrected check.",
+      ),
+      clear_close_check: z.boolean().optional().describe(
+        "Clear this card's close_check, returning it to the human-read desk. The first-line rollback lever for a bad probe. Cannot be combined with set_close_check.",
       ),
     },
   },
@@ -3191,6 +3277,8 @@ server.registerTool(
       set_requires_local,
       move_to_needs_operator,
       release_claim,
+      set_close_check,
+      clear_close_check,
     }: {
       task_id: string;
       reason: string;
@@ -3202,14 +3290,25 @@ server.registerTool(
       set_requires_local?: boolean;
       move_to_needs_operator?: boolean;
       release_claim?: boolean;
+      set_close_check?: Record<string, unknown>;
+      clear_close_check?: boolean;
     },
   ) => {
     logToolInvocation("admin_amend_agent_task", {
       task_id,
       move_to_needs_operator: move_to_needs_operator === true,
       release_claim: release_claim === true,
+      set_close_check: set_close_check !== undefined,
+      clear_close_check: clear_close_check === true,
     }, "mcp");
     try {
+      // Shape-validated here so a bad probe is refused at authorship, sharing the
+      // exact validator the intake path uses. The SQL trigger is the backstop
+      // against a silent re-aim, not against a malformed check.
+      const validatedCloseCheck = validateCloseCheck(
+        set_close_check ?? null,
+        loadProfile().wordpress_sites ?? [],
+      );
       const { data, error } = await supabase.rpc("admin_amend_agent_task", {
         p_task_id: task_id,
         p_reason: reason,
@@ -3223,6 +3322,8 @@ server.registerTool(
           : null,
         p_move_to_needs_operator: move_to_needs_operator === true,
         p_release_claim: release_claim === true,
+        p_set_close_check: validatedCloseCheck,
+        p_clear_close_check: clear_close_check === true,
       });
       if (error) throw error;
       return textToolResponse({
@@ -3565,6 +3666,7 @@ server.registerTool(
         .enum(["installed", "manual-required", "blocked", "paused"])
         .optional(),
       last_queue_result: z.string().optional(),
+      last_successful_run: z.string().datetime().nullable().optional(),
       local_context: z.string().optional(),
       optional_skills: z.array(z.string()).optional(),
       notes: z.string().optional(),
@@ -3575,6 +3677,7 @@ server.registerTool(
       agent_code,
       automation_state,
       last_queue_result,
+      last_successful_run,
       local_context,
       optional_skills,
       notes,
@@ -3582,6 +3685,7 @@ server.registerTool(
       agent_code: string;
       automation_state?: string;
       last_queue_result?: string;
+      last_successful_run?: string | null;
       local_context?: string;
       optional_skills?: string[];
       notes?: string;
@@ -3591,6 +3695,7 @@ server.registerTool(
       agent_code,
       automation_state,
       last_queue_result,
+      last_successful_run,
       local_context,
       optional_skills,
     }, "mcp");
@@ -3598,13 +3703,26 @@ server.registerTool(
       if (automation_state && !isLedgerAutomationState(automation_state)) {
         throw new Error(`Invalid automation_state: ${automation_state}`);
       }
+      const nowIso = new Date().toISOString();
       const patch = compactObject({
         automation_state,
         last_queue_result,
+        // Server-stamp last_successful_run when the caller OMITS it. A model has
+        // no clock, so its self-reported "now" is untrusted: a lane that guesses
+        // the value future-stamps it, and a lane that omits it lets compactObject
+        // drop the field so the OLD value persists and the lane reads permanently
+        // fresh. Defaulting an omitted field to the server clock deletes the
+        // freeze mode for every lane at once, including any NEW lane a
+        // prompt-level fix has not reached. An explicit value still wins (a
+        // caller can deliberately set a PAST watermark), and an explicit null
+        // still clears the column.
+        last_successful_run: last_successful_run === undefined
+          ? nowIso
+          : last_successful_run,
         local_context,
         optional_skills,
         notes,
-        last_heartbeat: new Date().toISOString(),
+        last_heartbeat: nowIso,
       });
       const { data, error } = await supabase
         .from("agent_task_ledger")

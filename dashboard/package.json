@@ -14,7 +14,7 @@
     "@ai-sdk/openai": "^3.0.52",
     "@supabase/supabase-js": "^2.47.10",
     "ai": "^6.0.159",
-    "next": "^15.5.18",
+    "next": "^15.5.21",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-force-graph-2d": "^1.29.1",
@@ -30,6 +30,7 @@
     "typescript": "^5.7.0"
   },
   "overrides": {
-    "postcss": "^8.5.10"
+    "postcss": "^8.5.23",
+    "sharp": "^0.35.3"
   }
 }

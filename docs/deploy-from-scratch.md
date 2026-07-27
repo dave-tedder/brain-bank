@@ -187,15 +187,15 @@ You should see the non-`SUPABASE_` names: `OPENROUTER_API_KEY`, `MCP_ACCESS_KEY`
 supabase db push
 ```
 
-This applies every SQL file in `supabase/migrations/` to your Supabase project in order. There are twelve migrations: the `extensions` migration (pgvector, pgcrypto, pg_cron, pg_net), the core tables (`thoughts`, `action_items`, `clients`, `content_items`, `business_events`, `compiled_pages`, `notion_mappings`, `digests`), the `match_thoughts` similarity RPC, and a `drop_client_sessions` cleanup migration that removes a deprecated table from earlier in the sequence.
+This applies every SQL file in `supabase/migrations/` to your Supabase project in order. The sequence starts with the numbered core baseline — the `extensions` migration (pgvector, pgcrypto, pg_cron, pg_net), the core tables (`thoughts`, `action_items`, `clients`, `content_items`, `business_events`, `compiled_pages`, `notion_mappings`, `digests`), the `match_thoughts` similarity RPC, and a `drop_client_sessions` cleanup — and continues through the date-stamped migrations that build the wiki compilation surfaces, the projects model, and the whole Open Engine task board (schema, guards, critic verdicts, run log, watch views, auto-promote, the executed-check and board-hygiene packet fields). Run them all; the Open Engine layer is inert until you schedule its lanes, so applying it costs nothing.
 
-**What success looks like:** `Applying migration 0000_extensions.sql...` through `Applying migration 0011_drop_client_sessions.sql...`, each followed by `Finished supabase db push.`
+**What success looks like:** one `Applying migration ...` line per file, starting at `0000_extensions.sql`, each followed by `Finished supabase db push.` with no errors.
 
 **If it fails:**
 - `permission denied to create extension "vector"`: the CLI is talking to a Postgres where your role lacks `CREATE EXTENSION`. On Supabase-managed Postgres this should never happen; if it does, `cat supabase/.temp/project-ref` to confirm the CLI is linked to the project ref you expect.
 - `relation "thoughts" already exists`: migrations already ran against this project from a prior attempt. Cleanest reset is to delete the project in the Supabase dashboard and create a new one. Do not try to drop tables by hand unless you know what you are doing.
 
-Verify the schema landed. In the Supabase dashboard, go to Database → Tables. You should see nine tables: `thoughts`, `action_items`, `clients`, `content_items`, `business_events`, `compiled_pages`, `notion_mappings`, `digests`, and an internal `schema_migrations`.
+Verify the schema landed. In the Supabase dashboard, go to Database → Tables. You should see the eight core tables (`thoughts`, `action_items`, `clients`, `content_items`, `business_events`, `compiled_pages`, `notion_mappings`, `digests`), the Open Engine tables (`agent_tasks`, `agent_task_events`, `agent_task_ledger`, `agent_run_log`), supporting tables like `thought_edges`, `projects`, `openrouter_calls`, and `mcp_tool_invocations`, plus an internal `schema_migrations`.
 
 **Why this matters:** `supabase db push` is idempotent for migration files but not for hand-run SQL. If you mix migration-driven schema with one-off edits in the SQL editor, future `db push` calls may fail. Stick to migrations for schema changes.
 
@@ -335,11 +335,14 @@ create or replace function public.call_edge_function(
 ) returns bigint
 language plpgsql
 security definer
-set search_path = public, net, vault
+set search_path = pg_catalog, public, net, vault
 as $$
 declare
   v_key text;
+  v_base_url text;
+  v_query text;
   v_url text;
+  v_headers jsonb;
   v_request_id bigint;
 begin
   select decrypted_secret into v_key
@@ -350,25 +353,31 @@ begin
     raise exception 'vault secret mcp_access_key not found';
   end if;
 
-  v_url := format(
-    'https://<your-project-ref>.supabase.co/functions/v1/%s?%s%skey=%s',
-    function_slug,
-    query_string,
-    case when query_string = '' then '' else '&' end,
-    v_key
+  v_base_url := format(
+    'https://<your-project-ref>.supabase.co/functions/v1/%s',
+    function_slug
+  );
+  v_query := trim(leading '&' from trim(leading '?' from coalesce(query_string, '')));
+  v_url := case
+    when v_query = '' then v_base_url
+    else v_base_url || '?' || v_query
+  end;
+  v_headers := jsonb_build_object(
+    'Content-Type', 'application/json',
+    'x-brain-key', v_key
   );
 
-  if http_method = 'POST' then
+  if upper(http_method) = 'POST' then
     select net.http_post(
       url := v_url,
-      headers := '{"Content-Type": "application/json"}'::jsonb,
+      headers := v_headers,
       body := '{}'::jsonb,
       timeout_milliseconds := 30000
     ) into v_request_id;
-  elsif http_method = 'GET' then
+  elsif upper(http_method) = 'GET' then
     select net.http_get(
       url := v_url,
-      headers := '{"Content-Type": "application/json"}'::jsonb,
+      headers := v_headers,
       timeout_milliseconds := 30000
     ) into v_request_id;
   else
@@ -379,7 +388,8 @@ begin
 end;
 $$;
 
-revoke execute on function public.call_edge_function(text, text, text) from public;
+revoke execute on function public.call_edge_function(text, text, text)
+  from public, anon, authenticated;
 ```
 
 **What success looks like:** `CREATE FUNCTION` in the query output. A quick test call:
@@ -389,6 +399,8 @@ select public.call_edge_function('open-brain-mcp', 'health=1', 'GET');
 ```
 
 should return a bigint (the `net.http_*` request ID), and inspecting `select * from net._http_response order by id desc limit 1;` shortly after should show a 200 response.
+
+**Why the key travels as an `x-brain-key` header, not a URL parameter:** query strings are retained by HTTP access logs, proxy logs, and `net._http_response` rows, so a `?key=...` URL quietly copies your access key into every log surface between Postgres and the Edge Function. The header form keeps the key out of URL-shaped storage; the Edge Functions accept both, but new deployments should only ever use the header.
 
 **Why `timeout_milliseconds := 30000`:** pg_net's default request timeout is 5 seconds. The `brain-digest` synthesis path can run 7 to 25 seconds depending on the LLM round-trip and the number of thoughts being summarized; `compile-pages` can be similar when it has to compile fresh pages. Without the explicit 30-second timeout, pg_net records `Timeout of 5000 ms reached` in `net._http_response.error_msg`, even though the Edge Function continues running and finishes the work successfully (Edge Functions run independently of the pg_net client connection). The cron job appears to have failed when it actually delivered. Setting the timeout to 30000ms aligns the pg_net client window with the Edge Function's true completion time and makes `net._http_response` a truthful diagnostic.
 

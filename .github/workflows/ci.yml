@@ -28,8 +28,16 @@ jobs:
         with:
           deno-version: v2.x
 
+      # Whole directory, not one named file. CI previously ran only
+      # _agent_tasks_test.ts, so every other suite in this workspace could ship
+      # broken and stay green.
       - name: Run engine Deno tests (open-brain-mcp)
-        run: deno test --allow-read --allow-env --config supabase/functions/open-brain-mcp/deno.json supabase/functions/open-brain-mcp/_agent_tasks_test.ts
+        run: deno test --allow-read --allow-env --config supabase/functions/open-brain-mcp/deno.json supabase/functions/open-brain-mcp/
+
+      # Separate step because deno.json's workspace scopes resolution to
+      # open-brain-mcp, so these suites are invisible to the run above.
+      - name: Run Deno tests (brain-digest, _shared)
+        run: deno test --allow-read --allow-env supabase/functions/brain-digest/ supabase/functions/_shared/
 
       # Type-checks the whole module graph, including the profile.json import.
       # This is what catches a fresh-clone break that the tests above miss.
@@ -39,8 +47,10 @@ jobs:
       - name: Verify queue-runner skill contract
         run: node skills/queue-runner/verify.mjs
 
-      - name: Run closeout-controller tests
-        run: node --test scripts/open-engine/closeout-controller.test.mjs
+      # Globbed, not named one by one. Naming each file is how a new suite ships
+      # green locally and never runs in CI at all.
+      - name: Run open-engine tests
+        run: node --test scripts/open-engine/*.test.mjs
 
       - name: Install Node
         uses: actions/setup-node@v4

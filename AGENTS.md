@@ -72,6 +72,8 @@ brain-bank/
 - **What is Brain Bank, what does it do?** [`README.md`](./README.md)
 - **How do I deploy a fresh copy?** [`docs/deploy-from-scratch.md`](./docs/deploy-from-scratch.md), or run `/brain-bank-setup` in Claude Code
 - **How do I wire up a capture source?** [`docs/capture-sources/`](./docs/capture-sources/)
+- **What capture prefixes improve extraction accuracy?** [`docs/capture-templates.md`](./docs/capture-templates.md)
+- **What does a full lane schedule look like?** [`docs/operations/daily-pipeline-schedule.md`](./docs/operations/daily-pipeline-schedule.md)
 - **Something is broken.** [`docs/troubleshooting.md`](./docs/troubleshooting.md)
 - **What changed in this release?** [`CHANGELOG.md`](./CHANGELOG.md)
 - **Dashboard-specific guidance.** [`dashboard/AGENTS.md`](./dashboard/AGENTS.md)

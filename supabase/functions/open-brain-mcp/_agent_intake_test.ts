@@ -13,6 +13,9 @@ import {
   buildThoughtIntakeRecord,
   FOLLOW_UP_TEMPLATE_BOUNDARIES,
   FOLLOW_UP_TEMPLATE_DO_STEPS,
+  assertCloseCheckAuthorAllowed,
+  validateCheckSpec,
+  validateCloseCheck,
 } from "./_agent_intake.ts";
 
 const baseInput = {
@@ -683,4 +686,421 @@ Deno.test("promote guard leaves action-item stubs alone (warn-only stays)", () =
     },
     false,
   ); // must not throw — D3 refuses only the follow-up template
+});
+
+// --------------------------------------------------------------------------
+// OE-13 Sub-phase B — check_spec intake validator (server mirror of the
+// controller's parseCheckSpec: same runners, same bounds, same arg pattern).
+// --------------------------------------------------------------------------
+
+Deno.test("validateCheckSpec: null/undefined pass through as null", () => {
+  assertEquals(validateCheckSpec(null), null);
+  assertEquals(validateCheckSpec(undefined), null);
+});
+
+Deno.test("validateCheckSpec: accepts allowlisted runner with bounded args", () => {
+  assertEquals(
+    validateCheckSpec({ runner: "deno-check", args: ["index.ts"] }),
+    { runner: "deno-check", args: ["index.ts"] },
+  );
+});
+
+Deno.test("validateCheckSpec: rejects unknown runner", () => {
+  assertThrows(
+    () => validateCheckSpec({ runner: "bash", args: ["-c", "true"] }),
+    Error,
+    "check_spec.runner",
+  );
+});
+
+Deno.test("validateCheckSpec: rejects shell metacharacters and whitespace", () => {
+  assertThrows(() =>
+    validateCheckSpec({ runner: "node-test", args: ["a; rm -rf /"] })
+  );
+  assertThrows(() =>
+    validateCheckSpec({ runner: "node-test", args: ["$(id)"] })
+  );
+  assertThrows(() => validateCheckSpec({ runner: "node-test", args: ["a b"] }));
+});
+
+Deno.test("validateCheckSpec: rejects unknown keys and arg-count violations", () => {
+  assertThrows(() =>
+    validateCheckSpec({ runner: "node-test", args: [], cwd: "/" })
+  );
+  assertThrows(() => validateCheckSpec({ runner: "npm-run", args: [] }));
+  assertThrows(() => validateCheckSpec({ runner: "npm-test", args: ["x"] }));
+});
+
+Deno.test("buildAgentTaskIntakeRecord: carries a validated check_spec; defaults to null", () => {
+  const base = {
+    desired_outcome: "ship parseThing",
+    context: "ctx",
+    sources: [],
+    do_steps: "do",
+    acceptance_criteria: "ok",
+    output_handoff: "handoff",
+    boundaries: "none",
+    intake_source: "handoff-doc" as const,
+  };
+  const withCheck = buildAgentTaskIntakeRecord({
+    ...base,
+    check_spec: { runner: "node-test", args: ["parse-thing.test.mjs"] },
+  });
+  assertEquals(withCheck.check_spec, {
+    runner: "node-test",
+    args: ["parse-thing.test.mjs"],
+  });
+  const without = buildAgentTaskIntakeRecord(base);
+  assertEquals(without.check_spec, null);
+});
+
+// --------------------------------------------------------------------------
+// Board-hygiene reconciliation — the close_check intake validator and the
+// operator-authored-only author gate.
+// --------------------------------------------------------------------------
+
+// Site handles a wp_post_status probe may name. In production these come from
+// profile.json's wordpress_sites; injected here so the validator stays a pure
+// function and these tests need no profile file.
+const WP_SITES = ["example-wp", "second-example-wp"];
+
+Deno.test("validateCloseCheck: null/undefined pass through as null (not eligible)", () => {
+  assertEquals(validateCloseCheck(null), null);
+  assertEquals(validateCloseCheck(undefined), null);
+});
+
+Deno.test("validateCloseCheck: accepts each of the four probe shapes", () => {
+  assertEquals(
+    validateCloseCheck({
+      probe: "http_contains",
+      url: "https://example.com/some-page",
+      assert: "Some Page Heading",
+      measured_by: "plain-get",
+    }),
+    {
+      probe: "http_contains",
+      url: "https://example.com/some-page",
+      assert: "Some Page Heading",
+      measured_by: "plain-get",
+    },
+  );
+  assertEquals(
+    validateCloseCheck({
+      probe: "wp_post_status",
+      site: "example-wp",
+      post_id: 1234,
+      assert: "publish",
+    }, WP_SITES),
+    {
+      probe: "wp_post_status",
+      site: "example-wp",
+      post_id: 1234,
+      assert: "publish",
+    },
+  );
+  assertEquals(
+    validateCloseCheck({
+      probe: "git_path_exists",
+      repo: "example-owner/example-repo",
+      path: "operator-dropbox/aftercare/",
+      assert: "new_file_since_card_entered_desk",
+    }),
+    {
+      probe: "git_path_exists",
+      repo: "example-owner/example-repo",
+      path: "operator-dropbox/aftercare/",
+      assert: "new_file_since_card_entered_desk",
+    },
+  );
+  assertEquals(
+    validateCloseCheck({
+      probe: "git_commit_contains",
+      repo: "example-owner/example-repo",
+      ref: "main",
+      assert: "path:src/tracker/spec7.ts",
+    }),
+    {
+      probe: "git_commit_contains",
+      repo: "example-owner/example-repo",
+      ref: "main",
+      assert: "path:src/tracker/spec7.ts",
+    },
+  );
+});
+
+// FAIL-CLOSED DEFAULT. A fork that has wired no WordPress credentials must not
+// be able to author a probe against a site it cannot reach. Unconfigured refuses
+// at authorship rather than failing later at probe time.
+Deno.test("validateCloseCheck: wp_post_status is refused when no sites are configured", () => {
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "wp_post_status",
+        site: "example-wp",
+        post_id: 1,
+        assert: "publish",
+      }),
+    Error,
+    "requires at least one configured WordPress site",
+  );
+  // The other three probes need no WordPress config and stay authorable.
+  assertEquals(
+    validateCloseCheck({
+      probe: "http_contains",
+      url: "https://example.com",
+      assert: "ok",
+    })?.probe,
+    "http_contains",
+  );
+});
+
+Deno.test("validateCloseCheck: rejects a fifth probe verb", () => {
+  assertThrows(
+    () => validateCloseCheck({ probe: "shell_exec", cmd: "true" }),
+    Error,
+    "close_check.probe must be one of",
+  );
+});
+
+// STRUCTURAL fields stay strict: they flow into fetch URLs, map keys, and `gh`
+// argv. Only http_contains.assert is content, and it is covered separately below.
+Deno.test("validateCloseCheck: rejects shell strings in STRUCTURAL fields", () => {
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "http_contains",
+        url: "https://example.com/$(id)",
+        assert: "ok",
+      }),
+    Error,
+    "shell metacharacters",
+  );
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "git_commit_contains",
+        repo: "example-owner/example-repo",
+        ref: "main;id",
+        assert: "path:a.ts",
+      }),
+    Error,
+  );
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "http_contains",
+        url: "https://example.com",
+        assert: "ok",
+        measured_by: "plain-get`id`",
+      }),
+    Error,
+    "shell metacharacters",
+  );
+});
+
+// A blanket ban across every field makes the feature unable to express its own
+// primary use case: it rejects a quoted JSON-LD token and it rejects a literal
+// `<title>` assertion. Asserting against HTML means asserting against quotes,
+// angle brackets, ampersands and braces.
+Deno.test("validateCloseCheck: http_contains.assert accepts real HTML and JSON-LD content", () => {
+  for (
+    const assertion of [
+      '"Monday"', // JSON-LD token, not the bare word in prose
+      "<title>Some Page", // a literal title assertion
+      '"@type": "OpeningHoursSpecification"',
+      "Bold color, traditional & character work.",
+      "Why is the whole project planned before the first session?",
+      "{\"closes\": \"19:00\"}",
+    ]
+  ) {
+    const out = validateCloseCheck({
+      probe: "http_contains",
+      url: "https://example.com",
+      assert: assertion,
+    });
+    assertEquals(out?.assert, assertion);
+  }
+});
+
+Deno.test("validateCloseCheck: http_contains.assert still refuses control characters", () => {
+  for (const bad of ["two\nlines", "tab\tsep", "nul\x00byte", "cr\rreturn"]) {
+    assertThrows(
+      () =>
+        validateCloseCheck({
+          probe: "http_contains",
+          url: "https://example.com",
+          assert: bad,
+        }),
+      Error,
+      "control characters",
+    );
+  }
+});
+
+// The looser rule is scoped to http_contains ONLY. Every other probe's assert
+// names a status or a path, not page content, and stays strict.
+Deno.test("validateCloseCheck: the content relaxation does NOT leak to other probes", () => {
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "git_commit_contains",
+        repo: "example-owner/example-repo",
+        ref: "main",
+        assert: 'path:"quoted".ts',
+      }),
+    Error,
+    "shell metacharacters",
+  );
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "wp_post_status",
+        site: "example-wp",
+        post_id: 1,
+        assert: '"publish"',
+      }, WP_SITES),
+    Error,
+  );
+});
+
+Deno.test("validateCloseCheck: rejects unknown keys and a non-https url", () => {
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "http_contains",
+        url: "https://example.com",
+        assert: "ok",
+        extra: "nope",
+      }),
+    Error,
+    "unknown keys",
+  );
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "http_contains",
+        url: "http://example.com",
+        assert: "ok",
+      }),
+    Error,
+    "must be an https:// URL",
+  );
+});
+
+// The highest-value single guard in the suite: a bare existence assertion would
+// falsely close every install-shape card, because the executor itself wrote the
+// file before the card ever reached the desk.
+Deno.test("validateCloseCheck: git_path_exists refuses any assert but the since-desk clause", () => {
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "git_path_exists",
+        repo: "example-owner/example-repo",
+        path: "operator-dropbox/aftercare/",
+        assert: "exists",
+      }),
+    Error,
+    "new_file_since_card_entered_desk",
+  );
+});
+
+Deno.test("validateCloseCheck: git_path_exists refuses a lane-written folder", () => {
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "git_path_exists",
+        repo: "example-owner/example-repo",
+        path: "deliverables/example-project/aftercare/",
+        assert: "new_file_since_card_entered_desk",
+      }),
+    Error,
+    "exclusively an operator drop-box",
+  );
+});
+
+Deno.test("validateCloseCheck: rejects path traversal and an unlisted wp site", () => {
+  assertThrows(() =>
+    validateCloseCheck({
+      probe: "git_path_exists",
+      repo: "example-owner/example-repo",
+      path: "../../etc/passwd",
+      assert: "new_file_since_card_entered_desk",
+    })
+  );
+  assertThrows(
+    () =>
+      validateCloseCheck({
+        probe: "wp_post_status",
+        site: "some-other-wp",
+        post_id: 1,
+        assert: "publish",
+      }, WP_SITES),
+    Error,
+    "close_check.site must be one of",
+  );
+});
+
+Deno.test("assertCloseCheckAuthorAllowed: refuses a triage-agent intake carrying a close_check", () => {
+  const probe = {
+    probe: "http_contains",
+    url: "https://example.com",
+    assert: "ok",
+  };
+  assertThrows(
+    () => assertCloseCheckAuthorAllowed("triage-agent", probe),
+    Error,
+    "operator-authored only",
+  );
+  // A triage-agent draft with no close_check is untouched by the gate.
+  assertCloseCheckAuthorAllowed("triage-agent", null);
+  assertCloseCheckAuthorAllowed("triage-agent", undefined);
+  // Every other provenance may author one.
+  assertCloseCheckAuthorAllowed("handoff-doc", probe);
+  assertCloseCheckAuthorAllowed("dashboard-button", probe);
+});
+
+Deno.test("buildAgentTaskIntakeRecord: carries a validated close_check; defaults to null; refuses triage-agent", () => {
+  const base = {
+    desired_outcome: "ship the thing",
+    context: "ctx",
+    sources: [],
+    do_steps: "do",
+    acceptance_criteria: "ok",
+    output_handoff: "handoff",
+    boundaries: "none",
+    intake_source: "handoff-doc" as const,
+  };
+  const withCheck = buildAgentTaskIntakeRecord({
+    ...base,
+    close_check: {
+      probe: "wp_post_status",
+      site: "example-wp",
+      post_id: 42,
+      assert: "publish",
+    },
+    wordpress_sites: WP_SITES,
+  });
+  assertEquals(withCheck.close_check, {
+    probe: "wp_post_status",
+    site: "example-wp",
+    post_id: 42,
+    assert: "publish",
+  });
+  assertEquals(buildAgentTaskIntakeRecord(base).close_check, null);
+  assertThrows(
+    () =>
+      buildAgentTaskIntakeRecord({
+        ...base,
+        intake_source: "triage-agent" as const,
+        close_check: {
+          probe: "wp_post_status",
+          site: "example-wp",
+          post_id: 42,
+          assert: "publish",
+        },
+        wordpress_sites: WP_SITES,
+      }),
+    Error,
+    "operator-authored only",
+  );
 });

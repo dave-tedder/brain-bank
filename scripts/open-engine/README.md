@@ -17,42 +17,44 @@ Print the read-only SQL bundle:
 node scripts/open-engine/closeout-controller.mjs --sql
 ```
 
-Run the OE-8A fixtures (all rebuilt from real event shapes in Session 266):
+Run the fixtures. Every fixture is synthetic (zeroed UUIDs, generic slugs) and
+routes through the shipped `fixtures/test-registry.json`, so these run from a
+clean clone with no operator registry:
 
 ```bash
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-c29a181d.json --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-648e6e1c.json --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-applyable-projected.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-mixed.json --expect MIXED
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-inline-headings.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-action.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-action-only.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-marker-outside-followup.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-marker-injection.json --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-duplicate-heading.json --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-duplicate-done-latest-wins.json --expect APPLYABLE
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-task-not-found.json --task-id 9708e713-6f98-420a-9a39-22bbae011ec1 --expect HELD
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-needs-operator-status.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-applyable.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-missing-sections.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-standing-risk.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-mixed.json --registry scripts/open-engine/fixtures/test-registry.json --expect MIXED
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-inline-headings.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-action.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-action-only.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-operator-marker-outside-followup.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-marker-injection.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-duplicate-heading.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-duplicate-done-latest-wins.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-task-not-found.json --registry scripts/open-engine/fixtures/test-registry.json --task-id 9708e713-6f98-420a-9a39-22bbae011ec1 --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-needs-operator-status.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-protocol-relative-target.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-unknown-route.json --registry scripts/open-engine/fixtures/test-registry.json --expect HELD
 ```
 
-Heading grammar (Session 274): a canonical heading is matched at line start,
+Heading grammar: a canonical heading is matched at line start,
 case-insensitive, with the section content either inline after the colon
 ("Limitations: none beyond ...") or on the following lines. A heading string
-appearing mid-sentence never opens a section — that anchor is what keeps the
-2026-07-02 false runner receipt (inline "... task. Verification: claimed ...")
-parsing as zero sections. `closeout-controller-inline-headings.json` is the
-real Session 270 honest receipt (md5-verified) whose two inline-content
-headings the 2026-07-06 OE-8D live-check misparsed as missing.
+appearing mid-sentence never opens a section — that anchor is what keeps a
+dishonest receipt that name-drops headings inside prose (inline "... task.
+Verification: claimed ...") parsing as zero sections.
+`closeout-controller-inline-headings.json` covers the honest inverse: a
+receipt whose inline-content headings a line-only parser would misparse as
+missing.
 
-`closeout-controller-c29a181d.json` is the real manual-rep row: its receipt
-carries 6 of the 8 canonical sections (`Limitations` and `Follow-up
-recommendation` are absent), so it classifies HELD until the receipt is
-augmented via the review-note path. `closeout-controller-applyable-projected.json`
-is the one projection: no real 8-section `AGENT DONE` exists yet, so it carries
-the real Session 265 8-section hold receipt projected onto the honest
-`AGENT DONE` shape (see its `_note`).
+`closeout-controller-held-missing-sections.json` is the incomplete-receipt
+case: its receipt carries 6 of the 8 canonical sections (`Limitations` and
+`Follow-up recommendation` are absent), so it classifies HELD until the
+receipt is augmented via the review-note path.
 
-### Review-note augmentation (Session 268)
+### Review-note augmentation
 
 A human review note stored on the task row (`agent_tasks.review_reason`) may
 supply sections the `AGENT DONE` receipt is missing. The controller parses the
@@ -64,7 +66,7 @@ Merged tasks report `augmented_sections` and carry the note text into apply
 event even though `review_reason` is a mutable column.
 
 ```bash
-node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-c29a181d-augmented.json --expect APPLYABLE
+node scripts/open-engine/closeout-controller.mjs --fixture scripts/open-engine/fixtures/closeout-controller-held-augmented.json --registry scripts/open-engine/fixtures/test-registry.json --expect APPLYABLE
 ```
 
 Expected copied-result input shape — the receipt lives in `payload.reason`
@@ -147,8 +149,10 @@ Rules:
   never overwritten.
 - Still zero mutations elsewhere: no `apply_agent_task_review`, no task status
   changes, no tracker/session-log edits, no Brain Bank captures, no Supabase
-  connection. Generated drafts are gitignored (they embed registry paths);
-  `docs/handoffs/pending-closeouts/README.md` documents the folder.
+  connection. Generated drafts are gitignored (they embed registry paths), and
+  the whole `docs/handoffs/pending-closeouts/` folder is operator-local for
+  the same reason — it exists only in a working deployment, never in this
+  repo.
 
 ### OE-8C live modes (`--live-check`, `--apply`)
 
@@ -207,7 +211,7 @@ node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply
   4. One `capture_thought` per project batch, tagged with the route's
      `capture_tag` plus `open_engine`.
 - The controller never runs git. Committing closeout writes stays
-  human/session-side (locked decision, Session 268).
+  human/session-side (locked design decision).
 
 ### OE-8D run-summary capture
 
@@ -244,38 +248,21 @@ node scripts/open-engine/closeout-controller.mjs \
 Use `--summary-preview` during local verification to print the payload without
 capturing it.
 
-## OE-5 watch helper
+## OE-5 watch (historical)
 
-`verify-oe5-watch.mjs` is frozen as the local read-only evaluator for the completed 2026-06-30 through 2026-07-06 natural job `9` watch. It is intentionally not a current-board validator. Future watches should get a new helper or a renamed current-generation verifier instead of widening this one.
-
-It does not connect to Supabase, read secrets, fire cron, mutate task state, change Slack behavior, or touch Brain Bank PR #11.
-
-Print the SQL bundle:
-
-```bash
-node scripts/open-engine/verify-oe5-watch.mjs --sql
-```
-
-Run a fixture or copied-result JSON file:
-
-```bash
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-pass.json
-node scripts/open-engine/verify-oe5-watch.mjs --input /tmp/oe5-watch-results.json
-```
-
-Expected copied-result keys are `job`, `cronRuns`, `mcpInvocations`, `ledgerRows`, `taskEvents`, `taskRows`, `netResponses`, `scheduledDataChanges`, and optional `pr`. `job` may be either the single row or the SQL result array. `scheduledDataChanges` may be an object like `{ "thoughts": 0, "action_items": 0 }` or the rows from the source-table review query.
-
-For fixture verification, use `--expect`:
-
-```bash
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-pass.json --expect PASS
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-fail-missing-day.json --expect INCONCLUSIVE
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-fail-risk.json --expect FAIL
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-fail-duplicate-ledger.json --expect FAIL
-node scripts/open-engine/verify-oe5-watch.mjs --fixture scripts/open-engine/fixtures/oe5-watch-pass-pr-head-warning.json --expect PASS
-```
-
-The post-watch checklist remains the source of truth. If this helper disagrees with `docs/handoffs/2026-06-30-brain-bank-pr11-post-watch-merge-checklist.md`, fix the helper.
+Before the scheduled queue-runner lane was promoted, it ran a seven-day
+"natural watch": the cron fired daily with no manual help, and a frozen
+read-only evaluator (fed by a read-only SQL bundle) graded each day —
+lane fired once, one ledger row per day, low-risk claims only, no
+scheduled-lane writes to canonical tables — with any missing day reading
+as INCONCLUSIVE rather than a pass. The watch passed 7/7 and the lane was
+promoted. The evaluator and its fixtures were deliberately frozen to that
+completed watch and are not shipped here; the pattern to reuse for your
+own promotion gates is the query-backed watch surface that superseded it
+(`oe_triage_watch_days` / `oe_triage_watch_streak` views, see the
+migrations), where clean-day evidence is computed from immutable run
+records instead of copied query results. A future watch should get a
+current-generation verifier with its own dates and invariants.
 
 ## Agent Done archive cadence
 
@@ -305,3 +292,61 @@ where status = 'Agent Done'
     -- '00000000-0000-0000-0000-000000000000'
   ]::uuid[]);
 ```
+
+## Executed-check lane (OE-13B)
+
+For a narrow class of low-risk code task, the closeout controller re-runs a
+packet-authored check in isolation and gates `Agent Review -> Agent Done` on
+ITS OWN exit 0 — "trust the check, not the agent's word".
+
+**`check_spec`** is an immutable packet field written ONLY by
+`create_agent_task_intake` (`{runner, args[]}` from a fixed allowlist: `deno-test`,
+`deno-check`, `node-test`, `npm-test`, `npm-run`; args are bounded plain tokens,
+no shell metacharacters). A DB trigger makes it immutable after intake — the
+correction path is archive + re-intake. A task with no `check_spec` uses the
+existing human-read gate byte-for-byte.
+
+**`CHECK-REF` receipt line.** A worker completing a `check_spec` task MUST end
+its "Touched files or records" receipt section with exactly one line-anchored
+marker naming the commit it produced in the target repo:
+
+```
+CHECK-REF: <40-hex commit sha>
+```
+
+The controller runs the PACKET's check against that commit — the receipt's own
+verification prose is never trusted for these tasks. Missing / duplicate /
+malformed CHECK-REF is a HOLD, not a silent skip.
+
+**PLATFORM: macOS only, for now.** The network deny is enforced with `sandbox-exec`, a macOS binary. On Linux (including most CI runners and most servers) it is absent, and `check-run.sh` exits 67 (`CHECK_ISOLATION_UNAVAILABLE`) rather than degrading to scrub-only, so the task HOLDs for the ordinary human-read gate. Nothing unsafe happens, and nothing auto-applies, but the executed-check lane does not function on Linux yet. If you need it there, the work is to add an equivalent network-deny mechanism (a network namespace, a seccomp/eBPF filter, or a container with no egress) behind the same fail-closed contract. Do not "fix" it by removing the guard: running an agent-produced check with live network access is the failure this whole lane exists to prevent.
+
+**Isolation (`check-run.sh`).** `--apply` runs the check via
+`scripts/open-engine/check-run.sh` in a fresh detached git worktree of the
+target project at the CHECK-REF commit, under a deny-by-default env allowlist
+(no MCP key, no Supabase secrets, no other operator credentials) with outbound
+network denied by `sandbox-exec`. Missing `sandbox-exec` REFUSES (exit 67) — it
+never degrades to scrub-only. exit 0 gates ONLY the closeout; commit, deploy,
+migration, and every live surface stay human-gated.
+
+Wrapper exit codes → controller hold reasons:
+
+| exit | reason |
+|------|--------|
+| 0 | check passed |
+| 64 | `CHECK_INFRA_USAGE` |
+| 65 | `CHECK_REF_UNRESOLVED` |
+| 66 | `CHECK_INFRA_WORKTREE` |
+| 67 | `CHECK_ISOLATION_UNAVAILABLE` (sandbox-exec missing) |
+| 68 | `CHECK_RUNNER_MISSING` |
+| other | `EXECUTED_CHECK_FAILED` (the check's own non-zero exit) |
+
+Classification / apply hold reasons: `EXECUTED_CHECK_DISABLED` (kill switch off),
+`CHECK_SPEC_UNPARSEABLE`, `AUTO_PROMOTED_CHECK_TASK_EXCLUDED` (do-not-stack: a
+Phase 4 auto-promoted task never machine-applies), `CHECK_SPEC_ON_CONTENT_TASK`
+(receipt stages a `deliverables/` file), `CHECK_REF_MISSING|COUNT|FORMAT`.
+
+**Kill switch.** `EXECUTED_CHECK_ENABLED` (a `const` at the top of
+`closeout-controller.mjs`, default `true`). Flip to `false` and every
+`check_spec` task HOLDs (`EXECUTED_CHECK_DISABLED`) — a one-line commit, no
+deploy. This is the stop-the-lane response to any suspected live false-pass.
+Tasks without `check_spec` are unaffected either way.

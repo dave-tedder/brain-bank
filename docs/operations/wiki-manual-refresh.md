@@ -44,7 +44,7 @@ On failure, `index_compiled` is `false` and `index_skipped_reason` carries the d
    ORDER BY created_at DESC
    LIMIT 5;
    ```
-2. If the failure is consistent (`index compile failed` two or more times in a row), the audit's Bundle E fallbacks may need to ship: bump `LLM_CALL_TIMEOUT_MS` for index calls (2a) or swap the model to `gpt-4o-mini` (2d). See `docs/superpowers/specs/2026-05-10-wiki-end-to-end-audit.md` Findings 2a/2d.
+2. If the failure is consistent (`index compile failed` two or more times in a row), two known fallbacks may need to ship: bump `LLM_CALL_TIMEOUT_MS` for index calls, or swap the index-compile model to `gpt-4o-mini`.
 3. If failure is transient (one-off abort during an OpenRouter slow window), retrying the curl command above usually succeeds.
 
 ## Why this exists

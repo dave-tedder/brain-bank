@@ -8,7 +8,10 @@ import {
   DigestActionRow,
   renderOpenActionChecklist,
 } from "./action-checklist.ts";
-import { formatSentinelReport } from "./sentinel-report.ts";
+import {
+  formatReconcilerReport,
+  formatSentinelReport,
+} from "./sentinel-report.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -64,6 +67,26 @@ async function loadSentinelReport(): Promise<string | null> {
   } catch (err) {
     console.error("sentinel report failed (non-fatal):", err);
     return "*Ops sentinel unavailable:* ledger could not be checked.";
+  }
+}
+
+async function loadReconcilerReport(): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .from("agent_task_ledger")
+      .select("last_heartbeat, last_queue_result")
+      .eq("agent_code", "reconciler")
+      .maybeSingle();
+    if (error) {
+      console.error("reconciler report query failed (non-fatal):", error);
+      // Null, not a warning line: the lane is optional, and a repo that never
+      // installed it must not get a permanent complaint in the digest.
+      return null;
+    }
+    return formatReconcilerReport(data, new Date().toISOString());
+  } catch (err) {
+    console.error("reconciler report failed (non-fatal):", err);
+    return null;
   }
 }
 
@@ -1045,6 +1068,10 @@ Deno.serve(async (req: Request): Promise<Response> => {
       const sentinelReport = await loadSentinelReport();
       if (sentinelReport) {
         slackMessage += `\n${sentinelReport}`;
+      }
+      const reconcilerReport = await loadReconcilerReport();
+      if (reconcilerReport) {
+        slackMessage += `\n${reconcilerReport}`;
       }
     }
 

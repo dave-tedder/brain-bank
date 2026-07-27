@@ -17,6 +17,391 @@ export const AGENT_TASK_INTAKE_SOURCES = [
 
 export type AgentTaskIntakeSource = (typeof AGENT_TASK_INTAKE_SOURCES)[number];
 
+// OE-13 Sub-phase B (spec §3.1, Fork B): check_spec is a fixed allowlist of
+// runner commands with bounded args. This is the SERVER mirror of the
+// controller's parseCheckSpec (scripts/open-engine/closeout-controller.mjs):
+// same runners, same bounds, same arg pattern. It THROWS (intake rejects
+// loudly); the controller version classifies (gate holds quietly). If either
+// allowlist ever changes, change BOTH (mirror-style discipline, same as the
+// capture-path mirror rule).
+export const CHECK_SPEC_RUNNERS: Record<
+  string,
+  { minArgs: number; maxArgs: number }
+> = {
+  "deno-test": { minArgs: 0, maxArgs: 8 },
+  "deno-check": { minArgs: 1, maxArgs: 8 },
+  "node-test": { minArgs: 0, maxArgs: 8 },
+  "npm-test": { minArgs: 0, maxArgs: 0 },
+  "npm-run": { minArgs: 1, maxArgs: 1 },
+};
+
+const CHECK_SPEC_ARG_PATTERN = /^[A-Za-z0-9@._/:=,-]+$/;
+
+export interface AgentTaskCheckSpec {
+  runner: string;
+  args: string[];
+}
+
+export function validateCheckSpec(
+  value: unknown,
+): AgentTaskCheckSpec | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("check_spec must be a {runner, args[]} object.");
+  }
+  const record = value as Record<string, unknown>;
+  const unknownKeys = Object.keys(record).filter(
+    (key) => key !== "runner" && key !== "args",
+  );
+  if (unknownKeys.length > 0) {
+    throw new Error(`check_spec has unknown keys: ${unknownKeys.join(", ")}.`);
+  }
+  const runner = record.runner;
+  if (typeof runner !== "string" || !(runner in CHECK_SPEC_RUNNERS)) {
+    throw new Error(
+      `check_spec.runner must be one of: ${
+        Object.keys(CHECK_SPEC_RUNNERS).join(", ")
+      }.`,
+    );
+  }
+  const bounds = CHECK_SPEC_RUNNERS[runner];
+  const args = record.args === undefined ? [] : record.args;
+  if (!Array.isArray(args)) {
+    throw new Error("check_spec.args must be an array of strings.");
+  }
+  if (args.length < bounds.minArgs || args.length > bounds.maxArgs) {
+    throw new Error(
+      `check_spec.args for ${runner} must have between ${bounds.minArgs} and ${bounds.maxArgs} entries.`,
+    );
+  }
+  for (const arg of args) {
+    if (
+      typeof arg !== "string" || arg.length === 0 || arg.length > 128 ||
+      !CHECK_SPEC_ARG_PATTERN.test(arg)
+    ) {
+      throw new Error(
+        "check_spec.args entries must be short plain tokens (no spaces or shell metacharacters).",
+      );
+    }
+  }
+  return { runner, args: args as string[] };
+}
+
+// OE board-hygiene: close_check is a fixed allowlist of probe verbs with exact,
+// bounded assertions. Same authorship rule as check_spec, opposite isolation
+// posture: check_spec runs AGENT-PRODUCED code in a scrubbed no-network sandbox;
+// close_check runs NO agent code at all, only these four controller-authored
+// probes, against the network with read-only credentials. The two never share an
+// execution path.
+//
+// Enforced here rather than in SQL, mirroring check_spec: the column is plain
+// jsonb and service_role-only, and this validator is shared by BOTH authoring
+// paths (create_agent_task_intake and admin_amend_agent_task). It THROWS.
+export const CLOSE_CHECK_PROBES = [
+  "http_contains",
+  "wp_post_status",
+  "git_path_exists",
+  "git_commit_contains",
+] as const;
+
+export type CloseCheckProbe = (typeof CLOSE_CHECK_PROBES)[number];
+
+const CLOSE_CHECK_WP_STATUSES = [
+  "publish",
+  "draft",
+  "pending",
+  "private",
+  "future",
+] as const;
+
+// git_path_exists asserts ONE thing and only one thing: a NEW file appeared
+// under this path AFTER the card entered the desk. A bare existence check is a
+// defect, not a simplification -- desk cards routinely point operator_target at
+// a deliverables/ file the executor itself wrote, which existed before the card
+// ever reached the desk, so bare existence would falsely close every one of them.
+const GIT_PATH_EXISTS_ASSERT = "new_file_since_card_entered_desk";
+
+// A drop-box probe may only target a folder that is EXCLUSIVELY an operator
+// drop-box, never one any lane writes into. deliverables/ fails that test:
+// scripts/open-engine/deliverables-push.sh stages ALL of deliverables/, so an
+// executor lane's own push would satisfy a "new file since" assertion and close
+// a card the operator never touched. A real drop-box card needs a path outside
+// deliverables/.
+const LANE_WRITTEN_PATH_PREFIXES = ["deliverables/"];
+
+const CLOSE_CHECK_REPO_PATTERN = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+const CLOSE_CHECK_REF_PATTERN = /^[A-Za-z0-9._/-]+$/;
+// No shell metacharacters in a STRUCTURAL close_check string. The probe runner
+// is a bash script; a value that survives into a command line must be inert.
+const SHELL_METACHARACTERS = /[;&|`$(){}<>\\\n\r'"]/;
+
+export interface AgentTaskCloseCheck {
+  probe: CloseCheckProbe;
+  [key: string]: unknown;
+}
+
+// CONTENT assertions are held to a different, deliberately looser standard than
+// STRUCTURAL fields, and the distinction is the whole point.
+//
+// A structural field (url, site, repo, ref, path, measured_by) names WHERE to
+// look. Those flow into fetch() URLs, map keys, and `gh` argv, so they stay under
+// assertPlainString's strict ban below.
+//
+// http_contains.assert names WHAT to look for, and its only consumer is
+// `body.includes(assert)` in reconcile-probe.mjs -- a pure string comparison with
+// no injection surface at all. The `gh` calls use execFile, which spawns no
+// shell, so even the structural ban is defense in depth rather than a live need.
+//
+// WHY THIS EXISTS: a blanket ban across every field makes the feature unable to
+// express its own primary use case. It rejects `"Monday"` (pinning a day name to
+// a JSON-LD token rather than matching the bare word in prose) and it rejects
+// `<title>Some Page`, because angle brackets are banned too. Asserting against
+// HTML means asserting against quotes, angle brackets, ampersands and braces; a
+// validator that forbids them can only express vague assertions, and a vague
+// assertion is exactly the false-positive risk the whole design exists to bound.
+// The ban was making the safe thing unbuildable.
+//
+// Still refused: control characters. An assertion is one line of page content.
+// Length is capped by the caller.
+const CONTROL_CHARACTERS = /[\x00-\x1f\x7f]/;
+
+function assertContentString(
+  value: unknown,
+  field: string,
+  maxLength = 512,
+): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`close_check.${field} must be a non-empty string.`);
+  }
+  if (value.length > maxLength) {
+    throw new Error(
+      `close_check.${field} must be at most ${maxLength} characters.`,
+    );
+  }
+  if (CONTROL_CHARACTERS.test(value)) {
+    throw new Error(
+      `close_check.${field} must not contain control characters or line breaks. An assertion is a single line of page content.`,
+    );
+  }
+  return value;
+}
+
+function assertPlainString(
+  value: unknown,
+  field: string,
+  maxLength = 512,
+): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`close_check.${field} must be a non-empty string.`);
+  }
+  if (value.length > maxLength) {
+    throw new Error(
+      `close_check.${field} must be at most ${maxLength} characters.`,
+    );
+  }
+  if (SHELL_METACHARACTERS.test(value)) {
+    throw new Error(
+      `close_check.${field} must not contain shell metacharacters. A close_check is a structured assertion, never a command.`,
+    );
+  }
+  return value;
+}
+
+function assertExactKeys(
+  record: Record<string, unknown>,
+  required: string[],
+  optional: string[],
+): void {
+  const allowed = new Set([...required, ...optional, "probe"]);
+  const unknownKeys = Object.keys(record).filter((key) => !allowed.has(key));
+  if (unknownKeys.length > 0) {
+    throw new Error(
+      `close_check has unknown keys for this probe: ${
+        unknownKeys.join(", ")
+      }. Allowed: ${[...allowed].join(", ")}.`,
+    );
+  }
+  const missing = required.filter((key) => record[key] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `close_check is missing required keys for this probe: ${
+        missing.join(", ")
+      }.`,
+    );
+  }
+}
+
+export function validateCloseCheck(
+  value: unknown,
+  // Site handles a wp_post_status probe may name. Injected rather than imported
+  // so this validator stays a pure function and the tests need no profile file.
+  // Defaults to EMPTY, which fails closed: a fork that has wired no WordPress
+  // credentials refuses every wp_post_status probe at authorship.
+  wordpressSites: readonly string[] = [],
+): AgentTaskCloseCheck | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("close_check must be an object with a probe field.");
+  }
+  const record = value as Record<string, unknown>;
+  const probe = record.probe;
+  if (
+    typeof probe !== "string" ||
+    !(CLOSE_CHECK_PROBES as readonly string[]).includes(probe)
+  ) {
+    throw new Error(
+      `close_check.probe must be one of: ${CLOSE_CHECK_PROBES.join(", ")}.`,
+    );
+  }
+
+  switch (probe as CloseCheckProbe) {
+    case "http_contains": {
+      assertExactKeys(record, ["url", "assert"], ["measured_by"]);
+      const url = assertPlainString(record.url, "url", 2048);
+      if (!url.startsWith("https://")) {
+        throw new Error(
+          "close_check.url must be an https:// URL. A probe measures a public surface, never a local or plaintext one.",
+        );
+      }
+      // CONTENT, not structure: this is the only field in the whole allowlist
+      // whose consumer is a plain body.includes(). See assertContentString.
+      assertContentString(record.assert, "assert");
+      if (record.measured_by !== undefined) {
+        assertPlainString(record.measured_by, "measured_by", 128);
+      }
+      return { probe, url, assert: record.assert, ...(record.measured_by !== undefined ? { measured_by: record.measured_by } : {}) } as AgentTaskCloseCheck;
+    }
+    case "wp_post_status": {
+      assertExactKeys(record, ["site", "post_id", "assert"], ["measured_by"]);
+      const site = assertPlainString(record.site, "site", 64);
+      if (wordpressSites.length === 0) {
+        throw new Error(
+          "close_check.probe 'wp_post_status' requires at least one configured WordPress site. Set profile.json's wordpress_sites to the site handles you have credentials for, or use a different probe.",
+        );
+      }
+      if (!wordpressSites.includes(site)) {
+        throw new Error(
+          `close_check.site must be one of: ${wordpressSites.join(", ")}.`,
+        );
+      }
+      const postId = record.post_id;
+      if (
+        typeof postId !== "number" || !Number.isInteger(postId) || postId <= 0
+      ) {
+        throw new Error("close_check.post_id must be a positive integer.");
+      }
+      const assertion = assertPlainString(record.assert, "assert", 32);
+      if (!(CLOSE_CHECK_WP_STATUSES as readonly string[]).includes(assertion)) {
+        throw new Error(
+          `close_check.assert for wp_post_status must be one of: ${
+            CLOSE_CHECK_WP_STATUSES.join(", ")
+          }.`,
+        );
+      }
+      if (record.measured_by !== undefined) {
+        assertPlainString(record.measured_by, "measured_by", 128);
+      }
+      return { probe, site, post_id: postId, assert: assertion, ...(record.measured_by !== undefined ? { measured_by: record.measured_by } : {}) } as AgentTaskCloseCheck;
+    }
+    case "git_path_exists": {
+      assertExactKeys(record, ["repo", "path", "assert"], ["measured_by"]);
+      const repo = assertPlainString(record.repo, "repo", 128);
+      if (!CLOSE_CHECK_REPO_PATTERN.test(repo)) {
+        throw new Error("close_check.repo must be in owner/name form.");
+      }
+      const path = assertPlainString(record.path, "path", 512);
+      if (path.startsWith("/") || path.includes("..")) {
+        throw new Error(
+          "close_check.path must be a repo-relative path with no parent traversal.",
+        );
+      }
+      const laneWritten = LANE_WRITTEN_PATH_PREFIXES.find((prefix) =>
+        path.startsWith(prefix)
+      );
+      if (laneWritten) {
+        throw new Error(
+          `close_check.path '${path}' is under '${laneWritten}', which agent lanes write into (deliverables-push.sh stages all of deliverables/). A git_path_exists probe may only target a folder that is exclusively an operator drop-box, or a lane's own push would close the card.`,
+        );
+      }
+      if (record.assert !== GIT_PATH_EXISTS_ASSERT) {
+        throw new Error(
+          `close_check.assert for git_path_exists must be exactly '${GIT_PATH_EXISTS_ASSERT}'. A bare existence check would close a card on an artifact that predates it.`,
+        );
+      }
+      if (record.measured_by !== undefined) {
+        assertPlainString(record.measured_by, "measured_by", 128);
+      }
+      return { probe, repo, path, assert: GIT_PATH_EXISTS_ASSERT, ...(record.measured_by !== undefined ? { measured_by: record.measured_by } : {}) } as AgentTaskCloseCheck;
+    }
+    case "git_commit_contains": {
+      assertExactKeys(record, ["repo", "ref", "assert"], ["measured_by"]);
+      const repo = assertPlainString(record.repo, "repo", 128);
+      if (!CLOSE_CHECK_REPO_PATTERN.test(repo)) {
+        throw new Error("close_check.repo must be in owner/name form.");
+      }
+      const ref = assertPlainString(record.ref, "ref", 128);
+      if (!CLOSE_CHECK_REF_PATTERN.test(ref)) {
+        throw new Error(
+          "close_check.ref must be a plain git ref (letters, digits, dot, dash, slash, underscore).",
+        );
+      }
+      const assertion = assertPlainString(record.assert, "assert");
+      if (!assertion.startsWith("path:")) {
+        throw new Error(
+          "close_check.assert for git_commit_contains must be 'path:<repo-relative-path>'.",
+        );
+      }
+      const assertedPath = assertion.slice("path:".length);
+      if (
+        assertedPath.length === 0 || assertedPath.startsWith("/") ||
+        assertedPath.includes("..")
+      ) {
+        throw new Error(
+          "close_check.assert path must be a non-empty repo-relative path with no parent traversal.",
+        );
+      }
+      if (record.measured_by !== undefined) {
+        assertPlainString(record.measured_by, "measured_by", 128);
+      }
+      return { probe, repo, ref, assert: assertion, ...(record.measured_by !== undefined ? { measured_by: record.measured_by } : {}) } as AgentTaskCloseCheck;
+    }
+  }
+  // Unreachable: the probe allowlist above is exhaustive.
+  throw new Error(
+    `close_check.probe must be one of: ${CLOSE_CHECK_PROBES.join(", ")}.`,
+  );
+}
+
+// A close_check is OPERATOR-AUTHORED ONLY in first scope.
+//
+// Where Phase 4 auto-promote is enabled, a fully zero-human close loop becomes
+// constructible: triage authors a card carrying a close_check -> auto-promote
+// moves it to Agent Todo with no human in the path -> an executor runs it ->
+// closeout routes it to the desk -> the reconciler closes it, and nobody decided
+// anything. auto_promote_agent_task_intake requires intake_source =
+// 'triage-agent' (its condition G), so refusing that exact pair severs the loop
+// at its single source.
+//
+// THIS IS THE ONLY LAYER, and it is the one that matters. Do NOT add a second
+// gate in the lane that skips auto-promoted cards: the risk being guarded is a
+// BADLY WRITTEN ASSERTION, so the question is who AUTHORED the note, not who
+// moved the card. Since triage is refused here and admin_amend_agent_task is
+// human/ops-only, a close_check on ANY card already proves a human wrote it, and
+// a lane-side auto-promote gate would skip precisely those cards. Measured on a
+// live board, that gate disqualified 6 of 7 eligible candidates before it was
+// removed. Keep THIS check strict: it is the whole loop guard.
+export function assertCloseCheckAuthorAllowed(
+  intakeSource: string,
+  closeCheck: unknown,
+): void {
+  if (closeCheck === null || closeCheck === undefined) return;
+  if (intakeSource === "triage-agent") {
+    throw new Error(
+      "close_check is operator-authored only in first scope: a triage-agent intake cannot carry one. A triage-authored close_check on an auto-promotable draft would complete a close loop with no human in it. Author the check with admin_amend_agent_task after the card reaches the desk.",
+    );
+  }
+}
+
 export interface AgentTaskIntakeInput {
   desired_outcome: string;
   context: string;
@@ -37,6 +422,12 @@ export interface AgentTaskIntakeInput {
   source_thought_id?: string | null;
   linked_action_item_id?: string | null;
   parent_task_id?: string | null;
+  check_spec?: unknown;
+  close_check?: unknown;
+  // Site handles a wp_post_status close_check may name. Supplied by the caller
+  // (index.ts reads profile.json); empty means every wp_post_status probe is
+  // refused, which is the correct default for an unconfigured fork.
+  wordpress_sites?: readonly string[];
 }
 
 export interface AgentTaskIntakeRecord {
@@ -62,6 +453,8 @@ export interface AgentTaskIntakeRecord {
   source_thought_id: string | null;
   linked_action_item_id: string | null;
   parent_task_id: string | null;
+  check_spec: AgentTaskCheckSpec | null;
+  close_check: AgentTaskCloseCheck | null;
 }
 
 export interface ActionItemPromotionRow {
@@ -243,6 +636,11 @@ export function buildAgentTaskIntakeRecord(
     source_thought_id: input.source_thought_id?.trim() || null,
     linked_action_item_id: input.linked_action_item_id?.trim() || null,
     parent_task_id: input.parent_task_id?.trim() || null,
+    check_spec: validateCheckSpec(input.check_spec),
+    close_check: (() => {
+      assertCloseCheckAuthorAllowed(input.intake_source, input.close_check);
+      return validateCloseCheck(input.close_check, input.wordpress_sites ?? []);
+    })(),
   };
 }
 
