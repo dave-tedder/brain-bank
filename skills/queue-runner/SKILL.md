@@ -90,6 +90,14 @@ Task drafts are born UNASSIGNED (`agent_code = NULL`) so any local executor can 
 
 **C2 hard runtime constraint.** A task flagged `requires_local = true` (LOCAL RUNTIME ONLY: needs git + local files) is claimable ONLY by a claim that asserts `runtime_local: true` on `claim_next_agent_task` / `claim_specific_agent_task`. A scheduled/cloud heartbeat MUST NOT pass `runtime_local` — omit it (defaults false), so local-only tasks are invisible to the heartbeat by design and can never be mis-claimed. Only an attended local session working a specific known-local task passes `runtime_local: true`. This is distinct from `preferred_agent`: `requires_local` is a HARD filter, `preferred_agent` only reorders. Ops corrections that need to set `requires_local`, `project_slug`, `sources`, or operator fields, move a terminal task to Needs Operator, or release a stuck claim use `admin_amend_agent_task` (human/ops only — never from a heartbeat).
 
+**Repairing a card the closeout controller HELD on `OPS_AMEND_NEWER_THAN_DONE`.** The hold means a human posted an ops-amend correction AFTER the AGENT DONE, so the tracker drafts the apply would use may be stale. Clearing it needs a corrected receipt, and there is exactly ONE route to post one: `complete_agent_task` REFUSES from Agent Review, because `Agent Review -> Agent Review` is not a legal edge in `move_agent_task_status` and the call returns `Invalid transition`. Do this instead, three calls back to back:
+
+1. `admin_amend_agent_task(<id>, reason, release_claim: true)` — returns the row to Agent Todo and clears `agent_code`.
+2. `claim_specific_agent_task(<id>, <agent_code>, runtime_local: true)` if the card is `requires_local`.
+3. `complete_agent_task(<id>, <agent_code>, claim_token, result)` with the corrected receipt folding the ops-amend in, then re-run the controller.
+
+It never touches `attempt_count` and leaves a clean release-then-claim-then-done audit trail. Run the three without pausing on a card that is NOT `requires_local`: the row sits unclaimed in Agent Todo between steps 1 and 2, and an awake lane can claim it mid-repair. Do NOT reach for raw SQL; retiring that improvisation is why the C3 verb exists.
+
 ## Mandatory Preflight
 
 Before touching a task:

@@ -443,8 +443,14 @@ function evaluateTask(task, registry, actionItems) {
   // reads only the latest AGENT DONE; review-note augmentation fills only
   // missing sections). If an ops-amend is NEWER than the receipt about to be
   // applied, the tracker draft may be stale — hold for a human instead of
-  // silently applying it. Author fix: post a superseding AGENT DONE that folds
-  // the corrections in, then re-run.
+  // silently applying it.
+  //
+  // Author fix: NOT a superseding AGENT DONE. complete_agent_task refuses that
+  // (Agent Review -> Agent Review is not a legal edge in move_agent_task_status),
+  // so the repair is the C3 fold: admin_amend_agent_task with release_claim,
+  // which returns the row to Agent Todo and clears agent_code, then
+  // claim_specific_agent_task, then complete_agent_task with the corrected
+  // receipt. See holdMessage below, which is what the reader actually sees.
   if (latestDoneEvent) {
     const doneAt = new Date(latestDoneEvent.created_at).getTime();
     const hasNewerOpsAmend = task.events.some((event) =>
@@ -1012,7 +1018,7 @@ function holdMessage(reasons, receipt) {
     }.`;
   }
   if (reasons.includes("OPS_AMEND_NEWER_THAN_DONE")) {
-    return "A human correction (ops-amend) was posted after the AGENT DONE this apply would use; its Tracker/Session-log drafts may be stale. Post a superseding AGENT DONE folding the corrections in, then re-run.";
+    return "A human correction (ops-amend) was posted after the AGENT DONE this apply would use; its Tracker/Session-log drafts may be stale. A superseding AGENT DONE will NOT work from here: complete_agent_task refuses Agent Review -> Agent Review. Repair route, three calls: admin_amend_agent_task with release_claim true (returns the row to Agent Todo and clears agent_code), then claim_specific_agent_task, then complete_agent_task with the corrected receipt folding the ops-amend in. Then re-run. The row sits unclaimed in Agent Todo between the fold and the re-claim, so run the three back to back if the task is not requires_local and a lane could be awake.";
   }
   if (reasons.includes("PLAN_DOC_PATH_UNRESOLVED")) {
     return "Task carries a plan-doc source whose path cannot be resolved to a project folder; held so the doc line is not left un-synced. Fix the plan-doc source path and re-run.";

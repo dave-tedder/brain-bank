@@ -330,6 +330,24 @@ by slug and holds anything it cannot resolve.
   surface the operator actually reads each morning. A held card carrying a dead
   claim is the same trap as a card that is held AND unclaimed: no verb can touch
   it, and without this check the only way out anyone finds is raw SQL.
+- A CARD HELD ON `OPS_AMEND_NEWER_THAN_DONE` TAKES THE SAME FOLD, and there is
+  exactly one route. The trigger is different from the dead-claim case above:
+  here a human posted an ops-amend correction AFTER the AGENT DONE, so the
+  closeout controller holds because the tracker drafts it would apply may be
+  stale. A corrected receipt is what clears it, and `complete_agent_task`
+  REFUSES to post one from Agent Review: `Agent Review -> Agent Review` is not
+  a legal edge in `move_agent_task_status`, so the call returns
+  `Invalid transition`. Give the fold instead: `admin_amend_agent_task` with
+  `release_claim: true`, then `claim_specific_agent_task`, then
+  `complete_agent_task` with the corrected receipt, then re-run the controller.
+  Run the three back to back on a card that is not `requires_local`, because
+  the row sits unclaimed in Agent Todo between the fold and the re-claim and an
+  awake lane could take it mid-repair.
+  Why this is a hard rule: the controller's own hold message used to tell the
+  reader to post a superseding AGENT DONE, which is the transition the RPC
+  refuses. A hold message is read by whoever is unblocking a stuck card, usually
+  in a hurry, and sending that reader into a refusal is how sessions end up
+  improvising with raw SQL — the exact outcome the C3 ops verb exists to retire.
 - THE NEEDS OPERATOR DESK IS ALWAYS SHOWN. Every task in the Needs Operator column
   renders under bucket B ("Needs you present") on EVERY run, regardless of the
   watermark window, until operator closes it. Each card shows its stored

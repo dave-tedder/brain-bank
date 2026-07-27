@@ -1234,3 +1234,99 @@ test("evaluate: check_spec task with medium risk still holds RISK_NOT_LOW (probe
     assert.ok(result.hold[0].reasons.includes("RISK_NOT_LOW"));
   });
 });
+
+// --- OPS_AMEND_NEWER_THAN_DONE names a REACHABLE repair ---------------------
+//
+// The hold message used to instruct "Post a superseding AGENT DONE folding the
+// corrections in, then re-run." complete_agent_task refuses exactly that:
+// Agent Review -> Agent Review is not a legal edge in move_agent_task_status,
+// so following the message literally returns "Invalid transition". A hold
+// message is read by whoever is unblocking a stuck card, usually in a hurry,
+// and sending that reader into a refusal is how sessions end up reaching for
+// raw SQL — which is the outcome the C3 ops verb was built to retire.
+//
+// The route that DOES work, and that the message must now name:
+// admin_amend_agent_task(release_claim) -> claim_specific_agent_task ->
+// complete_agent_task.
+
+function opsAmendAfterDoneTask() {
+  const id = "b3bf446d-21ae-4537-9bf6-d180d33da933";
+  return {
+    generated_at: "2026-07-27T15:15:00.000Z",
+    tasks: [{
+      id,
+      title: "ops-amend posted after the receipt",
+      status: "Agent Review",
+      risk: "low",
+      project_slug: "tmp-proj",
+      explicit_approval: false,
+      linked_action_item_id: null,
+      review_reason: null,
+      sources: [],
+      events: [
+        {
+          task_id: id,
+          event_type: "AGENT DONE",
+          agent_code: "agent-local",
+          payload: {
+            reason: validReceipt(),
+            status: "Agent Review",
+            from_status: "Agent Working",
+          },
+          created_at: "2026-07-27T15:14:53.000Z",
+        },
+        {
+          task_id: id,
+          event_type: "AGENT STATUS",
+          agent_code: null,
+          payload: { action: "ops-amend", reason: "a human correction" },
+          created_at: "2026-07-27T15:15:04.000Z",
+        },
+      ],
+    }],
+    actionItems: [],
+  };
+}
+
+test("evaluate HOLDs when an ops-amend is newer than the AGENT DONE", () => {
+  withTempCopy((dir) => {
+    const input = opsAmendAfterDoneTask();
+    const result = evaluate(input, tmpRegistry(dir), {
+      taskId: input.tasks[0].id,
+    });
+    assert.equal(result.status, "HELD");
+    assert.ok(result.hold[0].reasons.includes("OPS_AMEND_NEWER_THAN_DONE"));
+  });
+});
+
+test("OPS_AMEND_NEWER_THAN_DONE hold message names only reachable verbs", () => {
+  withTempCopy((dir) => {
+    const input = opsAmendAfterDoneTask();
+    const { message } = evaluate(input, tmpRegistry(dir), {
+      taskId: input.tasks[0].id,
+    }).hold[0];
+
+    // The three verbs of the route that actually succeeds, in order.
+    const route = [
+      "admin_amend_agent_task",
+      "claim_specific_agent_task",
+      "complete_agent_task",
+    ];
+    let cursor = -1;
+    for (const verb of route) {
+      const at = message.indexOf(verb, cursor + 1);
+      assert.ok(at > cursor, `hold message must name ${verb} after the prior step`);
+      cursor = at;
+    }
+    assert.match(message, /release_claim/);
+
+    // It must NOT send the reader at the transition the RPC refuses. Guard on
+    // the instruction shape, not the bare phrase: the message legitimately
+    // mentions "superseding" while telling the reader it does not work.
+    assert.doesNotMatch(
+      message,
+      /Post a superseding AGENT DONE folding the corrections in/i,
+      "hold message still instructs the unreachable Agent Review -> Agent Review transition",
+    );
+  });
+});
