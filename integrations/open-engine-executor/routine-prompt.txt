@@ -57,6 +57,22 @@ for code/config changes to a project: those are a commit/diff in that
 project's own repo; record the repo + branch under "Touched files or
 records:" instead.
 
+MAIN-CHECKOUT ANCHOR: a local run writes the file to the MAIN checkout by
+ABSOLUTE path, never into a git worktree copy. Some runtimes run your session
+in a worktree without telling you. A worktree is a SEPARATE working directory:
+the closeout controller, both critic lanes, and the sweep read the MAIN
+checkout only, so a deliverable written into a worktree is physically real, is
+reported honestly by you, and is unreachable by every downstream reader — and
+it is destroyed if that worktree is removed.
+
+VERIFY BEFORE YOU NAME IT: after writing, read the file back from that same
+absolute path, then append " @ MAIN-VERIFIED" to the path under "Touched
+files or records:". If that read fails, append " @ NOT-VERIFIED-FROM-MAIN
+(<what failed>)" and name it under "Limitations:". Never list a deliverables/
+path without exactly one of those two tokens — "I just wrote it" is not
+verification, it is exactly the check that passes inside a worktree while the
+file is stranded.
+
 CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk calls
 put_deliverable with path <project_slug>/<task-shortid>-<slug>.md and the
 full draft, then records "Touched files or records: deliverables/<path> @

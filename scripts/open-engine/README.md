@@ -350,3 +350,115 @@ Phase 4 auto-promoted task never machine-applies), `CHECK_SPEC_ON_CONTENT_TASK`
 `check_spec` task HOLDs (`EXECUTED_CHECK_DISABLED`) — a one-line commit, no
 deploy. This is the stop-the-lane response to any suspected live false-pass.
 Tasks without `check_spec` are unaffected either way.
+
+## Worktree-stranded deliverables
+
+Some agent runtimes execute a session in a fresh git worktree without telling
+it — Claude Code spawns one per task chip, under `.claude/worktrees/`. A
+worktree is a **separate working directory**, and every reader in this system
+(the closeout controller, both critic lanes, `deliverables-push.sh`) resolves
+the **main checkout** only. So a deliverable written to
+`<worktree>/deliverables/` is physically real, is named honestly in the
+receipt, and is unreachable by all of them — then is destroyed when the
+worktree is removed. On the origin deployment this produced four critic flags
+in a single day, every one of them worded as "the work is missing" when the
+work was fine.
+
+There is a second, quieter failure. When the path **also** exists in main, the
+stranded copy is a modified tracked file rather than an untracked one, so a
+reader finds a file, reads it, and reviews the **stale** version with no flag
+at all.
+
+Three layers, because no single one covers every case:
+
+| Layer | What it does | Where |
+|---|---|---|
+| Write rule | Deliverables go to the main checkout by absolute path; the receipt carries `@ MAIN-VERIFIED` | `AGENTS.md`, `skills/queue-runner/SKILL.md`, `integrations/open-engine-executor/routine-prompt.txt` |
+| Enforcement | Denies a worktree-local `deliverables/` write and returns the corrected path | `scripts/hooks/block-worktree-deliverable-write.sh` |
+| Backstop | Adopts stranded files into main; **never** overwrites | `scripts/open-engine/worktree-rescue.sh` |
+| Visibility | Per-worktree age, dirty count, unrescued deliverables, unmerged commits | `scripts/open-engine/worktree-report.sh` |
+
+```bash
+bash scripts/open-engine/worktree-rescue.sh --report   # classify, write nothing
+bash scripts/open-engine/worktree-rescue.sh --adopt    # adopt ABSENT files only
+bash scripts/open-engine/worktree-report.sh            # read-only janitor
+```
+
+**The rescue sweep never overwrites, and that is the whole safety property.** A
+file present on both sides that DIFFERS is reported under `divergent` and left
+untouched, because deliverables are client-facing drafts and the newer copy is
+not reliably the worktree's — on the origin deployment one file was measured
+with the worktree copy larger and, weeks later, a different file with **main**
+larger. Copy-newest-wins would have destroyed real content in one direction or
+the other. Adoption is a copy, so nothing is ever deleted from a worktree. Run
+it in your sweep lane *before* `deliverables-push.sh --sweep` so an adopted file
+rides the same push.
+
+**The janitor never removes anything, and must not be extended to.** `git
+worktree prune` only clears administrative records for directories already gone
+from disk and is safe unattended; `git worktree remove` deletes uncommitted work
+and stays human. Before removing any worktree by hand, require: zero dirty
+files, zero unrescued deliverables per the rescue report, and either no
+unmerged branch commits or a deliberate decision to keep the branch.
+
+### Operator setup, required before the hook does anything
+
+None of this travels with a clone — `.claude/settings.json` is not tracked in
+this repo, so a fresh fork has the scripts but no wiring.
+
+**1. Wire the hook.** In your project's `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          { "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/scripts/hooks/block-worktree-deliverable-write.sh" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**2. Allowlist the scripts** under `permissions.allow`, plus the absolute-path
+write target the rule tells agents to use:
+
+```
+"Bash(bash scripts/open-engine/worktree-rescue.sh:*)"
+"Write(/absolute/path/to/your/checkout/deliverables/**)"
+"Edit(/absolute/path/to/your/checkout/deliverables/**)"
+```
+
+The absolute `Write`/`Edit` entries are the ones most likely to be missed. The
+existing relative `Write(deliverables/**)` entry does **not** cover an absolute
+path, so without them an unattended run stalls on a permission prompt with
+nobody there to click it — which is the same failure class the hook exists to
+prevent, wearing a different face.
+
+**3. The hook only reaches worktrees created after it is committed AND pushed.**
+If your `.claude/settings.json` is tracked, a worktree receives it via checkout,
+so coverage follows that worktree's commit; if it is untracked, the worktree
+gets whatever copy existed at creation. Either way, worktrees that already exist
+are **not** covered and never will be — they are covered by the `@ MAIN-VERIFIED`
+receipt token, the critic's `STRANDED_IN_WORKTREE` flag, and the rescue sweep
+instead. New worktrees typically branch from `origin/<default>`, so committing
+without pushing leaves the hook absent from every worktree created in the
+meantime.
+
+**Verify before trusting it:**
+
+```bash
+bash scripts/hooks/block-worktree-deliverable-write.test.sh
+bash scripts/open-engine/worktree-rescue.test.sh
+bash scripts/open-engine/worktree-report.test.sh
+```
+
+The hook is **fail-open by construction** — no `set -e`, an `ERR` trap that
+exits 0, and every malformed or unparseable payload allowed through. The only
+non-zero exit is a positively-identified violation. A hook that blocks work when
+it breaks is worse than the bug it prevents, so eight of its cases assert
+exactly that.
