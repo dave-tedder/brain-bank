@@ -100,6 +100,14 @@ Without `execute_sql`, use `list_agent_tasks` for `Agent Review` and
 `Needs Operator`, then read `claimed_by` / the receipt agent code and
 `read_agent_ledger` to map runtime.
 
+**Pass `view: "compact"` on both listings.** The full projection returns each
+card's `review_reason` (the AGENT DONE receipt), and once a board has history
+these listings exceed the MCP response cap. This step only PICKS ids, and
+compact keeps what the picking rule reads (`critic_verdict`, `claimed_by`,
+`status`, `agent_code`). The review step below re-reads each chosen card in
+full via `get_agent_task`, so no evidence is lost — the receipt you review
+still comes from the full packet.
+
 ## The adversarial review
 
 For each eligible task, read the whole picture before judging:

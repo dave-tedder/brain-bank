@@ -75,7 +75,16 @@ After approval and insert, verify with `read_agent_ledger(agent_code:
    Name stale or missing required lanes in `FAIL`; name stale or missing critic
    lanes under `WARN`.
 3. **Board health.** Use `list_agent_tasks` for `Agent Working` and `Standing`,
-   or `execute_sql` read-only if a compact result is safer:
+   or `execute_sql` read-only if a compact result is safer.
+
+   **Pass `view: "compact"` on every `list_agent_tasks` call in this skill.**
+   The full projection returns each card's `review_reason` (the AGENT DONE
+   receipt), and once a board has history a whole-status listing exceeds the
+   MCP response cap. Compact keeps every field this skill reads —
+   `claim_expires_at`, `claimed_by`, `risk`, `requires_local`,
+   `critic_verdict`, `title` and `desired_outcome` — so the perpetual-canary
+   rule below still matches on it. It drops only long-form prose. For a full
+   packet on one card, call `get_agent_task` with that id.
    - Agent Working where `claim_expires_at < now()` = would-reap rows. Report
      count and short ids; do not reap.
    - Standing drafts older than 7 days = old drafts. Report count and short

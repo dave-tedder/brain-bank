@@ -770,8 +770,19 @@ const AGENT_TASK_LOAD_SELECT = `${AGENT_TASK_SELECT}, claim_token`;
 // operator_action because it is what makes a board row legible to a human. A
 // lane that needs the full packet for one card calls get_agent_task on that id.
 // Default stays "full" so no existing caller moves.
+//
+// desired_outcome is the one prose field KEPT, and deliberately. It is an
+// eligibility input, not a receipt: the sentinel's perpetual-canary rule
+// matches "perpetual" plus "canary"/"tripwire" against title OR
+// desired_outcome, so dropping it would silently break canary detection and
+// make a standing tripwire read as an ordinary old draft. It is also bounded
+// by design (345 characters average, 831 max, ~9K across a 26-row board)
+// because it holds the one-line "what is true when this is done", not the
+// work. Keeping it costs a fraction of review_reason's ~5,900 bytes/row and
+// gives one projection every scanning lane uses unmodified, instead of a
+// per-status special case in three separate routine prompts.
 const AGENT_TASK_COMPACT_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -1852,7 +1863,7 @@ server.registerTool(
       ),
       limit: z.number().int().min(1).max(50).optional(),
       view: z.enum(["full", "compact"]).optional().describe(
-        'Response projection. "full" (default) returns whole packets. "compact" drops the long prose fields (review_reason, context, do_steps, acceptance_criteria, desired_outcome, boundaries, sources, output_handoff, critic_flags, blocked_reason, last_failure_reason) and keeps identifiers, routing, operator_action and check_spec. Use it for whole-board scans: a full 26-row listing measured 296K characters and exceeds the response cap. Fetch any single packet you actually need with get_agent_task.',
+        'Response projection. "full" (default) returns whole packets. "compact" drops the long prose fields (review_reason, context, do_steps, acceptance_criteria, desired_outcome, boundaries, sources, output_handoff, critic_flags, blocked_reason, last_failure_reason) and keeps identifiers, routing, desired_outcome, operator_action and check_spec. Use it for whole-board scans: a full 26-row listing measured 296K characters and exceeds the response cap. Fetch any single packet you actually need with get_agent_task.',
       ),
     },
   },
