@@ -318,6 +318,8 @@ The controller runs the PACKET's check against that commit — the receipt's own
 verification prose is never trusted for these tasks. Missing / duplicate /
 malformed CHECK-REF is a HOLD, not a silent skip.
 
+**PLATFORM: macOS only, for now.** The network deny is enforced with `sandbox-exec`, a macOS binary. On Linux (including most CI runners and most servers) it is absent, and `check-run.sh` exits 67 (`CHECK_ISOLATION_UNAVAILABLE`) rather than degrading to scrub-only, so the task HOLDs for the ordinary human-read gate. Nothing unsafe happens, and nothing auto-applies, but the executed-check lane does not function on Linux yet. If you need it there, the work is to add an equivalent network-deny mechanism (a network namespace, a seccomp/eBPF filter, or a container with no egress) behind the same fail-closed contract. Do not "fix" it by removing the guard: running an agent-produced check with live network access is the failure this whole lane exists to prevent.
+
 **Isolation (`check-run.sh`).** `--apply` runs the check via
 `scripts/open-engine/check-run.sh` in a fresh detached git worktree of the
 target project at the CHECK-REF commit, under a deny-by-default env allowlist
