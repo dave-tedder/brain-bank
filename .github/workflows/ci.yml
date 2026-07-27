@@ -52,6 +52,23 @@ jobs:
       - name: Run open-engine tests
         run: node --test scripts/open-engine/*.test.mjs
 
+      # The .sh suites were previously not run by CI at all — only the .mjs ones
+      # were, so every bash test in the repo shipped green by omission. Globbed
+      # for the same reason as the step above. `git config` is needed because
+      # the worktree suites create a scratch worktree, and actions/checkout
+      # leaves no committer identity configured.
+      - name: Run shell test suites (open-engine + hooks)
+        run: |
+          git config user.email "ci@example.invalid"
+          git config user.name "CI"
+          status=0
+          for t in scripts/open-engine/*.test.sh scripts/hooks/*.test.sh; do
+            [ -e "$t" ] || continue
+            echo "--- $t"
+            bash "$t" || status=1
+          done
+          exit $status
+
       - name: Install Node
         uses: actions/setup-node@v4
         with:

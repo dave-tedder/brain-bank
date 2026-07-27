@@ -113,8 +113,36 @@ still comes from the full packet.
 For each eligible task, read the whole picture before judging:
 - the executor's `AGENT DONE` (or `AGENT NEEDS OPERATOR`) receipt;
 - the deliverable, resolved in this order:
+  0. REACHABILITY TOKEN — before resolving anything, check the receipt itself.
+     Any `deliverables/` path listed under "Touched files or records:" must
+     carry exactly one of `@ MAIN-VERIFIED` or
+     `@ NOT-VERIFIED-FROM-MAIN (<reason>)`. A path with neither is a **contract
+     miss**: note it in the flag list regardless of whether the file then turns
+     out to be readable. The token asserts the executor read the file back from
+     the MAIN checkout; a readable file does not retroactively prove it was
+     asserted, and the unasserted case is exactly the one that goes stale
+     silently. `@ BUCKET` and the inline cloud fallback are out of scope here —
+     a cloud runtime has no disk to verify from.
   1. LOCAL DISK — if this runtime can read the repo checkout, read the
      `deliverables/<slug>/...` file named under "Touched files or records:".
+  1a. STRANDED CHECK (LOCAL RUNTIME ONLY) — if step 1 found nothing in the main
+     checkout, do NOT fall through to a missing-artifact flag yet. Run the
+     read-only scan first:
+     ```
+     bash scripts/open-engine/worktree-rescue.sh --report
+     ```
+     If the named file appears in the report's `absent_from_main` or
+     `divergent` list, the work was done and the artifact is real; it was
+     written into a git worktree, which no reader resolves. Flag it
+     `STRANDED_IN_WORKTREE` and **name the worktree**. This is a DELIVERY
+     DEFECT, never a work defect: word it as "artifact stranded in worktree
+     <name>, work itself not assessed from this path" and judge the work on
+     whatever other evidence the receipt gives you. A miss falls through to
+     step 2 unchanged.
+     Note the `divergent` case: the file IS readable in main, so step 1 will
+     have succeeded and you will have reviewed the MAIN copy while a newer one
+     sits in a worktree. When the report lists the file as divergent, say so —
+     the reviewed version may not be the current one.
   2. GITHUB API — otherwise fetch it from `main` (executors do not push per
      artifact under architecture B; the sweep lane pushes the batch, so the
      current `main` copy is the reviewed target):
@@ -131,7 +159,9 @@ For each eligible task, read the whole picture before judging:
   Flag "unverifiable" ONLY when every applicable path above actually failed,
   and name which ones you tried. An unread artifact is a fetch failure to
   report, not a work defect — "flagged: unverifiable" must never again mean
-  "I did not have the file.";
+  "I did not have the file." By the same rule, `STRANDED_IN_WORKTREE` is a
+  located artifact, not an unverifiable one: never report both for the same
+  file, and never let flagged-missing mean the work was not done;
 - the task's `acceptance_criteria` and `boundaries` (via `get_agent_task`).
 
 Then run this check, defaulting to FLAG on any doubt:

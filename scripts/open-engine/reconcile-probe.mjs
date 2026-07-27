@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // OE board-hygiene Track B: the reconciliation probe runner.
 //
-// Spec: docs/superpowers/specs/2026-07-22-board-hygiene-reconciliation-design.md
-// Plan: docs/superpowers/plans/2026-07-22-board-hygiene-reconciliation.md (Task B1)
+// Design rationale and the full guard list: skills/open-engine-reconciler/SKILL.md
+// and the v0.7.0 entry in CHANGELOG.md. (The upstream design/plan documents are
+// not shipped in this repo.)
 //
 // Invoked ONLY through reconcile-run.sh, which sources credentials so the calling
 // lane emits one flat, statically-analyzable command.
@@ -174,13 +175,12 @@ export function findDeskEntryTimestamp(events) {
   // A TRANSITION, NOT A STATE. from_status must differ from 'Needs Operator',
   // or an amend that never moved the card counts as a fresh arrival.
   //
-  // Found live 2026-07-26 while authoring the first real close_check. Every
+  // Found live while authoring the first real close_check. Every
   // admin_amend_agent_task call writes an AGENT STATUS event carrying
   // payload.status = <the row's CURRENT status>, so amending a card that is
   // already on the desk emits {from_status: 'Needs Operator', status: 'Needs
-  // Operator'}. The old predicate read that as a new desk entry and slid
-  // d3a23233's window from 2026-07-10 to 2026-07-26, 16 days forward, just by
-  // authoring its probe.
+  // Operator'}. The old predicate read that as a new desk entry and slid the
+  // card's window 16 days forward, just by authoring its probe.
   //
   // Only git_path_exists consumes this, and the error direction is "safe"
   // (a later window matches less), but the practical result is a PERMANENT

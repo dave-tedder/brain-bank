@@ -12,8 +12,9 @@ and no lane learns about it. The card stays on the desk and renders in every
 briefing as "needs you" until a human notices. This lane checks the world against
 the card and retires the ones that are demonstrably done.
 
-Spec: `docs/superpowers/specs/2026-07-22-board-hygiene-reconciliation-design.md`.
-Plan: `docs/superpowers/plans/2026-07-22-board-hygiene-reconciliation.md`.
+Design rationale, the full guard list and the rollback levers: the v0.7.0 entry
+in `CHANGELOG.md`. (The upstream design and plan documents are not shipped in
+this repo; this skill is the operator-facing source of truth.)
 
 Tool names below are bare; the MCP server prefix varies by runtime
 (`mcp__open-brain__*`, UUID-prefixed connector). Load tools through ToolSearch
