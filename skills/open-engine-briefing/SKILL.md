@@ -606,6 +606,30 @@ with older habits elsewhere in this skill, these win.
      `allow_template_body: true` is passed deliberately.
    Paused-project items are excluded per the hard rule and shown only as the
    one-line suppressed count.
+3.5. **Closed without you.** Desk cards the reconciler lane auto-closed in the
+   last 7 days, rendered id first with a one-line recap and the evidence (the
+   probe, the assertion, what was measured, and `measured_by`, all carried in
+   the `OPERATOR DONE` note). Read the events rather than the card body: the
+   closer is the `reconciler` lane, never the operator.
+
+   Skip this section entirely if the reconciler lane is not installed, and omit
+   it when the 7-day window is empty. Never render an empty heading.
+
+   A 7-day window, not a single morning, so the operator has a standing chance
+   to dispute rather than one shot at catching it.
+
+   State the undo inline, every time:
+   `admin_amend_agent_task(<id>, reason, move_to_needs_operator: true)` returns
+   a wrongly closed card to the desk, and
+   `admin_amend_agent_task(<id>, reason, clear_close_check: true)` disarms a bad
+   probe so it is never run against that card again.
+
+   **A single disputed close is a stop-the-lane event.** Say so in the section.
+   Disable the cron, diagnose whether the fault was probe quality or lane
+   behavior, and re-enable only on the operator's explicit go. Same posture as
+   the executed check's first false pass, because the failure mode is the same
+   in kind: a machine retired work on evidence that did not mean what it
+   appeared to mean.
 4. **What happens next without you.** The scheduled lanes' next runs
    (executors, queue runner, closeout controller, triage), so silence reads
    as normal instead of broken. Name ONLY the Agent Todo rows that are low risk
