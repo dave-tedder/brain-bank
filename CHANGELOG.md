@@ -10,6 +10,18 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 Nothing yet.
 
+## [0.8.1] - 2026-07-27
+
+A documentation fix for a failure that looks like nothing is wrong. `complete_agent_task` accepts any receipt text, but the closeout controller only recognises eight exact, line-anchored headings. A receipt written with sensible-looking substitutes is scored as missing every one of them, and the card is held on every closeout run from then on, indefinitely, while the critic verdict, the deliverable and the work itself all read as fine. Nothing escalates, because a lane that holds the same cards every run is indistinguishable from a lane that is busy.
+
+### Fixed
+
+- **The receipt contract is now stated in `AGENTS.md`, where a session that completes a card will actually see it.** It previously lived only in `skills/queue-runner/SKILL.md` and the executor surfaces. Those are loaded by the scheduled lanes, but an ad-hoc session — or, on runtimes that spawn one session per task chip, a chip session handed a single card — never loads either, so it invents a reasonable format and the card is unappliable from birth. On the origin deployment a single batch of chip-spawned sessions stranded six cards at once this way; the work was good enough that one had already been verdicted clean by a critic lane, and it still could not close.
+
+  The convention names the eight headings, points at `REQUIRED_RECEIPT_SECTIONS` in `scripts/open-engine/closeout-controller.mjs` as the source to read rather than recall, and gives the proof command: `bash scripts/open-engine/closeout-run.sh --task-id <uuid> --live-check`, where an empty `"hold": []` is the evidence. It also states the two `OPERATOR-ACTION:` marker rules that are easy to get subtly wrong. The marker must sit on its own line **inside** Follow-up recommendation, and it must not wrap: action, `||`, and `OPERATOR-TARGET:` all on one line. Wrapping is the nastier of the two, because the action still parses and only the target comes back null, so the card classifies as appliable and reaches the operator desk with no link at all rather than being held where someone would notice.
+
+  Note for anyone reading the origin project's copy of this convention: the seventh heading differs by deployment. It is `Brain Bank capture draft` here.
+
 ## [0.8.0] - 2026-07-27
 
 Brain Bank v0.8.0 fixes a way for finished work to become unreachable without anyone noticing. Some agent runtimes execute a session inside a git worktree and do not tell it — Claude Code spawns one per task chip. A worktree is a separate working directory, and every reader in this system resolves the main checkout only, so a deliverable written there is physically real, is named honestly in the receipt, and cannot be found by the closeout controller, either critic lane, or the deliverables push. On the origin deployment this produced four critic flags in a single day, each worded as "the work is missing" when the work was fine. The fix is three layers deep because no single one covers every case, and the release also makes the repo's shell test suites actually run in CI, which they never had.
@@ -439,6 +451,7 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 - The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
 [Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.8.0...HEAD
+[0.8.1]: https://github.com/dave-tedder/brain-bank/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/dave-tedder/brain-bank/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/dave-tedder/brain-bank/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/dave-tedder/brain-bank/compare/v0.5.0...v0.6.0
