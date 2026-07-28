@@ -39,6 +39,17 @@ const REQUIRED_RECEIPT_SECTIONS = [
 
 const SAFE_STATUSES = new Set(["Agent Review"]);
 const SAFE_RISKS = new Set(["low"]);
+// Widened ONLY by an explicit human --operator-apply on a single --task-id run.
+//
+// This is deliberately every risk level, not a second tier capped at medium.
+// Capping it would recreate the exact hole it closes: a high-risk card applied
+// by hand would again have no controller path, so again no tracker write, no
+// session-log write, and no capture -- which is the whole bug. The gate here is
+// the FLAG, not the risk value: no scheduled lane passes it (executor and
+// closeout lanes emit a fixed flat command), a human must type it, and every
+// use is stamped on the immutable AGENT APPLIED event so the board shows
+// exactly what was waved through and by which path.
+const OPERATOR_APPLY_RISKS = new Set(["low", "medium", "high"]);
 const EXPECTED_STATUSES = new Set(["APPLYABLE", "HELD", "MIXED"]);
 
 // OE-8E operator-resolution sweep. An OPERATOR DONE note shorter than this
@@ -85,9 +96,10 @@ function usage() {
   node scripts/open-engine/closeout-controller.mjs --fixture <file.json> [--task-id <uuid>] [--expect APPLYABLE|HELD|MIXED]
   node scripts/open-engine/closeout-controller.mjs --input <file.json> [--task-id <uuid>] [--expect APPLYABLE|HELD|MIXED]
   node scripts/open-engine/closeout-controller.mjs --input <file.json> --write-drafts [--drafts-dir <dir>]
-  node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --live-check
-  node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply
+  node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --live-check [--operator-apply]
+  node scripts/open-engine/closeout-controller.mjs --task-id <uuid> --apply [--operator-apply]
   node scripts/open-engine/closeout-controller.mjs --resume <uuid>
+  node scripts/open-engine/closeout-controller.mjs --audit-unrecorded [--lookback-days <n>]
   node scripts/open-engine/closeout-controller.mjs --capture-run-summary --remaining-agent-review <n> [--applied-task-ids <ids>] [--held-tasks <id:reason;...>] [--notable <text>] [--run-timestamp <iso>] [--summary-preview]
   node scripts/open-engine/closeout-controller.mjs --operator-resolution-sweep [--live-check] [--lookback-days <n>] [--no-capture]
   node scripts/open-engine/closeout-controller.mjs --sql
@@ -114,7 +126,8 @@ items), appends the receipt's tracker/session-log drafts to the routed project
 files (marker-guarded, append-only, never overwrites), and captures one Open
 Brain thought per project batch. The controller never runs git - committing
 closeout writes stays human/session-side (locked decision, Session 268). A
-non-APPLYABLE task is reported and NOT applied; the gate is never relaxed. An
+non-APPLYABLE task is reported and NOT applied. The risk gate is relaxed by
+exactly one thing, --operator-apply (see below); every other gate is absolute. An
 APPLYABLE task whose receipt carries an OPERATOR-ACTION marker (a line
 "OPERATOR-ACTION: <step> || OPERATOR-TARGET: <url-or-path>" inside the Follow-up
 recommendation) routes to Needs Operator with the operator step preserved;
@@ -159,7 +172,37 @@ project_slug through the registry, and appends the note verbatim to the routed
 tracker under a per-task date-free marker (idempotent, append-only). One Brain
 Bank capture per appended task unless --no-capture. --live-check prints the
 would-append report without writing. NO board mutations, no session-log
-writes, no git, no journal (a single marker-guarded append re-runs cleanly).`;
+writes, no git, no journal (a single marker-guarded append re-runs cleanly).
+
+--operator-apply closes the human-apply gap. The board write
+(apply_agent_task_review) and the project-history writes (tracker, session log,
+Brain Bank capture) are separate: the first is an Edge Function with no
+filesystem, the second three live in THIS script. So a card applied any other
+way -- by a human reading RISK_NOT_LOW and reaching for the MCP tool directly,
+or from an ad-hoc session -- closes cleanly and writes NO project history, and
+nothing reports the omission. Measured on a live board: 7 of 34 non-controller
+applies had no record, two of them LOW risk, so this is never medium-specific.
+--operator-apply widens the risk gate for ONE --task-id on ONE live run so the
+human gets all four writes from the normal path. It requires --task-id and
+--live-check or --apply; it cannot widen a fixture run, a sweep, or a batch. No
+scheduled lane passes it (every executor and closeout lane emits a fixed flat
+command), so unattended behavior is unchanged. Each use that actually cleared a
+non-low risk is stamped on the immutable AGENT APPLIED event as
+closeout_evidence.operator_apply.
+
+--audit-unrecorded is the detector for the same gap, read-only. It lists recent
+Agent Done + Needs Operator tasks, keeps the ones carrying an AGENT APPLIED
+event, and reports any whose task id (full or short) appears in neither the
+routed tracker nor the routed session log, nor in any subproject tracker or
+session log under the project workspace. A card applied BY THE CONTROLLER with
+no record is reported as PARTIAL_APPLY rather than NO_RECORD_WRITTEN -- the
+controller writes both in one run, so its absence means a half-completed apply,
+not a skipped step, and the two must not be triaged as one pile. deliverables/
+is excluded from the search on purpose: <shortid>-<name>.md puts every card's
+id in its own filename, so counting it would build a detector that cannot fail.
+Null-slug and unknown-route cards are reported as skipped, never silently
+dropped. It appends nothing: writing project history from a receipt no human
+re-read at apply time is a worse risk than a reported gap.`;
 }
 
 function parseArgs(argv) {
@@ -183,6 +226,8 @@ function parseArgs(argv) {
     notable: "nominal",
     runTimestamp: null,
     operatorResolutionSweep: false,
+    operatorApply: false,
+    auditUnrecorded: false,
     lookbackDays: RESOLUTION_LOOKBACK_DAYS_DEFAULT,
     noCapture: false,
     help: false,
@@ -228,6 +273,10 @@ function parseArgs(argv) {
       args.runTimestamp = argv[++i];
     } else if (arg === "--operator-resolution-sweep") {
       args.operatorResolutionSweep = true;
+    } else if (arg === "--operator-apply") {
+      args.operatorApply = true;
+    } else if (arg === "--audit-unrecorded") {
+      args.auditUnrecorded = true;
     } else if (arg === "--lookback-days") {
       args.lookbackDays = argv[++i];
     } else if (arg === "--no-capture") {
@@ -282,6 +331,43 @@ function parseArgs(argv) {
       );
     }
     if (!/^\d+$/.test(String(args.lookbackDays)) || Number(args.lookbackDays) < 1) {
+      throw new Error("--lookback-days must be a positive integer.");
+    }
+    args.lookbackDays = Number(args.lookbackDays);
+  }
+  // --operator-apply widens the risk gate, so it is pinned to exactly the shape
+  // a human uses on one card they have read: a single --task-id, live, with
+  // --live-check (preview) or --apply (do it). It can never widen a fixture
+  // run, a sweep, or a batch -- which is what keeps "widen the gate" from
+  // becoming a thing a lane can inherit by accident.
+  if (args.operatorApply) {
+    if (!args.taskId) {
+      throw new Error("--operator-apply requires --task-id (one card at a time).");
+    }
+    if (!args.liveCheck && !args.apply) {
+      throw new Error(
+        "--operator-apply only combines with --live-check or --apply.",
+      );
+    }
+    if (args.auditUnrecorded || args.operatorResolutionSweep || args.source) {
+      throw new Error(
+        "--operator-apply cannot combine with a sweep, an audit, or a fixture run.",
+      );
+    }
+  }
+  if (args.auditUnrecorded) {
+    if (
+      args.apply || args.liveCheck || args.resumeTaskId || args.source ||
+      args.writeDrafts || args.captureRunSummary || args.printSql ||
+      args.taskId || args.operatorResolutionSweep
+    ) {
+      throw new Error(
+        "--audit-unrecorded combines only with --lookback-days and --registry.",
+      );
+    }
+    if (
+      !/^\d+$/.test(String(args.lookbackDays)) || Number(args.lookbackDays) < 1
+    ) {
       throw new Error("--lookback-days must be a positive integer.");
     }
     args.lookbackDays = Number(args.lookbackDays);
@@ -365,7 +451,9 @@ export function evaluate(input, registry, options = {}) {
   }
 
   for (const task of selectedTasks) {
-    const result = evaluateTask(task, registry, data.actionItems);
+    const result = evaluateTask(task, registry, data.actionItems, {
+      operatorApply: options.operatorApply,
+    });
     if (result.applyable) {
       apply.push(result.proposed);
     } else {
@@ -410,10 +498,12 @@ function draftDateFrom(generatedAt) {
   return new Date().toISOString().slice(0, 10);
 }
 
-function evaluateTask(task, registry, actionItems) {
+function evaluateTask(task, registry, actionItems, options = {}) {
   const reasons = [];
+  const operatorApply = !!options.operatorApply;
+  const allowedRisks = operatorApply ? OPERATOR_APPLY_RISKS : SAFE_RISKS;
   if (!SAFE_STATUSES.has(task.status)) reasons.push("STATUS_NOT_AGENT_REVIEW");
-  if (!SAFE_RISKS.has(task.risk)) reasons.push("RISK_NOT_LOW");
+  if (!allowedRisks.has(task.risk)) reasons.push("RISK_NOT_LOW");
   if (!task.project_slug) reasons.push("MISSING_PROJECT_SLUG");
 
   const route = task.project_slug ? registry[task.project_slug] : null;
@@ -583,6 +673,12 @@ function evaluateTask(task, registry, actionItems) {
       task_id: task.id,
       project_slug: task.project_slug,
       title: task.title || null,
+      risk: task.risk || null,
+      // True only when --operator-apply cleared a risk the default gate would
+      // have held. A low-risk task is FALSE here even under the flag: the flag
+      // changed nothing for it, and recording otherwise would inflate the count
+      // of human-waved applies on the board.
+      operator_apply: operatorApply && !SAFE_RISKS.has(task.risk),
       applied_by: "closeout-controller",
       resolution: "accepted",
       resolve_linked_action_item: false,
@@ -1043,6 +1139,16 @@ function holdMessage(reasons, receipt) {
   }
   if (reasons.some((reason) => reason.startsWith("CHECK_REF"))) {
     return "Task carries a check_spec but the receipt does not carry exactly one line-anchored 'CHECK-REF: <40-hex commit sha>'; held. Add the marker line naming the produced commit and re-run.";
+  }
+  if (reasons.includes("RISK_NOT_LOW")) {
+    // Named explicitly because the generic fallback below is what let this
+    // become a silent data-loss bug: a human read "RISK_NOT_LOW", applied the
+    // card by hand with apply_agent_task_review, and got a clean-looking close
+    // with NO tracker entry, NO session-log entry, and NO capture -- because
+    // those three writes live in THIS script, not in the Edge Function. Seven
+    // cards were closed that way before anyone noticed. Do not shorten this
+    // message to the reason code.
+    return "Task risk is not low, so the unattended lane holds it. Do NOT apply this by hand with apply_agent_task_review: that Edge Function has no filesystem, so it closes the card while writing NO tracker entry, NO session-log entry, and NO Brain Bank capture, and nothing reports the omission. Re-run this same command with --operator-apply to apply it through the controller and get all three writes.";
   }
   return `Task held by dry-run safety gates: ${reasons.join(", ")}.`;
 }
@@ -1552,6 +1658,256 @@ export function appendResolutionBlock(item) {
   );
 }
 
+// --- Unrecorded-apply audit -------------------------------------------------
+// Detects the failure this whole flag exists to prevent: a card whose AGENT
+// APPLIED event fired but whose work never reached project history. The two
+// writes are independent -- apply_agent_task_review is an Edge Function with no
+// filesystem, and the tracker/session-log appends live in THIS script -- so any
+// caller other than the controller closes the card and silently skips the
+// record. Nothing else on the board reports it: the card reads perfectly
+// closed. Measured on a live board: 7 of 34 non-controller applies had no
+// record, and two of the seven were LOW risk -- this is not a medium-risk-only
+// problem, it is what happens whenever the two writes are not run together.
+//
+// Read-only by construction. It reports; it never appends. Auto-writing project
+// history from a receipt no human re-read at apply time is a different and
+// worse risk than a reported gap.
+
+// Which files count as "project history" for a given route.
+//
+// The routed tracker/session-log come first, but they are NOT the whole answer:
+// a project may keep subproject history in a nested folder (for example a
+// per-workstream tracker under its own subdirectory), and a human recording a
+// card there has genuinely recorded it. Checking only the routed pair reports
+// that work as missing forever, and a check that can never pass stops being
+// read.
+//
+// deliverables/ is excluded on purpose and is the one exclusion that carries
+// real weight: the convention is deliverables/<slug>/<shortid>-<name>.md, so
+// every card's short id appears in its own filename. Including that directory
+// would mark almost every card "recorded" and produce a detector that cannot
+// fail -- the opposite failure, and the harder one to notice.
+const HISTORY_FILE_RE = /(TRACKER|SESSION-LOG)/i;
+const HISTORY_SKIP_DIRS = new Set([
+  "deliverables",
+  "node_modules",
+  ".git",
+  ".claude",
+  ".venv",
+  "worktrees",
+]);
+const HISTORY_MAX_DEPTH = 3;
+
+function discoverHistoryFiles(dir, depth = 0, out = []) {
+  if (depth > HISTORY_MAX_DEPTH) return out;
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of entries) {
+    if (HISTORY_SKIP_DIRS.has(name)) continue;
+    const full = join(dir, name);
+    let stat;
+    try {
+      stat = statSync(full);
+    } catch {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      discoverHistoryFiles(full, depth + 1, out);
+    } else if (name.toLowerCase().endsWith(".md") && HISTORY_FILE_RE.test(name)) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+function historyPathsFor(route) {
+  const routed = [route.tracker_path, route.session_log_path].filter(Boolean);
+  const discovered = route.workspace_path
+    ? discoverHistoryFiles(route.workspace_path)
+    : [];
+  const seen = new Set(routed);
+  return {
+    routed,
+    all: [...routed, ...discovered.filter((path) => !seen.has(path))],
+  };
+}
+
+// packets: array of get_agent_task-shaped { task, events }.
+// readText / listHistoryFiles: injected for tests.
+export function evaluateUnrecordedAudit(packets, registry, options = {}) {
+  const readText = options.readText ||
+    ((path) => {
+      try {
+        return readFileSync(path, "utf8");
+      } catch {
+        return null;
+      }
+    });
+
+  const unrecorded = [];
+  const recorded = [];
+  const skipped = [];
+
+  for (const packet of packets) {
+    const task = packet.task || packet;
+    const events = Array.isArray(packet.events)
+      ? packet.events
+      : (task.events || []);
+    const applied = events
+      .filter((event) => event?.event_type === "AGENT APPLIED")
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    if (applied.length === 0) {
+      skipped.push({ task_id: task.id, reason: "NOT_APPLIED" });
+      continue;
+    }
+    const last = applied[applied.length - 1];
+    const appliedBy = String(last.payload?.applied_by || "").trim() || null;
+    const viaController =
+      last.payload?.closeout_evidence?.source === "oe8-closeout-controller";
+
+    if (!task.project_slug) {
+      // Cannot be checked OR repaired: with no slug there is no route, so
+      // there is no file to look in. Reported, never silently dropped --
+      // this is the same null-slug orphan class the OE-8E sweep hits.
+      skipped.push({
+        task_id: task.id,
+        reason: "MISSING_PROJECT_SLUG",
+        applied_by: appliedBy,
+      });
+      continue;
+    }
+    const route = registry[task.project_slug];
+    if (!route) {
+      skipped.push({
+        task_id: task.id,
+        reason: "UNKNOWN_PROJECT_ROUTE",
+        project_slug: task.project_slug,
+        applied_by: appliedBy,
+      });
+      continue;
+    }
+
+    const shortId = shortTaskId(task.id);
+    const listHistoryFiles = options.listHistoryFiles || historyPathsFor;
+    const paths = listHistoryFiles(route);
+    const routedSet = new Set(paths.routed);
+    let foundBy = null;
+    let foundScope = null;
+    const foundIn = [];
+    for (const path of paths.all) {
+      const text = readText(path);
+      if (text === null) continue;
+      // Full id first: it is the controller's own marker format and cannot
+      // collide. Fall back to the short id, which is what a hand-written
+      // entry usually carries. Checking only the short id would risk a false
+      // "recorded" from a coincidental 8-hex string, and a detector that
+      // under-reports is worse than one that is slightly noisy.
+      let hit = null;
+      if (text.includes(task.id)) hit = "full-id";
+      else if (shortId && text.includes(shortId)) hit = "short-id";
+      if (!hit) continue;
+      foundIn.push(path);
+      if (hit === "full-id") foundBy = "full-id";
+      else foundBy = foundBy || "short-id";
+      // "routed" wins once seen: it is the strongest evidence the normal
+      // closeout path ran. A subproject-only hit is still a real record, just
+      // one a human placed by hand.
+      if (routedSet.has(path)) foundScope = "routed";
+      else foundScope = foundScope || "subproject";
+    }
+
+    const row = {
+      task_id: task.id,
+      short_id: shortId,
+      project_slug: task.project_slug,
+      risk: task.risk || null,
+      status: task.status || null,
+      applied_at: last.created_at || null,
+      applied_by: appliedBy,
+      via_controller: viaController,
+    };
+
+    if (foundBy) {
+      recorded.push({
+        ...row,
+        found_by: foundBy,
+        found_scope: foundScope,
+        found_in: foundIn,
+      });
+    } else {
+      unrecorded.push({
+        ...row,
+        searched: paths.all,
+        // A controller-applied card with no record is a DIFFERENT and more
+        // serious bug than a hand-applied one: the controller writes the
+        // record in the same run, so its absence means a partial apply (the
+        // board write landed, the file write did not) rather than a skipped
+        // step. Flagged so the two never get triaged as one pile.
+        severity: viaController ? "PARTIAL_APPLY" : "NO_RECORD_WRITTEN",
+      });
+    }
+  }
+
+  return { unrecorded, recorded, skipped };
+}
+
+async function runUnrecordedAudit(args, registry) {
+  const config = mcpConfigFromEnv();
+  // An applied card lands in Agent Done (normal) or Needs Operator (when the
+  // receipt carried an OPERATOR-ACTION marker). Both are scanned.
+  const statuses = ["Agent Done", "Needs Operator"];
+  const rows = [];
+  for (const status of statuses) {
+    const listed = await mcpCall(config, "list_agent_tasks", {
+      statuses: [status],
+      include_done: true,
+      limit: RESOLUTION_SCAN_LIMIT,
+    });
+    const page = Array.isArray(listed) ? listed : (listed?.tasks || []);
+    rows.push(...page);
+  }
+
+  const cutoffMs = Date.now() - args.lookbackDays * 24 * 60 * 60 * 1000;
+  const candidates = rows.filter((row) => {
+    const ms = new Date(row.updated_at || row.completed_at || 0).getTime();
+    return Number.isFinite(ms) && ms >= cutoffMs;
+  });
+
+  const packets = [];
+  for (const row of candidates) {
+    packets.push(await mcpCall(config, "get_agent_task", { task_id: row.id }));
+  }
+
+  const evaluated = evaluateUnrecordedAudit(packets, registry);
+  // list_agent_tasks caps at 50 PER STATUS; report truncation per status so a
+  // partial scan is never read as full coverage (no-silent-caps).
+  const truncated = statuses.filter((status) => {
+    const page = rows.filter((row) => row.status === status);
+    return !scanCoversWindow(page, cutoffMs, RESOLUTION_SCAN_LIMIT);
+  });
+
+  const result = {
+    mode: "unrecorded-apply-audit",
+    dry_run: true,
+    board_mutations: false,
+    lookback_days: args.lookbackDays,
+    scan_limit: RESOLUTION_SCAN_LIMIT,
+    statuses_scanned: statuses,
+    scan_truncated: truncated,
+    swept: packets.length,
+    unrecorded_count: evaluated.unrecorded.length,
+    unrecorded: evaluated.unrecorded,
+    recorded_count: evaluated.recorded.length,
+    skipped: evaluated.skipped,
+  };
+  console.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
 async function runOperatorResolutionSweep(args, registry) {
   const config = mcpConfigFromEnv();
   const listed = await mcpCall(config, "list_agent_tasks", {
@@ -1620,9 +1976,13 @@ async function runLive(args, registry) {
     task_id: args.taskId,
   });
   const input = liveInputFromPacket(packet);
-  const result = evaluate(input, registry, { taskId: args.taskId });
+  const result = evaluate(input, registry, {
+    taskId: args.taskId,
+    operatorApply: args.operatorApply,
+  });
   result.mode = args.apply ? "apply" : "live-check";
   result.dry_run = !args.apply;
+  result.operator_apply = !!args.operatorApply;
 
   if (!args.apply) {
     printResult(result);
@@ -1705,6 +2065,12 @@ async function runLive(args, registry) {
         closeout_evidence: {
           source: "oe8-closeout-controller",
           mode: "oe8c-single-task",
+          // Stamped on the immutable AGENT APPLIED event so the board can
+          // always answer "did a human widen the risk gate for this card, and
+          // to what?" without re-deriving it from shell history.
+          operator_apply: item.operator_apply
+            ? { risk: item.risk, widened_by: "--operator-apply" }
+            : undefined,
           required_sections_present: REQUIRED_RECEIPT_SECTIONS,
           augmented_sections: item.augmented_sections,
           review_note_augmentation: item.augmentation_text || undefined,
@@ -1991,6 +2357,10 @@ async function main() {
   }
   if (args.operatorResolutionSweep) {
     await runOperatorResolutionSweep(args, loadRegistry(args.registry));
+    return;
+  }
+  if (args.auditUnrecorded) {
+    await runUnrecordedAudit(args, loadRegistry(args.registry));
     return;
   }
   if (args.liveCheck || args.apply) {

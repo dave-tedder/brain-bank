@@ -17,6 +17,7 @@ import {
   applyDocFlip,
   evaluate,
   evaluateResolutionSweep,
+  evaluateUnrecordedAudit,
   extractOperatorAction,
   scanCoversWindow,
   flipDocLineText,
@@ -1356,4 +1357,302 @@ test("OPS_AMEND_NEWER_THAN_DONE hold message names only reachable verbs", () => 
       "hold message still instructs the unreachable Agent Review -> Agent Review transition",
     );
   });
+});
+
+// ---------------------------------------------------------------------------
+// Human-apply gap.
+//
+// The board write and the project-history writes are separate systems. These
+// pin BOTH halves of the fix: --operator-apply (so a human has a controller
+// path for a non-low card) and --audit-unrecorded (so a card that skipped the
+// history write is detectable instead of reading as cleanly closed).
+// ---------------------------------------------------------------------------
+
+function riskTask(risk, overrides = {}) {
+  const id = "dddddddd-e270-44dc-b414-d75e00080ae4";
+  return {
+    generated_at: "2026-07-27T12:00:00.000Z",
+    tasks: [{
+      id,
+      title: `${risk}-risk task`,
+      status: "Agent Review",
+      risk,
+      project_slug: "tmp-proj",
+      explicit_approval: false,
+      linked_action_item_id: null,
+      review_reason: null,
+      sources: [],
+      ...overrides,
+      events: [{
+        task_id: id,
+        event_type: "AGENT DONE",
+        agent_code: "dave-claude-code",
+        payload: {
+          reason: validReceipt(),
+          status: "Agent Review",
+          from_status: "Agent Working",
+        },
+        created_at: "2026-07-27T11:00:00.000Z",
+      }],
+    }],
+    actionItems: [],
+  };
+}
+
+test("operator-apply: medium risk HOLDs by default (unattended behavior unchanged)", () => {
+  withTempCopy((dir) => {
+    const result = evaluate(riskTask("medium"), tmpRegistry(dir), {});
+    assert.equal(result.status, "HELD");
+    assert.ok(result.hold[0].reasons.includes("RISK_NOT_LOW"));
+  });
+});
+
+test("operator-apply: medium risk becomes APPLYABLE under the flag", () => {
+  withTempCopy((dir) => {
+    const result = evaluate(riskTask("medium"), tmpRegistry(dir), {
+      operatorApply: true,
+    });
+    assert.equal(result.status, "APPLYABLE");
+    assert.equal(result.apply[0].operator_apply, true);
+    assert.equal(result.apply[0].risk, "medium");
+  });
+});
+
+test("operator-apply: high risk is NOT a second excluded tier", () => {
+  // Capping the flag at medium would recreate the bug for the highest-stakes
+  // cards: a high card applied by hand would again write no project history.
+  withTempCopy((dir) => {
+    const result = evaluate(riskTask("high"), tmpRegistry(dir), {
+      operatorApply: true,
+    });
+    assert.equal(result.status, "APPLYABLE");
+    assert.equal(result.apply[0].operator_apply, true);
+    assert.equal(result.apply[0].risk, "high");
+  });
+});
+
+test("operator-apply: a LOW task under the flag is not counted as human-widened", () => {
+  // The flag changed nothing for it, so stamping operator_apply would inflate
+  // the board's count of cards a human waved past the risk gate.
+  withTempCopy((dir) => {
+    const result = evaluate(riskTask("low"), tmpRegistry(dir), {
+      operatorApply: true,
+    });
+    assert.equal(result.status, "APPLYABLE");
+    assert.equal(result.apply[0].operator_apply, false);
+  });
+});
+
+test("operator-apply: widens ONLY risk, never the other gates", () => {
+  withTempCopy((dir) => {
+    // Wrong status AND non-low risk: the flag must clear the risk reason and
+    // leave the status reason standing.
+    const input = riskTask("medium", { status: "Agent Working" });
+    const result = evaluate(input, tmpRegistry(dir), { operatorApply: true });
+    assert.equal(result.status, "HELD");
+    assert.ok(result.hold[0].reasons.includes("STATUS_NOT_AGENT_REVIEW"));
+    assert.ok(!result.hold[0].reasons.includes("RISK_NOT_LOW"));
+  });
+});
+
+test("operator-apply: flag does not rescue a task with a broken receipt", () => {
+  withTempCopy((dir) => {
+    const input = riskTask("medium");
+    input.tasks[0].events[0].payload.reason = "What I did: some stuff";
+    const result = evaluate(input, tmpRegistry(dir), { operatorApply: true });
+    assert.equal(result.status, "HELD");
+    assert.ok(result.hold[0].reasons.includes("RECEIPT_MISSING_SECTION"));
+  });
+});
+
+test("RISK_NOT_LOW hold message warns that a hand-apply writes no history", () => {
+  // This message IS the fix for the discoverability half of the bug: the old
+  // generic fallback printed the reason code and nothing else, so a human read
+  // it, applied by hand, and lost the record with no warning.
+  withTempCopy((dir) => {
+    const result = evaluate(riskTask("medium"), tmpRegistry(dir), {});
+    const message = result.hold[0].message;
+    assert.match(message, /--operator-apply/, "names the escape hatch");
+    assert.match(message, /apply_agent_task_review/, "names the trap verb");
+    assert.match(message, /tracker/i);
+    assert.match(message, /session-log/i);
+    assert.match(message, /capture/i);
+  });
+});
+
+// --- --audit-unrecorded -----------------------------------------------------
+
+function appliedPacket(overrides = {}) {
+  const {
+    id = "eeeeeeee-e270-44dc-b414-d75e00080ae4",
+    project_slug = "tmp-proj",
+    risk = "medium",
+    applied_by = "operator",
+    closeout_evidence = undefined,
+    events = null,
+  } = overrides;
+  return {
+    task: { id, project_slug, risk, status: "Agent Done" },
+    events: events || [{
+      event_type: "AGENT APPLIED",
+      created_at: "2026-07-27T12:00:00.000Z",
+      payload: { applied_by, closeout_evidence },
+    }],
+  };
+}
+
+const AUDIT_REGISTRY = {
+  "tmp-proj": {
+    workspace_path: "/nope",
+    tracker_path: "/nope/PROJECT-TRACKER.md",
+    session_log_path: "/nope/SESSION-LOG.md",
+    capture_tag: "tmp_proj",
+  },
+};
+
+function readerFor(map) {
+  return (path) => (path in map ? map[path] : null);
+}
+
+test("audit: applied card whose FULL id is in the tracker is recorded", () => {
+  const packet = appliedPacket();
+  const result = evaluateUnrecordedAudit([packet], AUDIT_REGISTRY, {
+    readText: readerFor({
+      "/nope/PROJECT-TRACKER.md": `closeout tasks: ${packet.task.id}`,
+    }),
+  });
+  assert.equal(result.unrecorded.length, 0);
+  assert.equal(result.recorded[0].found_by, "full-id");
+});
+
+test("audit: a hand-written entry carrying only the SHORT id still counts", () => {
+  const result = evaluateUnrecordedAudit([appliedPacket()], AUDIT_REGISTRY, {
+    readText: readerFor({
+      "/nope/SESSION-LOG.md": "Applied card eeeeeeee by hand.",
+    }),
+  });
+  assert.equal(result.unrecorded.length, 0);
+  assert.equal(result.recorded[0].found_by, "short-id");
+});
+
+test("audit: applied card absent from both files is unrecorded", () => {
+  const result = evaluateUnrecordedAudit([appliedPacket()], AUDIT_REGISTRY, {
+    readText: readerFor({
+      "/nope/PROJECT-TRACKER.md": "unrelated content",
+      "/nope/SESSION-LOG.md": "also unrelated",
+    }),
+  });
+  assert.equal(result.unrecorded.length, 1);
+  assert.equal(result.unrecorded[0].severity, "NO_RECORD_WRITTEN");
+  assert.equal(result.unrecorded[0].via_controller, false);
+});
+
+test("audit: a CONTROLLER-applied card with no record is PARTIAL_APPLY, not the same bug", () => {
+  // The controller writes board + files in one run, so a missing record there
+  // means a half-completed apply. Triaging it with the hand-apply pile would
+  // hide a real partial-write failure.
+  const packet = appliedPacket({
+    applied_by: "closeout-controller",
+    closeout_evidence: { source: "oe8-closeout-controller" },
+  });
+  const result = evaluateUnrecordedAudit([packet], AUDIT_REGISTRY, {
+    readText: readerFor({ "/nope/PROJECT-TRACKER.md": "nothing here" }),
+  });
+  assert.equal(result.unrecorded[0].severity, "PARTIAL_APPLY");
+  assert.equal(result.unrecorded[0].via_controller, true);
+});
+
+test("audit: a task that was never applied is skipped, not reported", () => {
+  const packet = appliedPacket({
+    events: [{
+      event_type: "AGENT DONE",
+      created_at: "2026-07-27T11:00:00.000Z",
+      payload: {},
+    }],
+  });
+  const result = evaluateUnrecordedAudit([packet], AUDIT_REGISTRY, {
+    readText: readerFor({}),
+  });
+  assert.equal(result.unrecorded.length, 0);
+  assert.equal(result.skipped[0].reason, "NOT_APPLIED");
+});
+
+test("audit: null slug and unknown route are reported as skipped, never dropped", () => {
+  const noSlug = appliedPacket({
+    id: "11111111-e270-44dc-b414-d75e00080ae4",
+    project_slug: null,
+  });
+  const badRoute = appliedPacket({
+    id: "22222222-e270-44dc-b414-d75e00080ae4",
+    project_slug: "does-not-exist",
+  });
+  const result = evaluateUnrecordedAudit(
+    [noSlug, badRoute],
+    AUDIT_REGISTRY,
+    { readText: readerFor({}) },
+  );
+  assert.equal(result.unrecorded.length, 0);
+  const reasons = result.skipped.map((row) => row.reason).sort();
+  assert.deepEqual(reasons, ["MISSING_PROJECT_SLUG", "UNKNOWN_PROJECT_ROUTE"]);
+});
+
+test("audit: an unreadable history file does not crash or fake a record", () => {
+  // readText returns null for every path (missing files, permissions). The
+  // card must fall through to unrecorded, never be silently treated as found.
+  const result = evaluateUnrecordedAudit([appliedPacket()], AUDIT_REGISTRY, {
+    readText: () => null,
+  });
+  assert.equal(result.unrecorded.length, 1);
+  assert.equal(result.unrecorded[0].severity, "NO_RECORD_WRITTEN");
+});
+
+test("audit: a card recorded ONLY in a subproject tracker counts as recorded", () => {
+  // Real projects do this: a card can be recorded only in a per-workstream
+  // tracker nested under the workspace, not the routed root tracker.
+  // Reporting it missing forever would make the detector cry wolf.
+  const packet = appliedPacket();
+  const sub = "/nope/workstream-a/PROJECT-TRACKER.md";
+  const result = evaluateUnrecordedAudit([packet], AUDIT_REGISTRY, {
+    listHistoryFiles: (route) => ({
+      routed: [route.tracker_path, route.session_log_path],
+      all: [route.tracker_path, route.session_log_path, sub],
+    }),
+    readText: readerFor({ [sub]: `closed ${packet.task.id}` }),
+  });
+  assert.equal(result.unrecorded.length, 0);
+  assert.equal(result.recorded[0].found_scope, "subproject");
+});
+
+test("audit: a routed hit outranks a subproject hit", () => {
+  const packet = appliedPacket();
+  const sub = "/nope/sub/PROJECT-TRACKER.md";
+  const result = evaluateUnrecordedAudit([packet], AUDIT_REGISTRY, {
+    listHistoryFiles: (route) => ({
+      routed: [route.tracker_path, route.session_log_path],
+      all: [route.tracker_path, route.session_log_path, sub],
+    }),
+    readText: readerFor({
+      "/nope/PROJECT-TRACKER.md": `closed ${packet.task.id}`,
+      [sub]: `also mentions ${packet.task.id}`,
+    }),
+  });
+  assert.equal(result.recorded[0].found_scope, "routed");
+});
+
+test("audit: a deliverables file must NOT be able to satisfy the check", () => {
+  // deliverables/<slug>/<shortid>-<name>.md embeds the short id in its own
+  // filename, so counting that directory would make every card read as
+  // recorded and the detector could never fail. Guarded by excluding the
+  // directory from discovery -- pinned here because the failure is silent.
+  const packet = appliedPacket();
+  const deliverable = "/nope/deliverables/tmp-proj/eeeeeeee-thing.md";
+  const result = evaluateUnrecordedAudit([packet], AUDIT_REGISTRY, {
+    listHistoryFiles: (route) => ({
+      routed: [route.tracker_path, route.session_log_path],
+      // Discovery excludes deliverables/, so it never reaches `all`.
+      all: [route.tracker_path, route.session_log_path],
+    }),
+    readText: readerFor({ [deliverable]: `content for ${packet.task.id}` }),
+  });
+  assert.equal(result.unrecorded.length, 1, "deliverable must not count");
 });
