@@ -10,6 +10,34 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 Nothing yet.
 
+## [0.8.2] - 2026-07-28
+
+A fix for work that closes cleanly and leaves no trace. Closing a card writes two independent systems, and only one of them can touch the filesystem. `apply_agent_task_review` is an Edge Function: it closes the board and cannot write project history, and never could. The tracker append, the session-log append and the capture all live in `scripts/open-engine/closeout-controller.mjs`, which runs them in the same pass right after its own apply call. Call the MCP verb directly and you get a card that reads perfectly closed — correct status, real `AGENT APPLIED` event, honest `applied_by` — with no record written anywhere and nothing reporting the omission.
+
+On the origin deployment, an audit of all 55 `AGENT APPLIED` events found 21 through the controller, 34 not, and **7 of those 34 with no project-history record at all**. Two of the seven were **low** risk. That detail matters: the failure was first read as a medium-risk problem, on the theory that the controller's low-only `SAFE_RISKS` gate forces a human onto the manual path. That is the most common *route* into the trap, not its *cause* — a low-risk card applied by hand from an ad-hoc session loses its record identically. The cause is two uncoupled writes and no detector.
+
+### Added
+
+- **`--operator-apply`, the correct path that did not exist.** Widens the risk gate for one `--task-id` on one live run, so a human applying a non-low card gets the board close *and* all three project-history writes from the normal path. It widens to **every** risk level deliberately: capping it at medium would recreate the exact hole for the highest-stakes cards, which is the failure inverted rather than fixed. The gate is the flag, not the risk value — it requires `--task-id` plus `--live-check` or `--apply`, refuses to combine with a fixture run, a sweep or an audit, and no scheduled lane passes it, so unattended behaviour is unchanged. Each use that actually cleared a non-low risk is stamped on the immutable `AGENT APPLIED` event as `closeout_evidence.operator_apply`; a low-risk card under the flag records `false`, because the flag changed nothing for it and counting it would inflate the tally of human-waved applies.
+
+- **`--audit-unrecorded`, the detector.** Read-only. Lists recent `Agent Done` and `Needs Operator` tasks, keeps those carrying an `AGENT APPLIED` event, and reports any whose task id appears in no project-history file under its routed workspace. It appends nothing, on purpose: writing project history automatically from a receipt no human re-read at apply time is a worse risk than a reported gap.
+
+  Two decisions in it are load-bearing and pinned by tests, because the two failure directions are opposites and only one announces itself. **Subproject history counts** — a card recorded only in a nested per-workstream tracker is genuinely recorded, and checking only the routed pair reports that work missing forever; a check that can never pass stops being read. **`deliverables/` is excluded** — the convention is `deliverables/<slug>/<shortid>-<name>.md`, so every card's short id sits in its own filename, and counting that directory would mark nearly every card recorded and produce a detector that *cannot fail*. Nothing in its output would ever look wrong.
+
+  A card applied **by the controller** with no record is reported as `PARTIAL_APPLY` rather than `NO_RECORD_WRITTEN`. The controller writes board and files in one run, so an absence there means a half-completed apply rather than a skipped step, and triaging the two as one pile would bury a real partial-write failure. Null-slug and unknown-route cards are reported as skipped, never silently dropped.
+
+  Bounded by the 50-row-per-status server cap on `list_agent_tasks`, so a longer lookback cannot reach further back than the cap allows. The audit reports `scan_truncated` per status rather than presenting a partial scan as full coverage — a clean result inside a truncated scan is not proof of none.
+
+### Fixed
+
+- **The `RISK_NOT_LOW` hold now names the consequence, not just the gate.** It previously fell through to the generic `Task held by dry-run safety gates: RISK_NOT_LOW.` A human reads that, correctly concludes the unattended lane will never take the card, reaches for `apply_agent_task_review`, and loses the record with no warning anywhere in the path. This was the discoverability half of the bug and probably the larger half. The message now states outright that a hand-apply writes no tracker entry, no session-log entry and no capture, and names `--operator-apply` as the way to apply through the controller.
+
+- **`AGENTS.md` states the two-systems fact as a cross-cutting convention**, so an ad-hoc session that never loads the executor surfaces still sees it.
+
+### Note for operators
+
+If you run scheduled closeout lanes, add a stop line: **a lane must never pass `--operator-apply`.** The `RISK_NOT_LOW` message now names that flag, and the message is written for a human who has read the card. A hold reason is a report, never a command.
+
 ## [0.8.1] - 2026-07-27
 
 A documentation fix for a failure that looks like nothing is wrong. `complete_agent_task` accepts any receipt text, but the closeout controller only recognises eight exact, line-anchored headings. A receipt written with sensible-looking substitutes is scored as missing every one of them, and the card is held on every closeout run from then on, indefinitely, while the critic verdict, the deliverable and the work itself all read as fine. Nothing escalates, because a lane that holds the same cards every run is indistinguishable from a lane that is busy.
