@@ -10,6 +10,32 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 Nothing yet.
 
+## [0.8.3] - 2026-07-29
+
+Three fixes for agents and contributors reporting things they had not actually checked.
+
+### Fixed
+
+- **A critic lane could report a deliverable unreachable without ever trying to reach it.** The GitHub fallback is a plain HTTPS request carrying a bearer token, using no GitHub connector and no repo permission on the session, but a lane could still decline it on a guess about its own capabilities and record "GitHub access not enabled" as a finding. Flagging "unverifiable" now requires naming each path actually attempted together with its concrete failure (HTTP status, error text, or token-unset). A path you did not run is not a path that failed, so it may not be cited.
+
+  A deliverable you could not fetch remains a **delivery** defect to report, never evidence that the work was not done.
+
+- **A daily repo-read probe, so a broken read path is visible before a card depends on it.** New step 1a runs exactly one unconditional fetch per run and surfaces the result in the ledger line the sentinel and digest already read. It never blocks the run. Without it the read path is only exercised when a card happens to need it, so an unset, misscoped or expired token stays invisible for days. On the origin deployment that gap ran ten days.
+
+  The probe reports **three** facts, not a status code, and that shape is the point: **`403` is returned for a token permission refusal, for the anonymous rate limit, and for a sandbox egress proxy blocking the call before it reaches GitHub, and those have completely different fixes.** Only the response body separates them, so the probe reports token presence (length and first 11 characters only, never the value), the HTTP status, and the first ~200 bytes of the body, with a discriminator list mapping each message to its cause.
+
+  This shipped in two steps and the correction is worth stating, because the first version was confidently wrong in the more dangerous direction. It instructed lanes that "no GitHub access" is never a valid reason to skip the fetch, which would train a lane to suppress a **true** finding. In the originating incident the lane's claim was correct and the maintainer spent a day re-checking a token that had been fine throughout. The durable rule is not about who was right: **report the raw status and body rather than a conclusion, because an unevidenced claim is not believed even when it is right.**
+
+- **Metadata extraction could split one request into two action items.** A capture like "research X and deliver the report under `deliverables/<slug>/`" could emit the delivery clause as its own item. When the real sibling shipped and resolved, the orphan clause stayed open, read to downstream automation as unhandled work, and produced a duplicate task-board card days later. A ONE-request-is-ONE-item rule is now stated in the `action_items` block of both capture paths, byte-identical per the mirror rule.
+
+  Deliberately **not** fixed with a "refuse if the source thought already has a card" guard. That guard is wrong: one thought legitimately produces several distinct carded items, and the data disproved the assumption before it was written. The discriminator is semantic, not structural.
+
+### Documentation
+
+- **`docs/new-contributor-notes.md` now explains the root `deno.json`, so nobody deletes it.** It is three lines, nothing visibly references it, and it was undocumented, so it read like a stray. Deno discovers its config from the current working directory rather than the entrypoint's directory, so that file is what lets a `deno check` run from the repo root resolve the five bare specifiers. Remove it and the root-form check reports **79 errors**, all phantom: five unresolved specifiers plus implicit-`any` cascading off them, which reads as a large pre-existing backlog in code that is clean.
+
+  Two things make it easy to get wrong, and both are now written down. **CI does not exercise it**, because `ci.yml` passes `--config` explicitly, so deleting the file leaves CI green while the root-form commands documented in this repo start failing. And **a cross-repo comparison proves nothing**: if the same check passes in one checkout and fails in another, confirm both resolve the same config before concluding anything about the code. Config discovery, not the source, is the usual difference.
+
 ## [0.8.2] - 2026-07-28
 
 A fix for work that closes cleanly and leaves no trace. Closing a card writes two independent systems, and only one of them can touch the filesystem. `apply_agent_task_review` is an Edge Function: it closes the board and cannot write project history, and never could. The tracker append, the session-log append and the capture all live in `scripts/open-engine/closeout-controller.mjs`, which runs them in the same pass right after its own apply call. Call the MCP verb directly and you get a card that reads perfectly closed — correct status, real `AGENT APPLIED` event, honest `applied_by` — with no record written anywhere and nothing reporting the omission.
@@ -478,7 +504,9 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 - This snapshot preceded the public `v0.1.0` release, which shipped on 2026-04-30 after the deploy-from-scratch walkthrough was verified against fresh Supabase projects.
 - The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/dave-tedder/brain-bank/compare/v0.8.2...v0.8.3
+[0.8.2]: https://github.com/dave-tedder/brain-bank/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/dave-tedder/brain-bank/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/dave-tedder/brain-bank/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/dave-tedder/brain-bank/compare/v0.6.0...v0.7.0

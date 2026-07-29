@@ -152,12 +152,37 @@ For each eligible task, read the whole picture before judging:
        "https://api.github.com/repos/<your-org>/<your-repo>/contents/deliverables/<path>?ref=main"
      ```
      A 404 usually means the sweep has not pushed it yet; fall through if so.
-  3. BUCKET — `get_deliverable {"path": "<slug>/<file>"}` (receipts that say
-     `@ BUCKET`).
+     **Run the curl before concluding anything, and report evidence rather
+     than a conclusion:** the observed HTTP status, plus the first ~200 bytes
+     of the response body on any non-200, plus whether the token variable was
+     set. Never print the token value beyond its length and prefix.
+     A 403 here has several distinct causes and the body is the only way to
+     tell them apart. A GitHub error ("Resource not accessible by personal
+     access token") means the token lacks Contents:Read. "API rate limit
+     exceeded" means no usable token was sent. A proxy message ("GitHub
+     access to this repository is not enabled for this session") means a
+     **cloud sandbox egress proxy** blocked the call before it reached
+     GitHub, and the token is irrelevant. That last case is real: it was
+     measured on a cloud critic lane whose token was present and correctly
+     scoped the whole time.
+     Why this is stated so carefully: a lane once flagged a card citing
+     "GitHub access not enabled" and "bucket verbs not deployed". The first
+     was correct and the second was false, but neither claim carried a status
+     code or a response body, so the true finding and the false one were
+     indistinguishable and a day went into re-diagnosing a healthy token. An
+     unevidenced claim is not believed even when it is right.
+  3. BUCKET — `get_deliverable {"path": "<slug>/<file>"}`. The bucket holds
+     ONLY cloud-written artifacts, i.e. receipts marked `@ BUCKET`, so a miss
+     on a locally-written deliverable is EXPECTED and carries no information.
+     Never report that miss as "not deployed", and never treat it as evidence
+     about the work.
   4. INLINE — the draft left in "Work summary" (cloud fallback).
 
   Flag "unverifiable" ONLY when every applicable path above actually failed,
-  and name which ones you tried. An unread artifact is a fetch failure to
+  and name which ones you tried WITH the concrete failure each one returned
+  (HTTP status, error text, or `token-unset`). A capability assumption is not
+  a failure: if you did not run a path, you have not established that it
+  failed, and you may not cite it. An unread artifact is a fetch failure to
   report, not a work defect — "flagged: unverifiable" must never again mean
   "I did not have the file." By the same rule, `STRANDED_IN_WORKTREE` is a
   located artifact, not an unverifiable one: never report both for the same
