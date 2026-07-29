@@ -152,18 +152,25 @@ For each eligible task, read the whole picture before judging:
        "https://api.github.com/repos/<your-org>/<your-repo>/contents/deliverables/<path>?ref=main"
      ```
      A 404 usually means the sweep has not pushed it yet; fall through if so.
-     **This is a plain HTTPS request carrying a bearer token. It does NOT use
-     the GitHub connector, a repo integration, or any git permission on your
-     session, so "this session does not have GitHub access" is never a reason
-     to skip it.** Actually run the curl, then report what it returned: the
-     observed HTTP status, or `token-unset` if `$BB_REPO_READ_TOKEN` is empty.
-     Never substitute a guess about your own capabilities for a fetch result,
-     and never print the token value. A cloud critic lane doing exactly that
-     once flagged a card unreachable citing "GitHub access not enabled" and
-     "bucket verbs not deployed" when the file was readable at `ref=main` and
-     the verbs were live. The work was fine; the diagnosis was invented, which
-     is worse than no verdict because it sends the reader to fix
-     infrastructure that was never broken.
+     **Run the curl before concluding anything, and report evidence rather
+     than a conclusion:** the observed HTTP status, plus the first ~200 bytes
+     of the response body on any non-200, plus whether the token variable was
+     set. Never print the token value beyond its length and prefix.
+     A 403 here has several distinct causes and the body is the only way to
+     tell them apart. A GitHub error ("Resource not accessible by personal
+     access token") means the token lacks Contents:Read. "API rate limit
+     exceeded" means no usable token was sent. A proxy message ("GitHub
+     access to this repository is not enabled for this session") means a
+     **cloud sandbox egress proxy** blocked the call before it reached
+     GitHub, and the token is irrelevant. That last case is real: it was
+     measured on a cloud critic lane whose token was present and correctly
+     scoped the whole time.
+     Why this is stated so carefully: a lane once flagged a card citing
+     "GitHub access not enabled" and "bucket verbs not deployed". The first
+     was correct and the second was false, but neither claim carried a status
+     code or a response body, so the true finding and the false one were
+     indistinguishable and a day went into re-diagnosing a healthy token. An
+     unevidenced claim is not believed even when it is right.
   3. BUCKET — `get_deliverable {"path": "<slug>/<file>"}`. The bucket holds
      ONLY cloud-written artifacts, i.e. receipts marked `@ BUCKET`, so a miss
      on a locally-written deliverable is EXPECTED and carries no information.
