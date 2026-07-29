@@ -152,12 +152,30 @@ For each eligible task, read the whole picture before judging:
        "https://api.github.com/repos/<your-org>/<your-repo>/contents/deliverables/<path>?ref=main"
      ```
      A 404 usually means the sweep has not pushed it yet; fall through if so.
-  3. BUCKET — `get_deliverable {"path": "<slug>/<file>"}` (receipts that say
-     `@ BUCKET`).
+     **This is a plain HTTPS request carrying a bearer token. It does NOT use
+     the GitHub connector, a repo integration, or any git permission on your
+     session, so "this session does not have GitHub access" is never a reason
+     to skip it.** Actually run the curl, then report what it returned: the
+     observed HTTP status, or `token-unset` if `$BB_REPO_READ_TOKEN` is empty.
+     Never substitute a guess about your own capabilities for a fetch result,
+     and never print the token value. A cloud critic lane doing exactly that
+     once flagged a card unreachable citing "GitHub access not enabled" and
+     "bucket verbs not deployed" when the file was readable at `ref=main` and
+     the verbs were live. The work was fine; the diagnosis was invented, which
+     is worse than no verdict because it sends the reader to fix
+     infrastructure that was never broken.
+  3. BUCKET — `get_deliverable {"path": "<slug>/<file>"}`. The bucket holds
+     ONLY cloud-written artifacts, i.e. receipts marked `@ BUCKET`, so a miss
+     on a locally-written deliverable is EXPECTED and carries no information.
+     Never report that miss as "not deployed", and never treat it as evidence
+     about the work.
   4. INLINE — the draft left in "Work summary" (cloud fallback).
 
   Flag "unverifiable" ONLY when every applicable path above actually failed,
-  and name which ones you tried. An unread artifact is a fetch failure to
+  and name which ones you tried WITH the concrete failure each one returned
+  (HTTP status, error text, or `token-unset`). A capability assumption is not
+  a failure: if you did not run a path, you have not established that it
+  failed, and you may not cite it. An unread artifact is a fetch failure to
   report, not a work defect — "flagged: unverifiable" must never again mean
   "I did not have the file." By the same rule, `STRANDED_IN_WORKTREE` is a
   located artifact, not an unverifiable one: never report both for the same
