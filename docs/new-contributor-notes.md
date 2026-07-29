@@ -38,6 +38,25 @@ cp profile.example.json supabase/functions/_shared/profile.json
 
 A copy at the repo root type-checks nowhere and deploys nowhere; the path matters. Skip this step and `deno check` gives you a missing-module error that reads like broken code but is just a missing file. CI does this same copy as its first step.
 
+## Do not delete the root `deno.json`
+
+It is three lines and nothing in the repo appears to reference it, so it reads like a stray. It is not.
+
+```json
+{ "workspace": ["./supabase/functions/open-brain-mcp"] }
+```
+
+Deno discovers its config from the **current working directory**, not from the entrypoint's directory. That one line is what lets a `deno check` run from the repo root pick up `supabase/functions/open-brain-mcp/deno.json` and resolve the five bare specifiers (`hono`, `zod`, `@hono/mcp`, `@modelcontextprotocol/sdk`, `@supabase/supabase-js`).
+
+Remove it and `deno check supabase/functions/open-brain-mcp/index.ts` reports **79 errors** from the repo root. All 79 are phantom. Five are the unresolved specifiers and the rest are implicit-`any` errors cascading off those five, so the number looks like a large pre-existing backlog in code that is actually clean. Run the same check from inside `supabase/functions/open-brain-mcp/` and it passes, which is the tell.
+
+**Two things make this easy to get wrong:**
+
+- **CI will not catch it.** `ci.yml` passes `--config supabase/functions/open-brain-mcp/deno.json` explicitly, so CI stays green with the root file gone while the root-form commands documented in this file and in `docs/operations/open-engine-oe1-oe4-promotion-readiness.md` start failing. The docs and CI diverge silently.
+- **A cross-repo comparison proves nothing.** If the same check passes in one checkout and fails in another, confirm both resolve the same config before concluding anything about the code. Config discovery, not the source, is the usual difference.
+
+It is safe to keep. The file emits nothing, and Supabase resolves imports per function directory at deploy time, so a repo-root config never enters a deploy bundle. If you want to confirm that for yourself, read the `Uploading asset` lines a deploy prints; they enumerate every file that actually ships.
+
 ## What CI actually enforces
 
 The workflow is `.github/workflows/ci.yml`, job name `Engine + skill + dashboard`. It is a required check, and so is CodeQL.
