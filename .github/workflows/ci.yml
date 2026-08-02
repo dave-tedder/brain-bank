@@ -39,6 +39,16 @@ jobs:
       - name: Run Deno tests (brain-digest, _shared)
         run: deno test --allow-read --allow-env supabase/functions/brain-digest/ supabase/functions/_shared/
 
+      # The repo-root tests/ directory was not run by CI at all. The dashboard
+      # step below runs `tests/*.test.mjs` but under `working-directory:
+      # dashboard`, so it never matched these — and the .ts suffix means no
+      # node:test glob would have matched them anyway. Eight cross-cutting
+      # wiring and contract suites shipped green by omission, including
+      # public_sanitation_test.ts, the one that keeps private references out of
+      # public files. Whole directory, for the same reason as the steps above.
+      - name: Run repo-root Deno tests (wiring + contract suites)
+        run: deno test --allow-read --allow-env tests/
+
       # Type-checks the whole module graph, including the profile.json import.
       # This is what catches a fresh-clone break that the tests above miss.
       - name: Type-check Edge Functions
