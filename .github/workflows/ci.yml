@@ -35,6 +35,10 @@ jobs:
       # no code change went green. deno.lock pins integrity, not availability — a
       # locked dependency is still fetched.
       #
+      # esm.sh itself is no longer a dependency (that import moved to npm: and is
+      # pinned), but the exposure is the mechanism, not the host: deno.land, jsr
+      # and npm are all still fetched here, and any of them can have a bad minute.
+      #
       # The key deliberately carries run_id, not a hashFiles() of the lockfiles:
       # deno.lock is gitignored (.gitignore:24), so no lockfile exists in the
       # checkout and hashFiles() returns an empty string. That collapses the key
@@ -71,7 +75,7 @@ jobs:
           }
           for attempt in 1 2 3; do
             if prefetch; then exit 0; fi
-            echo "::warning::Dependency prefetch attempt $attempt failed (esm.sh returns 522 intermittently); retrying"
+            echo "::warning::Dependency prefetch attempt $attempt failed (a registry or CDN was briefly unreachable); retrying"
             sleep $((attempt * 15))
           done
           echo "::error::Dependency prefetch failed after 3 attempts — likely a sustained registry outage, not a code fault"

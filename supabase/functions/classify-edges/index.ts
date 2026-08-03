@@ -27,7 +27,7 @@
 // re-implementing as a Deno Edge Function instead of a Node CLI.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2.47.10";
 import { callOpenRouter, computeCost } from "../_shared/openrouter.ts";
 import {
   authenticateAccessKey,
