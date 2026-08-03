@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std@0.220.0/assert/mod.ts";
+import { assertEquals } from "jsr:@std/assert@1.0.19";
 import { partitionQuarantine, selectPagesToCompile } from "./_selection.ts";
 
 // Minimal shape the selector needs. Real callers pass full page rows; the

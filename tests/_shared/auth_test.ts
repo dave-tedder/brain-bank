@@ -5,7 +5,7 @@
 // This pins the cookie format invariant so a future edit can't silently
 // regress to "cookie value IS the password" (the F#C17 finding).
 
-import { assert, assertEquals } from "https://deno.land/std@0.220.0/assert/mod.ts";
+import { assert, assertEquals } from "jsr:@std/assert@1.0.19";
 import {
   signSessionToken,
   verifySessionToken,

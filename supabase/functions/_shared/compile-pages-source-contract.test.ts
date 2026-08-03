@@ -1,4 +1,4 @@
-import { assert } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert } from "jsr:@std/assert@1.0.19";
 
 const compilePagesSource = await Deno.readTextFile(
   new URL("../compile-pages/index.ts", import.meta.url),

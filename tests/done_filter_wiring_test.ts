@@ -1,7 +1,7 @@
 import {
   assert,
   assertStringIncludes,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+} from "jsr:@std/assert@1.0.19";
 
 Deno.test("done command maps LLM matches to the filtered candidate list", async () => {
   const source = await Deno.readTextFile(

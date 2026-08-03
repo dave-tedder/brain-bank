@@ -1,4 +1,4 @@
-import { assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertThrows } from "jsr:@std/assert@1.0.19";
 import { loadProfile, type Profile } from "../../supabase/functions/_shared/profile.ts";
 
 function loadFixture(name: string): Profile {
