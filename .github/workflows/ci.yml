@@ -28,6 +28,47 @@ jobs:
         with:
           deno-version: v2.x
 
+      # Every Deno step below resolved its whole module graph over the network on
+      # every run, so any third-party CDN blip failed the build. Twice observed:
+      # `Import 'https://esm.sh/@supabase/supabase-js@2' failed: 522` (Cloudflare
+      # connection timeout) on 2026-07-29 and 2026-08-03, both times a re-run with
+      # no code change went green. deno.lock pins integrity, not availability — a
+      # locked dependency is still fetched.
+      #
+      # restore-keys matters as much as key: a lockfile change then restores the
+      # previous cache and fetches only the delta, instead of going fully cold.
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/deno
+          key: deno-${{ runner.os }}-${{ hashFiles('deno.lock', 'supabase/functions/open-brain-mcp/deno.lock') }}
+          restore-keys: |
+            deno-${{ runner.os }}-
+
+      # Warms the cache in one place so a cold run has exactly one network-facing
+      # step to retry, instead of five that each fail differently. On a warm cache
+      # this is a no-op. Covers every entrypoint the four Deno steps below compile
+      # — verified by running all four with --cached-only against a cold DENO_DIR
+      # seeded only by these two commands: 281 tests passed with zero network.
+      - name: Prefetch Deno dependencies (retried)
+        run: |
+          prefetch() {
+            deno cache --config supabase/functions/open-brain-mcp/deno.json \
+              supabase/functions/open-brain-mcp/*.ts &&
+            deno cache \
+              supabase/functions/brain-digest/*.ts \
+              supabase/functions/_shared/*.ts \
+              tests/*.ts \
+              tests/_shared/*.ts
+          }
+          for attempt in 1 2 3; do
+            if prefetch; then exit 0; fi
+            echo "::warning::Dependency prefetch attempt $attempt failed (esm.sh returns 522 intermittently); retrying"
+            sleep $((attempt * 15))
+          done
+          echo "::error::Dependency prefetch failed after 3 attempts — likely a sustained registry outage, not a code fault"
+          exit 1
+
       # Whole directory, not one named file. CI previously ran only
       # _agent_tasks_test.ts, so every other suite in this workspace could ship
       # broken and stay green.
