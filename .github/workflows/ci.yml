@@ -35,13 +35,21 @@ jobs:
       # no code change went green. deno.lock pins integrity, not availability — a
       # locked dependency is still fetched.
       #
-      # restore-keys matters as much as key: a lockfile change then restores the
-      # previous cache and fetches only the delta, instead of going fully cold.
+      # The key deliberately carries run_id, not a hashFiles() of the lockfiles:
+      # deno.lock is gitignored (.gitignore:24), so no lockfile exists in the
+      # checkout and hashFiles() returns an empty string. That collapses the key
+      # to a constant — and since actions/cache never overwrites an existing key,
+      # the first cache saved would be frozen forever and every dependency added
+      # after it would be re-fetched on every run.
+      #
+      # run_id makes each run save a fresh entry; restore-keys then matches the
+      # most recent previous one, so the cache stays both warm and current. Entries
+      # are ~7 MiB and GitHub evicts them LRU.
       - name: Cache Deno dependencies
         uses: actions/cache@v4
         with:
           path: ~/.cache/deno
-          key: deno-${{ runner.os }}-${{ hashFiles('deno.lock', 'supabase/functions/open-brain-mcp/deno.lock') }}
+          key: deno-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             deno-${{ runner.os }}-
 
