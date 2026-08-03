@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertThrows } from "jsr:@std/assert@1.0.19";
 import {
   AGENT_TASK_INTAKE_SOURCES,
   type AgentTaskIntakeSource,
