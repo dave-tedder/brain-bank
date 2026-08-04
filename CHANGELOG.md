@@ -8,6 +8,12 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Changed
+
+- `open-engine-briefing`: renumbered `STEP 0 / 0.6 / 0.7 / 0.5` to `STEP 1-4` in execution order (the old numbering was accretion, and a reader following it top to bottom ran the discovery pass last instead of fourth), and moved two exception paths to `reference/exception-paths.md` so they load only when their condition holds — the MCP-misdiagnosis forensics (only if a server still looks absent after the preflight retries) and the risk rating rubric (only if the operator asks for an intake, which the read-only render never does). The Artifact render section is unchanged.
+- `supabase-edge-fn-patterns`: added the FK-alias join warning — the PostgREST `table!constraint_name(...)` form depends on an auto-generated constraint name that is invisible to the supabase-js types and 400s at runtime if the FK is ever renamed or recreated. Includes the `pg_constraint` lookup and the two-query alternative.
+- `browser-automation-patterns`: expanded the full-session vs isolated-session distinction into its own section with the silent-fallback warning, and gave the text-only extraction limit a full explanation of why a cleverer selector cannot fix it.
+
 ### Added
 
 - `oe-board-tracker-coexistence` skill. Covers the case where one piece of work lives in both a project tracker (or plan doc) and on the Open Engine board: the carding contract, the `[OE:<shortid> …]` doc tag and its three states, the two-path provenance invariant (`linked_action_item_id` for captured work, a `plan-doc:` source entry for planned work, never both and never neither), and the rule that trackers carry a single pointer line rather than mirroring open board tasks. Previously this material lived inside a general tracker-and-session-log skill, where it loaded on every project including ones with no board.
