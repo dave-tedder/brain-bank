@@ -8,7 +8,9 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `oe-board-tracker-coexistence` skill. Covers the case where one piece of work lives in both a project tracker (or plan doc) and on the Open Engine board: the carding contract, the `[OE:<shortid> …]` doc tag and its three states, the two-path provenance invariant (`linked_action_item_id` for captured work, a `plan-doc:` source entry for planned work, never both and never neither), and the rule that trackers carry a single pointer line rather than mirroring open board tasks. Previously this material lived inside a general tracker-and-session-log skill, where it loaded on every project including ones with no board.
 
 ## [0.8.3] - 2026-07-29
 

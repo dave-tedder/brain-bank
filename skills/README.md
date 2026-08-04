@@ -11,6 +11,7 @@ Claude Code skills shipped with brain-bank. Skills are auto-discovered when a us
 | [`auto-resolve-patterns`](auto-resolve-patterns/SKILL.md) | Edits to `checkAutoResolve`, any LAYER 0/1/1.5/2/3/3.5 guard, `extractMetadata`, or either mirrored capture file. |
 | [`browser-automation-patterns`](browser-automation-patterns/SKILL.md) | Planning or debugging browser automation against an authenticated site (Meta DM scan, banking portals) — picking between Control Chrome and an isolated-session browser tool. |
 | [`key-rotation-audit`](key-rotation-audit/SKILL.md) | Rotating any secret that authenticates to Brain Bank — checks every manual and scheduled/automated consumer, not just the obvious ones. |
+| [`oe-board-tracker-coexistence`](oe-board-tracker-coexistence/SKILL.md) | A piece of work lives in both a tracker/plan doc and on the board — carding, the `[OE:<shortid> …]` doc tag, or the two-path provenance invariant. |
 | [`open-engine-briefing`](open-engine-briefing/SKILL.md) | Operator asks for a briefing, "what happened on the board", "what needs me", or invokes `/open-engine-briefing`. |
 | [`open-engine-critic`](open-engine-critic/SKILL.md) | Running one cross-runtime critic heartbeat: advisory review of finished Agent Review / Needs Operator tasks. |
 | [`open-engine-reconciler`](open-engine-reconciler/SKILL.md) | Running one board-hygiene reconciliation heartbeat: probes real-world state against Needs Operator cards carrying a `close_check` and auto-closes only exact matches. Close-only by construction. |
