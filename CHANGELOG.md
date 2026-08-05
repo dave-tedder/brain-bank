@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/hooks/block-mcp-registration.sh` matched the MCP registration command as a substring of the whole Bash command, so it fired on any call that merely mentioned the phrase — a commit message describing the rule, an `echo`, a `grep`. It now looks for an actual invocation: heredoc bodies, comments, and quoted arguments are removed, and what remains must have the CLI in command position followed by a registering subcommand. Quotes are left intact when a string-executing wrapper (`eval`, `sh -c`) is present, so the wrapped form still blocks. Coverage widened at the same time: `add-json` and `add-from-claude-desktop` also register and were never caught. Still fails open on any parse error. Adds `block-mcp-registration.test.sh` (21 assertions) alongside the existing worktree-hook test.
+
 ### Changed
 
 - `open-engine-briefing`: renumbered `STEP 0 / 0.6 / 0.7 / 0.5` to `STEP 1-4` in execution order (the old numbering was accretion, and a reader following it top to bottom ran the discovery pass last instead of fourth), and moved two exception paths to `reference/exception-paths.md` so they load only when their condition holds — the MCP-misdiagnosis forensics (only if a server still looks absent after the preflight retries) and the risk rating rubric (only if the operator asks for an intake, which the read-only render never does). The Artifact render section is unchanged.
