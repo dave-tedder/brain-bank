@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Added
+
+- Runtime-binding sections on `open-engine-reconciler` and `open-engine-triage`. If you run more than one agent runtime against the board, execute each lane only from the runtime recorded in its `agent_task_ledger` row; other runtimes may read the skill to diagnose a run but must never perform the heartbeat. The agent code on an event is the only record of which runtime did the work and no server-side guard can verify it, so a lane run from the wrong runtime emits events that look correct while destroying the independence they evidence. Sharper for triage, where `assertAutoPromotionCallerAllowed` requires the literal `triage`: that guard proves the caller claims to be triage, not where triage ran. `open-engine-critic` is the documented exception, since it reviews from the opposite runtime by design. Single-runtime setups can ignore both sections.
+
 ### Fixed
 
 - **Every Edge Function pinned to one `supabase-js`.** Five files imported `https://esm.sh/@supabase/supabase-js@2`, a floating major resolved fresh at every build, and two things followed from it. The version drifted per machine: building the same commit resolved 2.104.0 on one host and 2.112.0 in CI on the same day, with nothing recording which. And `open-brain-mcp` loaded **two copies** of the library — its own import is bare (`@supabase/supabase-js`) so `deno.json`'s import map rewrote it to `npm:@supabase/supabase-js@2.47.10`, while `_shared/openrouter.ts` used the full URL, which an import map does not rewrite. All five now use the pinned npm specifier; `deno info` reports one supabase-js in that graph where it previously reported two. If you fork this, your functions no longer depend on which day you deployed.

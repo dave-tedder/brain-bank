@@ -1,9 +1,28 @@
 ---
 name: open-engine-reconciler
-description: Use when running one board-hygiene reconciliation heartbeat as reconciler - the scheduled early-morning pass (or a manual "run the reconciler") that probes real-world state against Needs Operator cards carrying a packet-authored close_check and auto-closes only the ones whose probe returns an exact match. Close-only by construction: it has no path that reopens, re-flags, re-prioritizes, or otherwise mutates a card, and no path that touches any status other than Needs Operator. Skip for authoring close_check values (that is the operator's call via admin_amend_agent_task) and for any other board mutation.
+description: Use when running one board-hygiene reconciliation heartbeat as reconciler - the scheduled early-morning pass (or a manual "run the reconciler") that probes real-world state against Needs Operator cards carrying a packet-authored close_check and auto-closes only the ones whose probe returns an exact match. Close-only by construction: it has no path that reopens, re-flags, re-prioritizes, or otherwise mutates a card, and no path that touches any status other than Needs Operator. Skip for authoring close_check values (that is the operator's call via admin_amend_agent_task) and for any other board mutation. Run it ONLY from the runtime registered in its ledger row; other runtimes may read it to diagnose a run but must never execute it.
 ---
 
 # Open Engine Reconciler
+
+## Runtime binding
+
+If you run more than one agent runtime against this board, **execute this lane only
+from the runtime recorded in its `agent_task_ledger` row** (the `runtime` column set
+when you registered `reconciler`). Reading the skill from another runtime to diagnose
+a run, check the rubric, or answer a question about a probe is fine. Performing the
+heartbeat and writing `reconciler` events from a runtime that is not the registered
+one is not.
+
+The reason is that the agent code on an event is the only record of which runtime did
+the work, and **no server-side guard can verify it** — the board takes the caller's
+word. A lane executed from the wrong runtime produces events that look completely
+correct while quietly destroying the independence they are supposed to evidence.
+
+`open-engine-critic` is the deliberate exception: it is designed to review from the
+OPPOSITE runtime to the one that executed the work, and says so.
+
+Single-runtime setups can ignore this section.
 
 One heartbeat that stops work the operator already finished from re-surfacing forever.
 

@@ -1,9 +1,35 @@
 ---
 name: open-engine-triage
-description: Use when running one OE-12 triage heartbeat as the triage lane - the scheduled morning pass (or a manual "run triage") that reads open action items via list_open_action_items and creates full-packet Standing drafts on the Open Engine board. It then runs stage-4 guarded auto-promote: only drafts that pass the strict server-side allowlist (low-risk, action-item-linked, full-packet, non-local, non-live-surface) move to Agent Todo on their own, at most the daily cap. It never calls the human promote path, never resolves action items, never edits files, never runs git. Skip for manual single-item intake (use create_agent_task_from_action_item directly) and for queue-runner work.
+description: Use when running one OE-12 triage heartbeat as the triage lane - the scheduled morning pass (or a manual "run triage") that reads open action items via list_open_action_items and creates full-packet Standing drafts on the Open Engine board. It then runs stage-4 guarded auto-promote: only drafts that pass the strict server-side allowlist (low-risk, action-item-linked, full-packet, non-local, non-live-surface) move to Agent Todo on their own, at most the daily cap. It never calls the human promote path, never resolves action items, never edits files, never runs git. Skip for manual single-item intake (use create_agent_task_from_action_item directly) and for queue-runner work. Run it ONLY from the runtime registered in its ledger row; other runtimes may read it to diagnose a run but must never execute it.
 ---
 
 # Open Engine Triage (OE-12)
+
+## Runtime binding
+
+If you run more than one agent runtime against this board, **execute this lane only
+from the runtime recorded in its `agent_task_ledger` row** (the `runtime` column set
+when you registered `triage`). Reading the skill from another runtime to diagnose a
+run, check the stage-4 auto-promote rubric, or answer a question about why an item
+was skipped is fine. Performing the heartbeat and writing `triage` events from a
+runtime that is not the registered one is not.
+
+The reason is that the agent code on an event is the only record of which runtime did
+the work, and **no server-side guard can verify it** — the board takes the caller's
+word. A lane executed from the wrong runtime produces events that look completely
+correct while quietly destroying the independence they are supposed to evidence.
+
+It matters more here than for most lanes, because auto-promote keys its inverse
+caller guard on this identity: `assertAutoPromotionCallerAllowed` requires the
+literal `triage`, so a run from the wrong runtime under that code passes the server
+check at exactly the moment the property the check stands for is already void. The
+guard proves the caller claims to be triage. It cannot prove where triage ran.
+
+`open-engine-critic` is the deliberate exception: it is designed to review from the
+OPPOSITE runtime to the one that executed the work. `queue-runner` is a separate lane
+with its own ledger row and its own runtime.
+
+Single-runtime setups can ignore this section.
 
 One heartbeat: read open action items, classify, draft the board-eligible
 ones as Standing, report. The briefing (OE-11) is the human surface for
