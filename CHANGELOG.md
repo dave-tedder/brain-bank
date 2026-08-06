@@ -8,6 +8,11 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Fixed
+
+- **The test that keeps private details out of this repo was not reading the file most likely to leak.** `tests/public_sanitation_test.ts` is named "release surfaces omit private project references" and it read `CHANGELOG.md` and one test file, against one banned string. `README.md` — the most-read page in the project, and the one rewritten by hand at every release — was never scanned, and neither was any other doc. The name described a scope the test did not have, which is the failure it was written to prevent, pointed at itself. It now enumerates surfaces by walking the tree rather than by listing filenames, the same fix applied three times to CI in v0.9.0, so a new doc is covered the day it is added; and the banned set covers the operator domains, locality and personal lane identities alongside the project ref. Three guards come with it, because a silent scan is worse than none: the walk must return a plausible file count and must include `README.md` and `CHANGELOG.md` by name, so a broken walk fails loudly instead of passing vacuously; the matcher is proved against a planted string; and every skipped path must be genuinely present in `.gitignore`, so a skip cannot quietly widen. Verified by planting a real operator domain in `README.md` and confirming it went red, then reverting.
+- One test fixture in `scripts/open-engine/closeout-controller.test.mjs` used a `dave-` prefixed agent code where its three siblings in the same file use the genericized `claude-code`. A port miss, and the only such reference in the repo; the widened scan above is what found it.
+
 ## [0.9.0] - 2026-08-06
 
 ### Added

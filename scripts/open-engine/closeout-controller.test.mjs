@@ -1386,7 +1386,7 @@ function riskTask(risk, overrides = {}) {
       events: [{
         task_id: id,
         event_type: "AGENT DONE",
-        agent_code: "dave-claude-code",
+        agent_code: "claude-code",
         payload: {
           reason: validReceipt(),
           status: "Agent Review",
