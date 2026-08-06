@@ -1,6 +1,6 @@
 // Deno unit tests for the shared classification helpers.
 // Run: deno test supabase/functions/_shared/metadata-validation.test.ts
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "jsr:@std/assert@1.0.19";
 import {
   _resetRouteMapCacheForTests,
   _resetSlugCacheForTests,

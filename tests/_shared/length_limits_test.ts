@@ -3,7 +3,7 @@
 // (see commit message for F#C15); this test pins the constants and the
 // helper logic so a casual edit can't silently widen the cap.
 
-import { assert, assertEquals } from "https://deno.land/std@0.220.0/assert/mod.ts";
+import { assert, assertEquals } from "jsr:@std/assert@1.0.19";
 
 // Re-implementing the helper here rather than importing from the Edge Function
 // source because index.ts has top-level Deno.env.get() reads and createClient

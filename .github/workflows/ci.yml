@@ -28,6 +28,59 @@ jobs:
         with:
           deno-version: v2.x
 
+      # Every Deno step below resolved its whole module graph over the network on
+      # every run, so any third-party CDN blip failed the build. Twice observed:
+      # `Import 'https://esm.sh/@supabase/supabase-js@2' failed: 522` (Cloudflare
+      # connection timeout) on 2026-07-29 and 2026-08-03, both times a re-run with
+      # no code change went green. deno.lock pins integrity, not availability — a
+      # locked dependency is still fetched.
+      #
+      # esm.sh itself is no longer a dependency (that import moved to npm: and is
+      # pinned), but the exposure is the mechanism, not the host: deno.land, jsr
+      # and npm are all still fetched here, and any of them can have a bad minute.
+      #
+      # The key deliberately carries run_id, not a hashFiles() of the lockfiles:
+      # deno.lock is gitignored (.gitignore:24), so no lockfile exists in the
+      # checkout and hashFiles() returns an empty string. That collapses the key
+      # to a constant — and since actions/cache never overwrites an existing key,
+      # the first cache saved would be frozen forever and every dependency added
+      # after it would be re-fetched on every run.
+      #
+      # run_id makes each run save a fresh entry; restore-keys then matches the
+      # most recent previous one, so the cache stays both warm and current. Entries
+      # are ~7 MiB and GitHub evicts them LRU.
+      - name: Cache Deno dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/deno
+          key: deno-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            deno-${{ runner.os }}-
+
+      # Warms the cache in one place so a cold run has exactly one network-facing
+      # step to retry, instead of five that each fail differently. On a warm cache
+      # this is a no-op. Covers every entrypoint the four Deno steps below compile
+      # — verified by running all four with --cached-only against a cold DENO_DIR
+      # seeded only by these two commands: 281 tests passed with zero network.
+      - name: Prefetch Deno dependencies (retried)
+        run: |
+          prefetch() {
+            deno cache --config supabase/functions/open-brain-mcp/deno.json \
+              supabase/functions/open-brain-mcp/*.ts &&
+            deno cache \
+              supabase/functions/brain-digest/*.ts \
+              supabase/functions/_shared/*.ts \
+              tests/*.ts \
+              tests/_shared/*.ts
+          }
+          for attempt in 1 2 3; do
+            if prefetch; then exit 0; fi
+            echo "::warning::Dependency prefetch attempt $attempt failed (a registry or CDN was briefly unreachable); retrying"
+            sleep $((attempt * 15))
+          done
+          echo "::error::Dependency prefetch failed after 3 attempts — likely a sustained registry outage, not a code fault"
+          exit 1
+
       # Whole directory, not one named file. CI previously ran only
       # _agent_tasks_test.ts, so every other suite in this workspace could ship
       # broken and stay green.
@@ -38,6 +91,16 @@ jobs:
       # open-brain-mcp, so these suites are invisible to the run above.
       - name: Run Deno tests (brain-digest, _shared)
         run: deno test --allow-read --allow-env supabase/functions/brain-digest/ supabase/functions/_shared/
+
+      # The repo-root tests/ directory was not run by CI at all. The dashboard
+      # step below runs `tests/*.test.mjs` but under `working-directory:
+      # dashboard`, so it never matched these — and the .ts suffix means no
+      # node:test glob would have matched them anyway. Eight cross-cutting
+      # wiring and contract suites shipped green by omission, including
+      # public_sanitation_test.ts, the one that keeps private references out of
+      # public files. Whole directory, for the same reason as the steps above.
+      - name: Run repo-root Deno tests (wiring + contract suites)
+        run: deno test --allow-read --allow-env tests/
 
       # Type-checks the whole module graph, including the profile.json import.
       # This is what catches a fresh-clone break that the tests above miss.

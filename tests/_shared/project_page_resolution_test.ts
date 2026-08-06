@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert@1.0.19";
 
 const compilePagesSource = await Deno.readTextFile(
   new URL("../../supabase/functions/compile-pages/index.ts", import.meta.url),

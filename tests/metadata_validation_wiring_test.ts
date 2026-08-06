@@ -1,7 +1,7 @@
 import {
   assert,
   assertStringIncludes,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+} from "jsr:@std/assert@1.0.19";
 
 const ingestSource = await Deno.readTextFile(
   new URL("../supabase/functions/ingest-thought/index.ts", import.meta.url),

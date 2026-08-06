@@ -1,6 +1,6 @@
 // Deno unit tests for the shared access-key helpers.
 // Run: deno test supabase/functions/_shared/access-key.test.ts
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "jsr:@std/assert@1.0.19";
 import { timingSafeEqualStr } from "./access-key.ts";
 
 Deno.test("timingSafeEqualStr: equal strings match", () => {

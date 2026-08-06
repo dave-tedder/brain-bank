@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert@1.0.19";
 
 const source = await Deno.readTextFile(
   new URL("../supabase/functions/brain-digest/index.ts", import.meta.url),

@@ -1,7 +1,7 @@
 import {
   assert,
   assertEquals,
-} from "https://deno.land/std@0.224.0/assert/mod.ts";
+} from "jsr:@std/assert@1.0.19";
 import { renderOpenActionChecklist } from "./action-checklist.ts";
 
 Deno.test("renderOpenActionChecklist: renders exact row descriptions and ids", () => {

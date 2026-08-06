@@ -5,7 +5,7 @@
 // storing them as open items — UNLESS the source carries explicit still-owed
 // language or a future-date signal. Fixtures are synthetic equivalents of the
 // real rows that motivated the guard.
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "jsr:@std/assert@1.0.19";
 import { isUnanchoredAppointmentItem } from "./appointment-guard.ts";
 
 const NOW = new Date("2026-07-06T12:00:00Z");

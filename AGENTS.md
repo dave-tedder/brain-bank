@@ -19,34 +19,55 @@ Personal semantic memory system. Captures thoughts from multiple sources (Slack,
 
 ## Project Structure
 
+Annotations only — the entries themselves are what `ls` shows, so this map exists to say
+what each one is FOR. Counts are deliberately omitted: they rot, and one command answers
+them. Re-verify against `git ls-files` before editing a line here.
+
 ```
 brain-bank/
 ├── README.md                  # elevator pitch, quickstart, architecture
 ├── CHANGELOG.md               # release-by-release ground truth
 ├── LICENSE                    # MIT
 ├── AGENTS.md                  # this file (CLAUDE.md is a one-line @AGENTS.md shim)
+├── CONTRIBUTING.md            # PR etiquette, what belongs upstream
+├── SECURITY.md                # vulnerability disclosure
 ├── .env.example               # every env var the engine + dashboard read
 ├── profile.example.json       # neutral profile defaults (operators copy to profile.json, gitignored)
 ├── deno.json                  # Deno workspace config for the Edge Functions
 ├── .claude-plugin/            # Claude Code plugin marketplace + plugin manifests
+├── .claude/                   # slash commands + skill symlinks that register skills/ with the Skill tool
+├── .github/workflows/ci.yml   # the CI that gates every PR
 ├── supabase/
-│   ├── migrations/            # SQL migrations, YYYYMMDD_snake_case.sql (75 as of v0.6.0)
+│   ├── migrations/            # SQL migrations, YYYYMMDD_snake_case.sql
 │   └── functions/
 │       ├── ingest-thought/    # Slack webhook + auto-resolve LAYER 0-3 pipeline
-│       ├── open-brain-mcp/    # MCP server (54 tools) + REST API
+│       ├── open-brain-mcp/    # MCP server + REST API (tool count: grep -c 'server.registerTool(')
 │       ├── brain-digest/      # daily / weekly digest synthesis + Slack post
 │       ├── compile-pages/     # Karpathy-style wiki compilation
+│       ├── classify-edges/    # typed semantic edges between thoughts
+│       ├── queue-runner/      # Open Engine heartbeat: claims / blocks / fails agent tasks
 │       └── _shared/           # profile loader + profile.json bundled at deploy
 ├── dashboard/                 # Next.js dashboard, see dashboard/AGENTS.md
-├── skills/
-│   └── brain-bank-setup/      # slash-command-driven first-deploy guide
-├── integrations/              # capture-source bridges (Gmail, Calendar, Notion, etc.)
+├── skills/                    # triggered skill packs; see skills/README.md for the index
+│   ├── brain-bank-setup/      # slash-command-driven first-deploy guide
+│   └── _template/             # starting point for a new skill
+├── integrations/              # capture-source bridges + Open Engine lane prompts
+│   └── _template/             # starting point for a new integration
+├── scripts/
+│   ├── open-engine/           # closeout controller, deliverables sweep, lane runners
+│   ├── auto-resolve-ab-test/  # A/B harness for the mirrored LAYER 2 prompt
+│   └── hooks/                 # PreToolUse guards (MCP registration, worktree writes)
 ├── docs/
-│   ├── deploy-from-scratch.md # 12-step cold-clone-to-deploy walkthrough
-│   ├── slack-setup.md         # 9-step Slack app + channel setup
+│   ├── deploy-from-scratch.md # cold-clone-to-deploy walkthrough
+│   ├── slack-setup.md         # Slack app + channel setup
 │   ├── troubleshooting.md     # cross-cutting symptom-organized recipes
-│   └── capture-sources/       # one guide per integration
-└── tests/_shared/             # Deno tests (profile loader)
+│   ├── dashboard-deploy.md    # dashboard hosting + env wiring
+│   ├── capture-templates.md   # structured prefixes that improve metadata extraction
+│   ├── new-contributor-notes.md  # environment traps the maintainer's setup hid
+│   ├── capture-sources/       # one guide per integration
+│   └── operations/            # daily pipeline schedule, wiki refresh, promotion readiness
+└── tests/                     # Deno tests — wiring + contract suites at top level
+    └── _shared/               # profile loader tests
 ```
 
 ## Conventions

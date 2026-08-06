@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "jsr:@std/assert@1.0.19";
 import { extractJsonObject } from "./extract-json.ts";
 
 Deno.test("clean JSON object passes through", () => {

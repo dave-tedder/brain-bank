@@ -15,7 +15,7 @@ Tool names below are bare; the MCP server prefix varies by runtime
 (`mcp__brain-bank__*`, UUID-prefixed connector, etc.). Load via ToolSearch
 if deferred.
 
-## STEP 0 — MCP PREFLIGHT (MANDATORY, BEFORE ANYTHING ELSE)
+## STEP 1 — MCP PREFLIGHT (MANDATORY, BEFORE ANYTHING ELSE)
 
 Run this before reading the board, the packet, or any deliverable. It is a
 procedure, not advice. Do not skip it because the tools "look fine".
@@ -35,29 +35,13 @@ Because the pings are cheap and the connect window is short, fire them first and
 then read the packet. By the time you need a tool it is warm, and the
 false-negative window never opens.
 
-### Forbidden while diagnosing a "missing" MCP
+If a server still looks absent after those retries, read
+`reference/exception-paths.md` section 1 BEFORE writing any diagnosis. It lists
+the four things that feel like evidence and are not. Short version: no static
+artifact can prove an MCP is unavailable, only a live call can, and confidence in
+a fresh causal story is itself the tell.
 
-- Do NOT run `claude mcp list`. It lists ONLY Code-registered servers and never
-  lists Desktop servers. Its output is not evidence of anything.
-- Do NOT read `~/.claude.json`, `claude_desktop_config.json`, or check for a
-  project `.mcp.json`. Those describe **registration**. Registration is not
-  **reachability**. A Desktop server is genuinely reachable from a Code session.
-- Do NOT run `claude mcp add` or `claude mcp remove`. The servers are already
-  live; you would duplicate working servers. A PreToolUse hook can block this
-  (see `scripts/hooks/block-mcp-registration.sh`).
-- Do NOT build a causal story about WHY the MCP is missing. If you catch yourself
-  explaining why, that IS the tell. Stop and re-run ToolSearch.
-
-**The rule is about the KIND of evidence, not the specific command.** No static
-artifact (CLI listing, JSON config, worktree state, missing `.mcp.json`) can prove
-an MCP is unavailable. Only a live call can, and only after the retries above.
-
-This exists because the misdiagnosis recurred in two separate sessions on the
-same day **while a memory note describing it was in context**, each time
-reasoning confidently from a different artifact. Treat any "the MCP isn't here"
-conclusion as a red flag about your own reasoning first.
-
-## STEP 0.6 — PRIOR-ART RECALL (MANDATORY BEFORE ANY DIAGNOSIS)
+## STEP 2 — PRIOR-ART RECALL (MANDATORY BEFORE ANY DIAGNOSIS)
 
 Before forming ANY theory about a symptom, block, failure, or "X is
 broken/blocked/missing" claim (from a packet, a probe you just ran, or your own
@@ -77,9 +61,9 @@ observation):
 This exists because a bot-blocking false alarm was diagnosed and formally
 withdrawn in the brain, then re-derived from scratch twice afterward, with the
 withdrawal sitting in the brain the whole time. Confidence in a freshly built
-causal story is the tell, exactly as in STEP 0.
+causal story is the tell, exactly as in STEP 1.
 
-## STEP 0.7 — PRIOR-BRIEFING RECALL (BEFORE RENDERING "WHAT NEEDS YOU")
+## STEP 3 — PRIOR-BRIEFING RECALL (BEFORE RENDERING "WHAT NEEDS YOU")
 
 The briefing has memory: every run ends in a capture_thought tagged
 ["open-engine","briefing"] carrying the full rendered map. Read it back.
@@ -108,7 +92,7 @@ briefing and has no tracking card is dropped once outside its watermark window.
 If no prior capture is found (first run, or captures purged), say so in the
 Board pulse and render without annotations rather than guessing.
 
-## STEP 0.5 — DISCOVERY BEFORE DIALOGUE
+## STEP 4 — DISCOVERY BEFORE DIALOGUE
 
 Front-load. Every mid-run question costs the operator a context switch. The goal
 is ONE consolidated decision gate, then uninterrupted execution.
@@ -146,39 +130,10 @@ What is NOT an interruption to be optimized away: choices that are genuinely the
 operator's. Publishing public content, selecting client-facing photos, spending
 money, asserting facts about their business. Batch these; never skip them.
 
-## RISK RATING RUBRIC (for any intake you create)
-
-Risk = **BLAST RADIUS OF THE AGENT'S ACTIONS.** NOT sensitivity of the subject.
-
-- `low` — draft-and-propose. Research -> report; content/copy drafted but never
-  sent; local documentation draft; read-only verification -> report. Touches
-  nothing live. Worst case: a proposal the operator rejects.
-- `medium` — mutates something real but reversible.
-- `high` — irreversible, public, or financial.
-
-**CRITICAL:** scheduled OE-5 runners pass `max_risk=low` to
-`claim_next_agent_task`. A task rated `medium` or `high` is INVISIBLE to every
-scheduled lane. It sits in Agent Todo forever: not blocked, not failed, not
-flagged, never claimed. Promoting it looks identical to queuing it and silently
-does nothing. Only an attended manual claim (default `max_risk=medium`) sees it.
-
-So: rate draft-and-propose work `low`, even when the SUBJECT feels weighty. Put
-subject-matter caution in `boundaries`, which travels with the packet regardless
-of the risk field. An image-sourcing task was once rated `medium` because the
-topic touched copyright; the task could only ever write a proposal, and the
-rating quietly made it unrunnable.
-
-**Risk is FROZEN at intake.** No verb amends it (`admin_amend_agent_task` covers
-project_slug, add_sources, operator_action, operator_target, requires_local
-only). A mis-rated task must be RECREATED at the right risk and the old one
-superseded via `admin_amend_agent_task` with a DO-NOT-WORK reason plus an
-`add_sources` pointer. Do NOT use `block_agent_task` for this: it requires a
-claimed/assigned task and would write a false AGENT BLOCKED receipt under an
-agent code with no run behind it.
-
-Also always set `project_slug` on intake. The closeout controller routes strictly
-by slug and holds anything it cannot resolve.
-
+If the operator asks you to create an intake after the render, read
+`reference/exception-paths.md` section 2 first. Risk is the blast radius of the
+agent's actions, not the sensitivity of the subject; it is frozen at intake; and
+a medium/high rating makes the task invisible to every scheduled lane forever.
 ## Hard rules
 
 - READ-ONLY while rendering the briefing. The only writes in the briefing run:
@@ -530,7 +485,7 @@ with older habits elsewhere in this skill, these win.
 ## Session Operating Map structure
 
 1. **Board pulse.** One line: window covered, counts by status, health flags.
-   Plus the STEP 0.7 delta line: new since last briefing / cleared / still
+   Plus the STEP 3 delta line: new since last briefing / cleared / still
    waiting.
 2. **What happened.** Grouped, plain language: finished and filed; finished
    awaiting your review; held with a question; failed or retried; new drafts
