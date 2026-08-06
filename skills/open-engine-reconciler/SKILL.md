@@ -232,13 +232,24 @@ comment, do not re-prioritize, do not create a follow-up.
 
 ### 5. Ledger heartbeat, which is also the run log
 
-One `write_agent_ledger` for `reconciler`, omitting `last_successful_run`:
+One `write_agent_ledger` for `reconciler`, omitting `last_successful_run`. The verdict
+goes in the **`last_queue_result`** parameter — name it exactly:
 
 ```
-OE-RECONCILE <n> closed (<shortids>); <m> probed no match; <k> skipped; <e> errors
+last_queue_result: OE-RECONCILE <n> closed (<shortids>); <m> probed no match; <k> skipped; <e> errors
 ```
 
 Add `; desk at cap, oldest row <date>` when the list hit 50 rows.
+
+**Then read the returned row and confirm your verdict is in it.** A misnamed key is
+accepted silently. Observed live on 2026-08-05: a run passed the verdict as
+`queue_result`, the call returned success and stamped the heartbeat and
+`local_context`, and `last_queue_result` still held the previous run's string. The
+schema declares `additionalProperties: false` and the bad key still did not error.
+This is the digest-facing field (`brain-digest/sentinel-report.ts`
+`formatReconcilerReport` parses it), so undetected it reports a stale tally as today's
+and looks identical to a lane that never ran. Repair by calling again with the correct
+key; the cost is one extra heartbeat and one extra `agent_run_log` row, both benign.
 
 **Do not try to write `agent_run_log` separately. There is no verb for it and you do not need one.** `agent_task_ledger` carries `AFTER INSERT OR UPDATE` triggers (`agent_task_ledger_log_run_insert` / `_log_run_update`, firing `log_agent_run()` whenever `last_heartbeat` changes) that insert the `agent_run_log` row for you, copying `runtime`, `queue_result`, and `automation_state` off the ledger. Verified live 2026-07-25: one `write_agent_ledger` produced exactly one run-log row, `ran_at` and `succeeded_at` both matching the server-stamped heartbeat.
 
