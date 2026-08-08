@@ -310,6 +310,17 @@ a medium/high rating makes the task invisible to every scheduled lane forever.
   is complete_operator_action (or the dashboard "Mark done"); until then it
   persists. Paused-project Needs Operator cards collapse into the suppressed
   count like everything else.
+- CHECK LIVE STATE BEFORE RENDERING IT. A stored `operator_action` is a
+  snapshot of what was true when it was written, and nothing rewrites it when
+  reality moves. Before rendering any operator step that asserts the CURRENT
+  state of a live surface (a post's status, whether a page exists or 404s, what
+  a published page says, whether a listing is claimed), fetch that surface and
+  render what is true now, with the date. On a live board one card read
+  "currently a draft, hit Publish" while the page was scheduled to publish
+  itself a week later; rendering the stored note as-is would have walked the
+  operator into publishing a week early. If the surface cannot be reached, say
+  the note is unverified rather than restating it as fact. This is read-only
+  fetching and does not mutate the card. Canonical statement in `AGENTS.md`.
 - PAUSED PROJECTS are suppressed. Honor the "Paused Projects" list in
   `CLAUDE.local.md`. Any moved task, Standing draft, or open decision tied to
   a paused project is pulled OUT of "What needs you" and collapsed into a

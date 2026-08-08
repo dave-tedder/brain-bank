@@ -221,6 +221,8 @@ The script owns all the git: it stages ONLY `deliverables/`, refuses secret-shap
 
 CLOUD-RUNTIME FALLBACK: a cloud session that cannot reach the operator's disk calls `put_deliverable` with path `<project_slug>/<task-shortid>-<slug>.md` and the full draft, then records `Touched files or records: deliverables/<path> @ BUCKET`. If `put_deliverable` is unavailable or errors, leave the full draft inline in "Work summary" and record `Touched files or records: None written (cloud runtime — draft inline above)`. No task is ever unreviewable.
 
+CHECK LIVE STATE BEFORE YOU DESCRIBE IT: whenever the receipt or the `OPERATOR-ACTION` line asserts the CURRENT state of a live surface — a post's status, whether a page exists or 404s, what a published page actually says, whether a listing is claimed — fetch that surface in THIS run and report what was seen, with the date. The packet's `context`, a prior deliverable, and an older `operator_action` note were all accurate when written, and nothing rewrites them when reality moves: one card's operator step read "currently a draft, hit Publish" while the page was scheduled to publish itself a week later, so following it would have published early. If the surface cannot be reached, name that under "Limitations:" and write the operator step so it does not assert a state nobody checked. "The packet says" is not a check. Canonical statement in `AGENTS.md`.
+
 OPERATOR STEP MARKER: when accepting the work leaves the operator a step outside the system (claim a listing and paste, make a call, confirm a fact) — OR leaves a file you staged that a human must still install — add this line inside "Follow-up recommendation:":
 
 ```text
