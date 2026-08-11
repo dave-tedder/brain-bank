@@ -1,0 +1,314 @@
+# Google Cloud Build CI/CD Pipeline for Brain-Bank
+# Targets file: gcp/cloudbuild.yaml
+#
+# Pipeline Flow:
+#   1. Runs database migrations against Cloud SQL with compatibility preprocessing.
+#   2. Deploys the PostgREST server to Cloud Run (acts as the database API gateway).
+#   3. Builds Docker images for the 5 Deno edge functions and the Next.js dashboard.
+#   4. Deploys the 5 Deno edge functions and the Next.js dashboard to Cloud Run.
+#
+# Environment variables and secrets are securely resolved from Google Secret Manager at deploy time.
+
+substitutions:
+  _REGION: us-east1
+  _REPOSITORY: bb-repo
+
+steps:
+  # ── Step 1: Database Migrations ─────────────────────────────────────────
+  - name: "node:20-alpine"
+    id: db-migrate
+    entrypoint: "sh"
+    args:
+      - "-c"
+      - |
+        # Download Google Cloud SQL Auth Proxy v2
+        wget https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.11.0/cloud-sql-proxy.linux.amd64 -O cloud_sql_proxy
+        chmod +x cloud_sql_proxy
+        
+        # Run the proxy in the background pointing to the Cloud SQL instance
+        ./cloud_sql_proxy --port 5432 $PROJECT_ID:us-east1:brainbank-db &
+        sleep 3
+        
+        # Redirect connection to localhost through the proxy and disable SSL
+        LOCAL_DB_URL="$(echo "$$DATABASE_URL" | sed -E 's/@[^:]+:[0-9]+/@127.0.0.1:5432/')?sslmode=disable"
+        
+        # Log the masked URL to verify the string concatenation is correct
+        echo "Local DB URL: $(echo "$$LOCAL_DB_URL" | sed -E 's/:[^@]+@/:xxxxxx@/')"
+        
+        # Install psql client and bootstrap compatibility schemas/roles directly on the database
+        apk add --no-cache postgresql-client
+        
+        # Wipe any partial migration schemas/tables to ensure a clean migration run from scratch
+        psql "$$LOCAL_DB_URL" -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO postgres; GRANT ALL ON SCHEMA public TO public; DROP SCHEMA IF EXISTS supabase_migrations CASCADE;"
+        
+        psql "$$LOCAL_DB_URL" -f gcp/gcp_compat_start.sql
+        
+        # Log the database roles to verify creation
+        psql "$$LOCAL_DB_URL" -c "SELECT rolname FROM pg_roles"
+        
+        # Strip pg_cron and pg_net extension statements from migrations for standard Cloud SQL compatibility
+        sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_cron/-- CREATE EXTENSION IF NOT EXISTS pg_cron/g' supabase/migrations/0000_extensions.sql
+        sed -i 's/CREATE EXTENSION IF NOT EXISTS pg_net/-- CREATE EXTENSION IF NOT EXISTS pg_net/g' supabase/migrations/0000_extensions.sql
+        
+        # Resolve duplicate policy declaration in security_baseline_fixes migration
+        sed -i 's/CREATE POLICY "Service role full access on digests"/DROP POLICY IF EXISTS "Service role full access on digests" ON public.digests; CREATE POLICY "Service role full access on digests"/g' supabase/migrations/20260513_security_baseline_fixes.sql
+        
+        # Dynamically rename duplicate date-prefixed migration files to prevent primary key conflicts
+        node -e "
+        const fs = require('fs');
+        const path = require('path');
+        const dir = 'supabase/migrations';
+        const files = fs.readdirSync(dir);
+        const groups = {};
+        for (const file of files) {
+          const match = file.match(/^(\\d{8})_(.+)$/);
+          if (match) {
+            const date = match[1];
+            if (!groups[date]) groups[date] = [];
+            groups[date].push(file);
+          }
+        }
+        for (const date in groups) {
+          if (groups[date].length > 1) {
+            // Sort migrations within the group so security hardening, cleanup, and revoking occur last
+            groups[date].sort((a, b) => {
+              const score = (file) => {
+                let s = 0;
+                if (file.includes('security') || file.includes('hardening') || file.includes('revoke') || file.includes('cleanup')) {
+                  s += 1;
+                }
+                return s;
+              };
+              return score(a) - score(b);
+            });
+            groups[date].forEach((file, index) => {
+              const match = file.match(/^(\\d{8})_(.+)$/);
+              const newName = date + String(index).padStart(6, '0') + '_' + match[2];
+              fs.renameSync(path.join(dir, file), path.join(dir, newName));
+              console.log('Renamed build-time migration: ' + file + ' -> ' + newName);
+            });
+          }
+        }
+        "
+        
+        # Run migrations using the npx wrapper for Supabase CLI with debug enabled
+        npx supabase db push --db-url "$$LOCAL_DB_URL" --debug
+    secretEnv: ["DATABASE_URL"]
+
+  # ── Step 2: Deploy PostgREST Database API Gateway ───────────────────────
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: deploy-postgrest
+    args:
+      - "run"
+      - "deploy"
+      - "bb-postgrest"
+      - "--image=postgrest/postgrest:v12.2.0"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=4"
+      - "--memory=512Mi"
+      - "--cpu=1"
+      - "--port=3000"
+      - "--set-secrets=PGRST_DB_URI=brainbank-database-url:latest"
+      - "--set-secrets=PGRST_JWT_SECRET=brainbank-jwt-secret:latest"
+      - "--set-env-vars=PGRST_DB_SCHEMA=public"
+      - "--set-env-vars=PGRST_DB_ANON_ROLE=anon"
+    waitFor: ["db-migrate"]
+
+  # ── Step 3: Build Docker Images ─────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-mcp
+    args: ["build", "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-mcp:latest", "--file=gcp/Dockerfile.mcp", "."]
+  
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-ingest
+    args: ["build", "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-ingest:latest", "--file=gcp/Dockerfile.ingest", "."]
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-digest
+    args: ["build", "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-digest:latest", "--file=gcp/Dockerfile.digest", "."]
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-compile
+    args: ["build", "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-compile:latest", "--file=gcp/Dockerfile.compile", "."]
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-classify
+    args: ["build", "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-classify:latest", "--file=gcp/Dockerfile.classify", "."]
+
+  - name: "gcr.io/cloud-builders/docker"
+    id: build-dashboard
+    args: ["build", "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-dashboard:latest", "--file=gcp/Dockerfile.dashboard", "."]
+
+  # ── Step 4: Push Docker Images ──────────────────────────────────────────
+  - name: "gcr.io/cloud-builders/docker"
+    id: push-images
+    entrypoint: "sh"
+    args:
+      - "-c"
+      - |
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-mcp:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-ingest:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-digest:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-compile:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-classify:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-dashboard:latest
+    waitFor:
+      - "build-mcp"
+      - "build-ingest"
+      - "build-digest"
+      - "build-compile"
+      - "build-classify"
+      - "build-dashboard"
+
+  # ── Step 5: Deploy Compute Services ─────────────────────────────────────
+  
+  # open-brain-mcp Service
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: deploy-mcp
+    args:
+      - "run"
+      - "deploy"
+      - "bb-mcp"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-mcp:latest"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=4"
+      - "--memory=512Mi"
+      - "--cpu=1"
+      - "--port=8000"
+      - "--set-env-vars=GCP_PROJECT=${PROJECT_ID}"
+      - "--set-env-vars=GCS_BUCKET_NAME=brainbank-deliverables-bucket"
+      - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
+      - "--set-secrets=MCP_ACCESS_KEY=brainbank-mcp-access-key:latest"
+      - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
+    waitFor: ["push-images", "deploy-postgrest"]
+
+  # ingest-thought Service
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: deploy-ingest
+    args:
+      - "run"
+      - "deploy"
+      - "bb-ingest"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-ingest:latest"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=4"
+      - "--memory=512Mi"
+      - "--cpu=1"
+      - "--port=8000"
+      - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
+      - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
+      - "--set-secrets=SLACK_BOT_TOKEN=brainbank-slack-bot-token:latest"
+      - "--set-secrets=SLACK_SIGNING_SECRET=brainbank-slack-signing-secret:latest"
+      - "--set-secrets=SLACK_CAPTURE_CHANNEL=brainbank-slack-capture-channel:latest"
+      - "--set-secrets=SLACK_BRAIN_CHANNEL=brainbank-slack-brain-channel:latest"
+      - "--set-secrets=SLACK_QUERY_CHANNEL=brainbank-slack-query-channel:latest"
+    waitFor: ["push-images", "deploy-postgrest"]
+
+  # brain-digest Service
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: deploy-digest
+    args:
+      - "run"
+      - "deploy"
+      - "bb-digest"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-digest:latest"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=2"
+      - "--memory=512Mi"
+      - "--cpu=1"
+      - "--port=8000"
+      - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
+      - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
+      - "--set-secrets=MCP_ACCESS_KEY=brainbank-mcp-access-key:latest"
+    waitFor: ["push-images", "deploy-postgrest"]
+
+  # compile-pages Service
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: deploy-compile
+    args:
+      - "run"
+      - "deploy"
+      - "bb-compile"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-compile:latest"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=2"
+      - "--memory=512Mi"
+      - "--cpu=1"
+      - "--port=8000"
+      - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
+      - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
+    waitFor: ["push-images", "deploy-postgrest"]
+
+  # classify-edges Service
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: deploy-classify
+    args:
+      - "run"
+      - "deploy"
+      - "bb-classify"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-classify:latest"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=2"
+      - "--memory=512Mi"
+      - "--cpu=1"
+      - "--port=8000"
+      - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
+      - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
+    waitFor: ["push-images", "deploy-postgrest"]
+
+  # dashboard Service
+  - name: "gcr.io/cloud-builders/gcloud"
+    id: deploy-dashboard
+    args:
+      - "run"
+      - "deploy"
+      - "bb-dashboard"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/bb-dashboard:latest"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--min-instances=0"
+      - "--max-instances=4"
+      - "--memory=512Mi"
+      - "--cpu=1"
+      - "--set-secrets=SUPABASE_URL=brainbank-postgrest-url:latest"
+      - "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=brainbank-service-role-key:latest"
+      - "--set-secrets=OPENROUTER_API_KEY=brainbank-openrouter-key:latest"
+      - "--set-secrets=DASHBOARD_PASSWORD=brainbank-dashboard-password:latest"
+      - "--set-secrets=BRAIN_BANK_URL=brainbank-mcp-url:latest"
+      - "--set-secrets=BRAIN_BANK_API_KEY=brainbank-mcp-access-key:latest"
+    waitFor: ["push-images", "deploy-postgrest"]
+
+availableSecrets:
+  secretManager:
+    - versionName: "projects/$PROJECT_ID/secrets/brainbank-database-url/versions/latest"
+      env: "DATABASE_URL"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: "E2_HIGHCPU_8"
+
+timeout: "1800s"

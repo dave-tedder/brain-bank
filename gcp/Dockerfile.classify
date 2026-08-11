@@ -1,0 +1,14 @@
+FROM denoland/deno:alpine-2.0.6
+
+WORKDIR /app
+
+# Copy shared code and classify-edges function code
+COPY supabase/functions/_shared /app/supabase/functions/_shared
+COPY supabase/functions/classify-edges /app/supabase/functions/classify-edges
+
+# Pre-cache dependencies
+RUN deno cache supabase/functions/classify-edges/index.ts
+
+EXPOSE 8080
+
+CMD ["run", "--allow-net", "--allow-env", "--allow-read", "supabase/functions/classify-edges/index.ts"]

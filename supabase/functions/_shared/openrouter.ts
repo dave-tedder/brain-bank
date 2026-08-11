@@ -79,10 +79,15 @@ let supabase: ReturnType<typeof createClient> | null = null;
 
 function getSupabase(): ReturnType<typeof createClient> {
   if (!supabase) {
+    const url = Deno.env.get("SUPABASE_URL")!;
     supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
+      url,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
+    if (url && (url.includes("bb-postgrest") || !url.includes("supabase.co"))) {
+      // @ts-ignore
+      supabase.rest.url = url;
+    }
   }
   return supabase;
 }

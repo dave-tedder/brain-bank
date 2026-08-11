@@ -1,0 +1,17 @@
+FROM denoland/deno:alpine-2.0.6
+
+WORKDIR /app
+
+# Copy Deno workspace configuration
+COPY deno.json /app/
+
+# Copy shared code and open-brain-mcp function code
+COPY supabase/functions/_shared /app/supabase/functions/_shared
+COPY supabase/functions/open-brain-mcp /app/supabase/functions/open-brain-mcp
+
+# Pre-cache dependencies
+RUN deno cache --config supabase/functions/open-brain-mcp/deno.json supabase/functions/open-brain-mcp/index.ts
+
+EXPOSE 8080
+
+CMD ["run", "--allow-net", "--allow-env", "--allow-read", "--config", "supabase/functions/open-brain-mcp/deno.json", "supabase/functions/open-brain-mcp/index.ts"]
