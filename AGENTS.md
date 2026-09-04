@@ -46,6 +46,7 @@ brain-bank/
 │       ├── compile-pages/     # Karpathy-style wiki compilation
 │       ├── classify-edges/    # typed semantic edges between thoughts
 │       ├── queue-runner/      # Open Engine heartbeat: claims / blocks / fails agent tasks
+│       ├── external-crm-sync/ # write-only receiver for an external CRM's client/appointment push, own key
 │       └── _shared/           # profile loader + profile.json bundled at deploy
 ├── dashboard/                 # Next.js dashboard, see dashboard/AGENTS.md
 ├── skills/                    # triggered skill packs; see skills/README.md for the index

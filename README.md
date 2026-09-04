@@ -113,7 +113,8 @@ brain-bank/
 │       ├── brain-digest/      # core: morning synthesis
 │       ├── compile-pages/     # core: wiki builder
 │       ├── classify-edges/    # optional: typed thought-to-thought relations
-│       └── queue-runner/      # optional: Open Engine claim heartbeat
+│       ├── queue-runner/      # optional: Open Engine claim heartbeat
+│       └── external-crm-sync/ # optional: write-only receiver for a CRM push (own key)
 ├── dashboard/            # Next.js app (merged via git subtree)
 ├── docs/                 # deploy walkthrough, Slack setup, per-source guides
 ├── integrations/         # per-source capture bridges and scheduled-lane prompts

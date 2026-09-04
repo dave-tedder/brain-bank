@@ -69,6 +69,7 @@ jobs:
               supabase/functions/open-brain-mcp/*.ts &&
             deno cache \
               supabase/functions/brain-digest/*.ts \
+              supabase/functions/external-crm-sync/*.ts \
               supabase/functions/_shared/*.ts \
               tests/*.ts \
               tests/_shared/*.ts
@@ -90,7 +91,7 @@ jobs:
       # Separate step because deno.json's workspace scopes resolution to
       # open-brain-mcp, so these suites are invisible to the run above.
       - name: Run Deno tests (brain-digest, _shared)
-        run: deno test --allow-read --allow-env supabase/functions/brain-digest/ supabase/functions/_shared/
+        run: deno test --allow-read --allow-env supabase/functions/brain-digest/ supabase/functions/external-crm-sync/ supabase/functions/_shared/
 
       # The repo-root tests/ directory was not run by CI at all. The dashboard
       # step below runs `tests/*.test.mjs` but under `working-directory:
@@ -106,6 +107,9 @@ jobs:
       # This is what catches a fresh-clone break that the tests above miss.
       - name: Type-check Edge Functions
         run: deno check --config supabase/functions/open-brain-mcp/deno.json supabase/functions/open-brain-mcp/index.ts
+
+      - name: Type-check external-crm-sync
+        run: deno check supabase/functions/external-crm-sync/index.ts
 
       - name: Verify queue-runner skill contract
         run: node skills/queue-runner/verify.mjs
