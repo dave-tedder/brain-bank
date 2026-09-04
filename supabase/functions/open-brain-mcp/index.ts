@@ -19,6 +19,7 @@ import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
 import { clampInt, timingSafeEqualStr } from "../_shared/access-key.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
+import { buildRestEventUpdate } from "./_rest_event.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
   assertRestoreSelector,
@@ -1238,22 +1239,19 @@ async function handleRestEvent(req: Request): Promise<Response> {
     if (gcalId) {
       const { data: existing } = await supabase
         .from("business_events")
-        .select("id")
+        .select("id, metadata")
         .contains("metadata", { gcal_event_id: gcalId })
         .limit(1);
       if (existing && existing.length > 0) {
-        // Update existing event
+        // Update existing event. `metadata` is MERGED over the row's current
+        // jsonb, never replaced: this row may be shared with another writer
+        // (the CRM push in external-crm-sync stamps crm_appointment_id,
+        // source, status, kind, pushed_at) and a wholesale replace strips
+        // those keys on every calendar pass. See _rest_event.ts and
+        // ../_shared/metadata-merge.ts.
         const { error } = await supabase
           .from("business_events")
-          .update({
-            title,
-            event_type: event_type || null,
-            date_start: date_start || null,
-            date_end: date_end || null,
-            location: location || null,
-            notes: notes || null,
-            metadata: metadata || null,
-          })
+          .update(buildRestEventUpdate(body, existing[0].metadata))
           .eq("id", existing[0].id);
         if (error) return jsonResponse({ error: error.message }, 500);
         return jsonResponse({ status: "updated", id: existing[0].id });
