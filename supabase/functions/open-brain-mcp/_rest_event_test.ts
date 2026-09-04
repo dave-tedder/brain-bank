@@ -1,6 +1,9 @@
 // Run: deno test supabase/functions/open-brain-mcp/_rest_event_test.ts
 import { assertEquals } from "jsr:@std/assert@1.0.19";
-import { buildRestEventUpdate } from "./_rest_event.ts";
+import {
+  buildRestEventUpdate,
+  eventTypeOwnedByAnotherWriter,
+} from "./_rest_event.ts";
 
 // Exactly what integrations/calendar-sync/script.gs posts (Step 1 payload).
 const calendarBody = {
@@ -70,7 +73,8 @@ Deno.test("/event update with no payload metadata leaves the row's metadata stan
 });
 
 Deno.test("/event update scalar columns keep their existing semantics", () => {
-  const patch = buildRestEventUpdate(calendarBody, pushedRowMetadata);
+  const unowned = { ...pushedRowMetadata, source: undefined };
+  const patch = buildRestEventUpdate(calendarBody, unowned);
   assertEquals(patch.title, calendarBody.title);
   assertEquals(patch.event_type, "tattoo_session");
   assertEquals(patch.date_start, "2026-09-13");
@@ -82,4 +86,65 @@ Deno.test("/event update scalar columns keep their existing semantics", () => {
   assertEquals(sparse.date_start, null);
   assertEquals(sparse.notes, null);
   assertEquals(sparse.metadata, null);
+});
+
+// --- event_type ownership -------------------------------------------------
+
+// The calendar sync's classifier guessed `general` for this real client
+// appointment from its title; the CRM push had written tattoo_session.
+const classifierBody = { ...calendarBody, event_type: "general" };
+
+Deno.test("event_type: a row stamped by another writer keeps it, metadata still merges", () => {
+  const patch = buildRestEventUpdate(classifierBody, pushedRowMetadata);
+  assertEquals("event_type" in patch, false);
+  // The rest of the calendar sync's update still lands.
+  assertEquals(patch.metadata!.start_time, "12:00");
+  assertEquals(patch.metadata!.crm_appointment_id, pushedRowMetadata.crm_appointment_id);
+  assertEquals(patch.date_start, "2026-09-13");
+});
+
+Deno.test("event_type: any self-identified writer owns it, not one named source", () => {
+  const probeRow = { ...pushedRowMetadata, source: "probe-writer" };
+  const patch = buildRestEventUpdate(classifierBody, probeRow);
+  assertEquals("event_type" in patch, false);
+});
+
+Deno.test("event_type: a row nobody has claimed takes the classifier's value", () => {
+  const patch = buildRestEventUpdate(classifierBody, calendarBody.metadata);
+  assertEquals(patch.event_type, "general");
+  const fresh = buildRestEventUpdate(classifierBody, null);
+  assertEquals(fresh.event_type, "general");
+  const blank = buildRestEventUpdate(classifierBody, { ...pushedRowMetadata, source: "" });
+  assertEquals(blank.event_type, "general");
+});
+
+Deno.test("event_type: the same writer coming back may change it", () => {
+  const dashRow = { ...calendarBody.metadata, source: "dash-bot-create" };
+  const dashBody = {
+    ...classifierBody,
+    event_type: "consultation",
+    metadata: { ...calendarBody.metadata, source: "dash-bot-create" },
+  };
+  const patch = buildRestEventUpdate(dashBody, dashRow);
+  assertEquals(patch.event_type, "consultation");
+});
+
+Deno.test("event_type: a different self-identified writer does not override the owner", () => {
+  const dashBody = {
+    ...classifierBody,
+    metadata: { ...calendarBody.metadata, source: "dash-bot-reschedule" },
+  };
+  const patch = buildRestEventUpdate(dashBody, pushedRowMetadata);
+  assertEquals("event_type" in patch, false);
+  // and the row's source is now the reschedule's: incoming keys win in the merge
+  assertEquals(patch.metadata!.source, "dash-bot-reschedule");
+});
+
+Deno.test("eventTypeOwnedByAnotherWriter: the four cases", () => {
+  assertEquals(eventTypeOwnedByAnotherWriter({ source: "external-crm" }, {}), true);
+  assertEquals(eventTypeOwnedByAnotherWriter({ source: "external-crm" }, undefined), true);
+  assertEquals(eventTypeOwnedByAnotherWriter({ source: "external-crm" }, { source: "external-crm" }), false);
+  assertEquals(eventTypeOwnedByAnotherWriter({}, { source: "dash-bot-create" }), false);
+  assertEquals(eventTypeOwnedByAnotherWriter(null, {}), false);
+  assertEquals(eventTypeOwnedByAnotherWriter({ source: 42 }, {}), false);
 });
