@@ -601,7 +601,10 @@ function evaluateTask(task, registry, actionItems, options = {}) {
   // the malformed marker becomes a visible HOLD instead of a silent loss.
   if (
     !operator.operator &&
-    /OPERATOR-ACTION:\s*\S/i.test(augmentation.sections[followUpHeading] || "")
+    String(augmentation.sections[followUpHeading] || "").split(/\r?\n/).some(
+      (line) => /OPERATOR-ACTION:\s*\S/i.test(line) &&
+        !/^\s*OPERATOR-ACTION:/i.test(line),
+    )
   ) {
     reasons.push("OPERATOR_MARKER_NOT_LINE_ANCHORED");
   }
@@ -991,7 +994,16 @@ function parseOperatorAction(followUpText) {
   }
   const [actionPart, targetPart] = parts;
   const operator_action = actionPart.trim();
-  if (!operator_action) return { operator: null, reasons: [] };
+  if (!operator_action) {
+    // A bare "OPERATOR-ACTION:" with nothing after it is treated as no marker
+    // (unchanged). But an anchored line whose action is empty while something
+    // else follows the label ("OPERATOR-ACTION: || OPERATOR-TARGET: <url>")
+    // is a marker the author meant to write, so it must HOLD rather than apply
+    // with the target silently dropped. Before the line-anchored check was
+    // narrowed, this case was held (under the wrong reason); keep it held.
+    if (body) return { operator: null, reasons: ["OPERATOR_ACTION_EMPTY"] };
+    return { operator: null, reasons: [] };
+  }
   let operator_target = null;
   if (targetPart) {
     if (!/^OPERATOR-TARGET:/i.test(targetPart.trim())) {
@@ -1099,6 +1111,12 @@ function holdMessage(reasons, receipt) {
   }
   if (reasons.includes("OPERATOR_MARKER_NOT_LINE_ANCHORED")) {
     return "Receipt's Follow-up recommendation contains an OPERATOR-ACTION marker that is not on its own line (it is appended to a prose sentence), so the parser cannot read it; held so the operator step is not silently dropped. Put the marker on its own line and re-run.";
+  }
+  if (reasons.includes("OPERATOR_ACTION_EMPTY")) {
+    return "Receipt's OPERATOR-ACTION marker has no action text before the '||' separator, so the operator step cannot be read; held so it is not silently dropped. Write the step after 'OPERATOR-ACTION:' and re-run.";
+  }
+  if (reasons.includes("OPERATOR_TARGET_UNSAFE_SCHEME")) {
+    return "OPERATOR-TARGET must be a plain http(s) URL or filesystem path, not a description. Put descriptive text in OPERATOR-ACTION and re-run; the task remains held.";
   }
   if (reasons.includes("DELIVERABLE_WITHOUT_OPERATOR_ACTION")) {
     return "Receipt shows the run staged a deliverable under deliverables/ but carries no OPERATOR-ACTION marker; held so the install step is not lost. Add 'OPERATOR-ACTION: install <deliverable-path> || OPERATOR-TARGET: <install target>' to Follow-up recommendation and re-run.";
@@ -1736,6 +1754,23 @@ function historyPathsFor(route) {
   };
 }
 
+function isReviewedApplyEvent(event) {
+  // Preserve the original dedicated apply event, including legacy payloads.
+  if (event?.event_type === "AGENT APPLIED") return true;
+  const expectedStatus = event?.event_type === "AGENT NEEDS OPERATOR"
+    ? "Needs Operator"
+    : event?.event_type === "AGENT NEEDS DAVE" ? "Needs Dave" : null;
+  const payload = event?.payload;
+  // A desk move can have the SAME event type (admin_amend_agent_task emits
+  // action=ops-amend). Only the reviewed-apply payload qualifies. Filter before
+  // selecting the latest event so a later move cannot replace apply provenance.
+  return expectedStatus !== null && payload !== null &&
+    typeof payload === "object" && !Array.isArray(payload) &&
+    payload.action !== "ops-amend" &&
+    payload.from_status === "Agent Review" && payload.status === expectedStatus &&
+    ["accepted", "accepted_with_follow_up"].includes(payload.resolution);
+}
+
 // packets: array of get_agent_task-shaped { task, events }.
 // readText / listHistoryFiles: injected for tests.
 export function evaluateUnrecordedAudit(packets, registry, options = {}) {
@@ -1758,7 +1793,7 @@ export function evaluateUnrecordedAudit(packets, registry, options = {}) {
       ? packet.events
       : (task.events || []);
     const applied = events
-      .filter((event) => event?.event_type === "AGENT APPLIED")
+      .filter(isReviewedApplyEvent)
       .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
     if (applied.length === 0) {
       skipped.push({ task_id: task.id, reason: "NOT_APPLIED" });
