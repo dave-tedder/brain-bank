@@ -23,6 +23,13 @@
 //     existing REST `/event` route replaces metadata wholesale; this module
 //     deliberately does not, because the Apps Script calendar sync and this
 //     push share event rows.
+//   - Intakes (`capture_intake`) are keyed on
+//     `thoughts.metadata->>'crm_intake_id'`, which carries its own
+//     partial unique index (migration 20261010_external_crm_intake_unique_key).
+//     An intake is never updated: a second push of the same id answers
+//     `duplicate` with the existing thought's id and writes nothing.
+
+import { normalizeTopic } from "../_shared/metadata-validation.ts";
 
 export const SYNC = {
   /** metadata.source stamped on every row this function writes */
@@ -39,7 +46,12 @@ export const SYNC = {
   gcalIdKey: "gcal_event_id",
   gcalSuffix: "@google.com",
   cancelledPrefix: "CANCELLED - ",
+  /** thoughts.metadata key holding the CRM's intake id (unique, indexed) */
+  intakeIdKey: "crm_intake_id",
 } as const;
+
+export const INTAKE_AUDIENCES = ["artist", "shop_queue"] as const;
+export type IntakeAudience = typeof INTAKE_AUDIENCES[number];
 
 export const EVENT_TYPES = [
   "tattoo_session",
@@ -125,6 +137,29 @@ export interface SyncStore {
   findEventByGcalIds(ids: string[]): Promise<EventRow | null>;
   insertEvent(record: EventInsert): Promise<{ id: string }>;
   updateEvent(id: string, patch: EventPatch): Promise<void>;
+  findThoughtByIntakeId(intakeId: string): Promise<{ id: string } | null>;
+  insertThought(record: ThoughtInsert): Promise<{ id: string }>;
+}
+
+export interface ThoughtInsert {
+  content: string;
+  embedding: number[];
+  content_hash: string;
+  metadata: Metadata;
+}
+
+/** The capture pipeline `capture_intake` reuses (embedding, metadata
+ * extraction, coercion, project routing, action-item storage). Injected so
+ * the decision logic here stays pure; `index.ts` wires the real one from
+ * `_shared/capture-pipeline.ts` and `_shared/metadata-validation.ts`. */
+export interface CapturePipeline {
+  /** SHA-256 of the trimmed text, the same function every capture path uses. */
+  hash(text: string): Promise<string>;
+  /** Embedding plus coerced, project-routed metadata for `content`. */
+  analyze(content: string): Promise<{ embedding: number[]; metadata: Metadata }>;
+  /** Post-insert work (action-item storage). A throw here is logged by the
+   * caller and never turns a stored thought into a failed capture. */
+  afterInsert(thoughtId: string, content: string, metadata: Metadata): Promise<void>;
 }
 
 export interface SyncResult {
@@ -334,6 +369,77 @@ export function parseEventPayload(
   if (pushed_at) payload.pushed_at = pushed_at;
   if (errors.length) return { ok: false, errors };
   return { ok: true, payload };
+}
+
+export interface IntakePayload {
+  crm_intake_id: string;
+  content: string;
+  submitted_at: string;
+  site: string | null;
+  venue: string | null;
+  audience: IntakeAudience | null;
+  tags: string[];
+}
+
+/** Content arrives already formatted and scrubbed by the CRM (typically
+ * well under 2,000 chars). The cap is generous on purpose: a 400 parks the row for good. */
+const MAX_INTAKE_CONTENT = 8000;
+
+/** Only the contract's fields are read; any other key in the body is ignored
+ * and never stored, so a contact field added upstream cannot land here. */
+export function parseIntakePayload(
+  input: unknown,
+): { ok: true; payload: IntakePayload } | { ok: false; errors: string[] } {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return { ok: false, errors: ["body must be a JSON object"] };
+  }
+  const body = input as Body;
+  const errors: string[] = [];
+  const crm_intake_id = reqString(
+    body,
+    "crm_intake_id",
+    errors,
+    MAX_ID,
+  );
+  if (crm_intake_id && !UUID_RE.test(crm_intake_id)) {
+    errors.push("crm_intake_id must be a uuid");
+  }
+  const content = reqString(body, "content", errors, MAX_INTAKE_CONTENT);
+  const submitted_at = optTimestamp(body, "submitted_at", errors);
+  if (!submitted_at) errors.push("submitted_at is required");
+  const site = optString(body, "site", errors, 256);
+  const venue = optString(body, "venue", errors, 256);
+  const rawAudience = optString(body, "audience", errors, 64);
+  if (
+    rawAudience &&
+    !(INTAKE_AUDIENCES as readonly string[]).includes(rawAudience)
+  ) {
+    errors.push(`audience must be one of ${INTAKE_AUDIENCES.join(", ")}`);
+  }
+  let tags: string[] = [];
+  if (body.tags !== undefined && body.tags !== null) {
+    const t = body.tags;
+    if (
+      !Array.isArray(t) || t.some((x) => typeof x !== "string" || x.length > 64)
+    ) {
+      errors.push("tags must be an array of strings");
+    } else {
+      tags = t as string[];
+    }
+  }
+  if (errors.length) return { ok: false, errors };
+  return {
+    ok: true,
+    payload: {
+      crm_intake_id: crm_intake_id.toLowerCase(),
+      content,
+      submitted_at: submitted_at as string,
+      site: site || null,
+      venue: venue || null,
+      audience: (rawAudience || null) as IntakeAudience | null,
+      tags,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -552,4 +658,114 @@ export async function upsertEvent(
     });
     return { status: 201, body: { status: "created", id: inserted.id } };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Intake capture
+// ---------------------------------------------------------------------------
+
+/** Final thought metadata: the pipeline's coerced metadata, the explicit tags
+ * merged into topics the way REST /capture merges them (normalised, order
+ * kept, deduped), then the intake fields. `source` is always `external-crm`,
+ * overriding anything the pipeline produced. */
+export function buildIntakeMetadata(
+  analyzed: Metadata,
+  p: IntakePayload,
+): Metadata {
+  const coercedTopics = Array.isArray(analyzed.topics)
+    ? (analyzed.topics as unknown[]).filter((t): t is string =>
+      typeof t === "string"
+    )
+    : [];
+  const explicitTags = p.tags.map((t) => normalizeTopic(t)).filter(Boolean);
+  return {
+    ...analyzed,
+    topics: Array.from(new Set([...coercedTopics, ...explicitTags])),
+    source: SYNC.source,
+    [SYNC.intakeIdKey]: p.crm_intake_id,
+    submitted_at: p.submitted_at,
+    site: p.site,
+    venue: p.venue,
+    audience: p.audience,
+  };
+}
+
+/** One thought per CRM intake id.
+ *
+ * Find first, so a retry answers `duplicate` before spending an embedding or
+ * an LLM call. On a miss, build through the shared capture pipeline and
+ * insert. A UniqueViolation on insert has two possible causes, told apart by
+ * re-finding on the intake id:
+ *   - the intake index: a concurrent push of the same id won. Answer
+ *     `duplicate` with the winner's id.
+ *   - `idx_thoughts_content_hash` (thoughts.content_hash is UNIQUE): a
+ *     DIFFERENT capture already holds byte-identical text, e.g. two genuinely
+ *     separate requests submitted in the same minute with the same idea. The
+ *     content hash must not be what rejects an intake, so insert once more
+ *     with the hash salted by the intake id.
+ * Anything else, or a second violation that the re-find cannot explain,
+ * propagates as a 500 and the CRM retries.
+ *
+ * Auto-resolve is deliberately NOT run for intakes (see
+ * docs/architecture/rest-api.md): a new request is not evidence that any
+ * action item was completed. */
+export async function captureIntake(
+  store: SyncStore,
+  pipeline: CapturePipeline,
+  input: unknown,
+): Promise<SyncResult> {
+  const parsed = parseIntakePayload(input);
+  if (!parsed.ok) return { status: 400, body: { error: parsed.errors } };
+  const p = parsed.payload;
+
+  const existing = await store.findThoughtByIntakeId(p.crm_intake_id);
+  if (existing) {
+    return { status: 200, body: { status: "duplicate", id: existing.id } };
+  }
+
+  const analyzed = await pipeline.analyze(p.content);
+  const metadata = buildIntakeMetadata(analyzed.metadata, p);
+  const record: ThoughtInsert = {
+    content: p.content,
+    embedding: analyzed.embedding,
+    content_hash: await pipeline.hash(p.content),
+    metadata,
+  };
+
+  let inserted: { id: string } | null = null;
+  try {
+    inserted = await store.insertThought(record);
+  } catch (err) {
+    if (!(err instanceof UniqueViolation)) throw err;
+    const winner = await store.findThoughtByIntakeId(p.crm_intake_id);
+    if (winner) {
+      return { status: 200, body: { status: "duplicate", id: winner.id } };
+    }
+    try {
+      inserted = await store.insertThought({
+        ...record,
+        content_hash: await pipeline.hash(
+          `${p.content}\n[${SYNC.intakeIdKey}:${p.crm_intake_id}]`,
+        ),
+      });
+    } catch (err2) {
+      if (!(err2 instanceof UniqueViolation)) throw err2;
+      const late = await store.findThoughtByIntakeId(p.crm_intake_id);
+      if (!late) throw err2;
+      return { status: 200, body: { status: "duplicate", id: late.id } };
+    }
+  }
+
+  try {
+    await pipeline.afterInsert(inserted.id, p.content, metadata);
+  } catch (err) {
+    // The thought is stored; a failed post-insert step must not make Client
+    // Bank retry into a duplicate. Log the step only, never the content.
+    console.error(
+      `external-crm-sync capture_intake afterInsert failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+  return { status: 200, body: { status: "created", id: inserted.id } };
 }

@@ -1,13 +1,18 @@
 // external-crm-sync — write-only receiver for an external CRM push.
 //
 // An external CRM (the operator's system of record for contacts and
-// appointments) pushes them here one way. Two operations, POST JSON:
+// appointments) pushes them here one way. Three operations, POST JSON:
 //
 //   POST /external-crm-sync/upsert_client   keyed on clients.metadata.crm_id
 //   POST /external-crm-sync/upsert_event    keyed on business_events.metadata.crm_appointment_id,
 //                                          then metadata.gcal_event_id in either form
+//   POST /external-crm-sync/capture_intake  a new inbound request (an intake) as a thought,
+//                                          keyed on thoughts.metadata.crm_intake_id;
+//                                          built through the shared capture pipeline
+//                                          (embedding, metadata extraction, action items)
+//                                          so it reaches the daily digest like any capture
 //
-// NO READ OPERATIONS. Nothing here returns a row, a list, or a search; the
+// Still NO READ OPERATIONS. Nothing here returns a row, a list, or a search; the
 // only response bodies are `{status, id}` and error strings. The function's
 // own lookups (find by id before deciding insert vs update) are internal and
 // never echoed.
@@ -24,6 +29,20 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.47.10";
 import { authenticatePushKey } from "./_auth.ts";
 import {
+  contentHash,
+  extractAndStoreActionItems,
+  extractMetadata,
+  getEmbedding,
+} from "../_shared/capture-pipeline.ts";
+import {
+  coerceMetadata,
+  loadKnownSlugs,
+  loadRouteMap,
+  routeProjectFromContent,
+} from "../_shared/metadata-validation.ts";
+import {
+  type CapturePipeline,
+  captureIntake,
   type ClientInsert,
   type ClientPatch,
   type ClientRow,
@@ -32,6 +51,7 @@ import {
   type EventRow,
   SYNC,
   type SyncStore,
+  type ThoughtInsert,
   UniqueViolation,
   upsertClient,
   upsertEvent,
@@ -40,6 +60,7 @@ import {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const FUNCTION_SLUG = "external-crm-sync";
 
 // `notes` and `preferred_styles` are NOT selected: the push cannot read them,
 // so it cannot write them back.
@@ -129,9 +150,64 @@ class SupabaseSyncStore implements SyncStore {
       .eq("id", id);
     if (error) throwDbError(error);
   }
+
+  async findThoughtByIntakeId(intakeId: string): Promise<{ id: string } | null> {
+    const { data, error } = await supabase
+      .from("thoughts")
+      .select("id")
+      .eq(`metadata->>${SYNC.intakeIdKey}`, intakeId)
+      .order("created_at", { ascending: true })
+      .limit(1);
+    if (error) throwDbError(error);
+    return (data?.[0] as { id: string } | undefined) ?? null;
+  }
+
+  async insertThought(record: ThoughtInsert): Promise<{ id: string }> {
+    const { data, error } = await supabase
+      .from("thoughts")
+      .insert(record)
+      .select("id")
+      .single();
+    if (error || !data) throwDbError(error ?? { message: "insert returned no row" });
+    return { id: data.id };
+  }
 }
 
 const store = new SupabaseSyncStore();
+
+// The same steps handleRestCapture runs in open-brain-mcp, minus the two
+// rejection guards (content-hash dedup and the near-duplicate embedding guard):
+// the intake id is this route's dedupe key. Auto-resolve is not run at all.
+const pipeline: CapturePipeline = {
+  hash: contentHash,
+  async analyze(content: string) {
+    const [embedding, raw] = await Promise.all([
+      getEmbedding(FUNCTION_SLUG, content),
+      extractMetadata(FUNCTION_SLUG, content),
+    ]);
+    const coerced = coerceMetadata(raw, await loadKnownSlugs(supabase), content);
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        content,
+        await loadRouteMap(supabase),
+      );
+    }
+    return { embedding, metadata: { ...coerced } };
+  },
+  afterInsert(thoughtId: string, content: string, metadata) {
+    // Intake text is never a mechanical capture; the MECHANICAL_CAPTURE_PREFIXES
+    // test lives in the two capture files and does not apply to this route.
+    return extractAndStoreActionItems(
+      supabase,
+      thoughtId,
+      metadata,
+      content,
+      () => false,
+    );
+  },
+};
+
+const OPS = ["upsert_client", "upsert_event", "capture_intake"] as const;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -152,7 +228,7 @@ Deno.serve(async (req: Request): Promise<Response> => {
     return json({ error: "Invalid or missing push key" }, 401);
   }
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  if (op !== "upsert_client" && op !== "upsert_event") {
+  if (!(OPS as readonly string[]).includes(op)) {
     return json({ error: "unknown operation" }, 404);
   }
 
@@ -166,10 +242,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
   try {
     const result = op === "upsert_client"
       ? await upsertClient(store, body)
-      : await upsertEvent(store, body);
-    // Log the op and outcome only. Payloads carry contact details and
-    // must never reach the function logs.
-    console.log(`external-crm-sync ${op} -> ${result.status}`);
+      : op === "upsert_event"
+      ? await upsertEvent(store, body)
+      : await captureIntake(store, pipeline, body);
+    // Log the op and outcome only. Payloads carry contact details and intake
+    // text, and must never reach the function logs.
+    const outcome = typeof result.body.status === "string"
+      ? ` ${result.body.status}`
+      : "";
+    console.log(`external-crm-sync ${op} -> ${result.status}${outcome}`);
     return json(result.body, result.status);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

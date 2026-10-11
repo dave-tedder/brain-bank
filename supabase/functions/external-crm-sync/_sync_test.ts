@@ -8,6 +8,9 @@
 
 import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1.0.19";
 import {
+  buildIntakeMetadata,
+  type CapturePipeline,
+  captureIntake,
   type ClientInsert,
   type ClientPatch,
   type ClientRow,
@@ -18,6 +21,7 @@ import {
   type Metadata,
   SYNC,
   type SyncStore,
+  type ThoughtInsert,
   UniqueViolation,
   upsertClient,
   upsertEvent,
@@ -32,10 +36,13 @@ type StoredClient = ClientRow & {
   created_at: string;
 };
 type StoredEvent = EventRow & { notes: string | null; created_at: string };
+type StoredThought = ThoughtInsert & { id: string };
 
 class MemoryStore implements SyncStore {
   clients: StoredClient[] = [];
   events: StoredEvent[] = [];
+  thoughts: StoredThought[] = [];
+  thoughtInserts = 0;
   clientPatches: Array<{ id: string; patch: ClientPatch }> = [];
   eventPatches: Array<{ id: string; patch: EventPatch }> = [];
   private seq = 0;
@@ -147,6 +154,67 @@ class MemoryStore implements SyncStore {
     if (patch.metadata) this.assertEventUnique(patch.metadata, id);
     this.eventPatches.push({ id, patch });
     Object.assign(row, patch);
+    return Promise.resolve();
+  }
+  findThoughtByIntakeId(intakeId: string): Promise<{ id: string } | null> {
+    const hit = this.thoughts.find((t) =>
+      t.metadata?.[SYNC.intakeIdKey] === intakeId
+    );
+    return Promise.resolve(hit ? { id: hit.id } : null);
+  }
+  // Both live unique indexes on thoughts: idx_thoughts_content_hash and the
+  // partial intake-id index from migration 20261010.
+  seedThought(record: ThoughtInsert): StoredThought {
+    const key = record.metadata?.[SYNC.intakeIdKey];
+    if (
+      typeof key === "string" &&
+      this.thoughts.some((t) => t.metadata?.[SYNC.intakeIdKey] === key)
+    ) {
+      throw new UniqueViolation("idx_thoughts_crm_intake_id_unique");
+    }
+    if (this.thoughts.some((t) => t.content_hash === record.content_hash)) {
+      throw new UniqueViolation("idx_thoughts_content_hash");
+    }
+    const row = { ...record, id: this.newId() };
+    this.thoughts.push(row);
+    return row;
+  }
+  insertThought(record: ThoughtInsert): Promise<{ id: string }> {
+    this.thoughtInserts += 1;
+    try {
+      return Promise.resolve({ id: this.seedThought(record).id });
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+}
+
+class FakePipeline implements CapturePipeline {
+  analyzeCalls = 0;
+  afterInsertCalls: string[] = [];
+  failAfterInsert = false;
+  hash(text: string): Promise<string> {
+    return Promise.resolve(`hash:${text.trim()}`);
+  }
+  analyze(_content: string) {
+    this.analyzeCalls += 1;
+    return Promise.resolve({
+      embedding: [0.1, 0.2, 0.3],
+      metadata: {
+        people: ["Jane Doe"],
+        action_items: [],
+        dates_mentioned: [],
+        topics: ["tattoo", "intake"],
+        type: "task",
+        project: null,
+        priority: "normal",
+        source: "chatgpt",
+      } as Metadata,
+    });
+  }
+  afterInsert(thoughtId: string): Promise<void> {
+    this.afterInsertCalls.push(thoughtId);
+    if (this.failAfterInsert) return Promise.reject(new Error("boom"));
     return Promise.resolve();
   }
 }
@@ -659,4 +727,238 @@ Deno.test("upsert_event: validation rejects a bad event_type, a bad date and a m
   const ok = await upsertEvent(store, eventPayload({ date_end: undefined }), NOW);
   assertEquals(ok.status, 201);
   assertEquals(store.events[0].date_end, "2026-09-20");
+});
+
+// ---------------------------------------------------------------------------
+// capture_intake
+// ---------------------------------------------------------------------------
+
+const INTAKE_ID = "1a2b3c4d-0000-4000-8000-0000000000aa";
+const INTAKE_CONTENT = [
+  "[Intake] New tattoo request from Jane Doe (asked for Alex)",
+  "Idea: Koi swimming up the forearm, black and grey",
+  "Placement: Left forearm. Size: Half sleeve",
+  "Venue: Main Studio. From: example.com",
+  "Submitted Oct 10, 2:14 PM. In the CRM under Intake.",
+].join("\n");
+
+function intakePayload(over: Record<string, unknown> = {}) {
+  return {
+    crm_intake_id: INTAKE_ID,
+    content: INTAKE_CONTENT,
+    submitted_at: "2026-10-10T18:14:00.000Z",
+    site: "example.com",
+    venue: "Main Studio",
+    audience: "artist",
+    tags: ["intake", "external-crm"],
+    ...over,
+  };
+}
+
+Deno.test("capture_intake: same intake twice is created then duplicate, same id, one thought, one pipeline run", async () => {
+  const store = new MemoryStore();
+  const pipe = new FakePipeline();
+  const first = await captureIntake(store, pipe, intakePayload());
+  assertEquals(first.status, 200);
+  assertEquals(first.body.status, "created");
+  const second = await captureIntake(store, pipe, intakePayload());
+  assertEquals(second.status, 200);
+  assertEquals(second.body.status, "duplicate");
+  assertEquals(second.body.id, first.body.id);
+  assertEquals(store.thoughts.length, 1);
+  // Find-first: the retry must not spend an embedding/LLM call or attempt an insert.
+  assertEquals(pipe.analyzeCalls, 1);
+  assertEquals(store.thoughtInserts, 1);
+  assertEquals(pipe.afterInsertCalls, [first.body.id]);
+});
+
+Deno.test("capture_intake: an edited body under the same intake id is still a duplicate", async () => {
+  const store = new MemoryStore();
+  const pipe = new FakePipeline();
+  const first = await captureIntake(store, pipe, intakePayload());
+  const edited = await captureIntake(
+    store,
+    pipe,
+    intakePayload({ content: INTAKE_CONTENT + " (edited)" }),
+  );
+  assertEquals(edited.body.status, "duplicate");
+  assertEquals(edited.body.id, first.body.id);
+  assertEquals(store.thoughts.length, 1);
+});
+
+Deno.test("capture_intake: losing an insert race answers duplicate with the winner's id", async () => {
+  class RacingStore extends MemoryStore {
+    raced = false;
+    winnerId = "";
+    override insertThought(record: ThoughtInsert): Promise<{ id: string }> {
+      if (!this.raced) {
+        this.raced = true;
+        // A concurrent push of the same intake lands between lookup and insert.
+        this.winnerId = this.seedThought({
+          ...record,
+          content_hash: "winner-hash",
+        }).id;
+      }
+      return super.insertThought(record);
+    }
+  }
+  const store = new RacingStore();
+  const pipe = new FakePipeline();
+  const res = await captureIntake(store, pipe, intakePayload());
+  assert(store.raced);
+  assertEquals(res.status, 200);
+  assertEquals(res.body.status, "duplicate");
+  assertEquals(res.body.id, store.winnerId);
+  assertEquals(store.thoughts.length, 1);
+  assertEquals(pipe.afterInsertCalls.length, 0);
+  // The re-find answers the race directly; no second write is attempted.
+  assertEquals(store.thoughtInserts, 1);
+});
+
+Deno.test("capture_intake: a content-hash collision followed by a same-id race still answers duplicate", async () => {
+  class CollideThenRaceStore extends MemoryStore {
+    calls = 0;
+    winnerId = "";
+    override insertThought(record: ThoughtInsert): Promise<{ id: string }> {
+      this.calls += 1;
+      if (this.calls === 2) {
+        // Between the salted retry's decision and its insert, a concurrent
+        // push of the same intake id wins.
+        this.winnerId = this.seedThought({
+          ...record,
+          content_hash: "winner-hash",
+        }).id;
+      }
+      return super.insertThought(record);
+    }
+  }
+  const store = new CollideThenRaceStore();
+  // An unrelated earlier capture already holds byte-identical text.
+  store.seedThought({
+    content: INTAKE_CONTENT,
+    embedding: [],
+    content_hash: `hash:${INTAKE_CONTENT}`,
+    metadata: { source: "chatgpt" },
+  });
+  const res = await captureIntake(store, new FakePipeline(), intakePayload());
+  assertEquals(res.status, 200);
+  assertEquals(res.body.status, "duplicate");
+  assertEquals(res.body.id, store.winnerId);
+  assertEquals(store.calls, 2);
+  assertEquals(store.thoughts.length, 2); // the unrelated capture + the winner
+});
+
+Deno.test("capture_intake: two separate intakes with identical text both land (content_hash does not reject)", async () => {
+  const store = new MemoryStore();
+  const pipe = new FakePipeline();
+  const a = await captureIntake(store, pipe, intakePayload());
+  const b = await captureIntake(
+    store,
+    pipe,
+    intakePayload({ crm_intake_id: "1a2b3c4d-0000-4000-8000-0000000000bb" }),
+  );
+  assertEquals(a.body.status, "created");
+  assertEquals(b.body.status, "created");
+  assert(a.body.id !== b.body.id);
+  assertEquals(store.thoughts.length, 2);
+  assert(store.thoughts[0].content_hash !== store.thoughts[1].content_hash);
+  // The first keeps the plain content hash, exactly as any other capture would.
+  assertEquals(store.thoughts[0].content_hash, `hash:${INTAKE_CONTENT}`);
+});
+
+Deno.test("capture_intake: metadata is the pipeline's plus source, intake fields and merged tags; no contact fields", async () => {
+  const store = new MemoryStore();
+  const pipe = new FakePipeline();
+  await captureIntake(
+    store,
+    pipe,
+    intakePayload({ email: "jane@example.com", phone: "252-555-0100", instagram: "@jane" }),
+  );
+  const t = store.thoughts[0];
+  assertEquals(t.content, INTAKE_CONTENT);
+  assertEquals(t.embedding, [0.1, 0.2, 0.3]);
+  assertEquals(t.metadata.source, "external-crm");
+  assertEquals(t.metadata[SYNC.intakeIdKey], INTAKE_ID);
+  assertEquals(t.metadata.submitted_at, "2026-10-10T18:14:00.000Z");
+  assertEquals(t.metadata.site, "example.com");
+  assertEquals(t.metadata.venue, "Main Studio");
+  assertEquals(t.metadata.audience, "artist");
+  assertEquals(t.metadata.topics, ["tattoo", "intake", "external-crm"]);
+  assertEquals(t.metadata.people, ["Jane Doe"]);
+  assertEquals(t.metadata.type, "task");
+  for (const k of ["email", "phone", "instagram"]) {
+    assertFalse(k in t.metadata, `metadata must not carry ${k}`);
+  }
+});
+
+Deno.test("capture_intake: shop-queue audience and null site/venue are stored as given", () => {
+  const md = buildIntakeMetadata(
+    { topics: ["tattoo"], source: "x" },
+    {
+      crm_intake_id: INTAKE_ID,
+      content: "c",
+      submitted_at: "2026-10-10T18:14:00Z",
+      site: null,
+      venue: null,
+      audience: "shop_queue",
+      tags: ["Intake", "tattoo"],
+    },
+  );
+  assertEquals(md.audience, "shop_queue");
+  assertEquals(md.site, null);
+  assertEquals(md.venue, null);
+  assertEquals(md.source, "external-crm");
+  assertEquals(md.topics, ["tattoo", "intake"]);
+});
+
+Deno.test("capture_intake: a failing post-insert step still answers created", async () => {
+  const store = new MemoryStore();
+  const pipe = new FakePipeline();
+  pipe.failAfterInsert = true;
+  const res = await captureIntake(store, pipe, intakePayload());
+  assertEquals(res.body.status, "created");
+  assertEquals(store.thoughts.length, 1);
+});
+
+Deno.test("capture_intake: a pipeline failure propagates (500, the CRM retries) and writes nothing", async () => {
+  const store = new MemoryStore();
+  const pipe = new FakePipeline();
+  pipe.analyze = () => Promise.reject(new Error("embedding call failed"));
+  let threw = false;
+  try {
+    await captureIntake(store, pipe, intakePayload());
+  } catch {
+    threw = true;
+  }
+  assert(threw);
+  assertEquals(store.thoughts.length, 0);
+});
+
+Deno.test("capture_intake: validation 400s only bodies that can never succeed", async () => {
+  const store = new MemoryStore();
+  const pipe = new FakePipeline();
+  const cases: Array<[string, unknown]> = [
+    ["missing id", intakePayload({ crm_intake_id: undefined })],
+    ["non-uuid id", intakePayload({ crm_intake_id: "abc" })],
+    ["missing content", intakePayload({ content: "" })],
+    ["content wrong type", intakePayload({ content: 42 })],
+    ["missing submitted_at", intakePayload({ submitted_at: undefined })],
+    ["bad submitted_at", intakePayload({ submitted_at: "not a date" })],
+    ["bad audience", intakePayload({ audience: "everyone" })],
+    ["tags not array", intakePayload({ tags: "intake" })],
+    ["array body", []],
+  ];
+  for (const [label, body] of cases) {
+    const res = await captureIntake(store, pipe, body);
+    assertEquals(res.status, 400, label);
+    assert(Array.isArray(res.body.error), label);
+  }
+  assertEquals(store.thoughts.length, 0);
+  assertEquals(pipe.analyzeCalls, 0);
+  const ok = await captureIntake(
+    store,
+    pipe,
+    intakePayload({ site: null, venue: null, audience: null, tags: undefined }),
+  );
+  assertEquals(ok.body.status, "created");
 });

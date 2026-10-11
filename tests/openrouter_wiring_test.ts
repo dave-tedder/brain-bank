@@ -30,7 +30,9 @@ const captureFunctions = [
   {
     path: "../supabase/functions/open-brain-mcp/index.ts",
     slug: "open-brain-mcp",
-    labels: ["getEmbedding", "extractMetadata", "checkAutoResolve"],
+    // getEmbedding and extractMetadata moved to _shared/capture-pipeline.ts;
+    // the test below follows them there.
+    labels: ["checkAutoResolve"],
   },
 ];
 
@@ -86,6 +88,37 @@ for (const target of captureFunctions) {
     }
   });
 }
+
+// The capture pipeline shared by open-brain-mcp and external-crm-sync. It
+// takes the caller's FUNCTION_SLUG as a parameter, so each caller's audit rows
+// stay attributed to that caller rather than to a shared module.
+Deno.test("_shared/capture-pipeline routes embedding and metadata calls through the shared wrapper", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../supabase/functions/_shared/capture-pipeline.ts", import.meta.url),
+  );
+  assertStringIncludes(
+    source,
+    'import { callOpenRouter } from "./openrouter.ts";',
+  );
+  assertStringIncludes(source, "function_slug: functionSlug");
+  assertEquals(source.includes("FUNCTION_SLUG"), false);
+  for (const label of ["getEmbedding", "extractMetadata"]) {
+    assertStringIncludes(source, `call_site: "${label}"`);
+  }
+  assertNoDirectOpenRouterAccess(source, "_shared/capture-pipeline");
+
+  for (
+    const [path, slug] of [
+      ["../supabase/functions/open-brain-mcp/index.ts", "open-brain-mcp"],
+      ["../supabase/functions/external-crm-sync/index.ts", "external-crm-sync"],
+    ]
+  ) {
+    const caller = await Deno.readTextFile(new URL(path, import.meta.url));
+    assertStringIncludes(caller, 'from "../_shared/capture-pipeline.ts";');
+    assertStringIncludes(caller, `const FUNCTION_SLUG = "${slug}";`);
+    assertNoDirectOpenRouterAccess(caller, slug);
+  }
+});
 
 Deno.test("classify-edges keeps capped budget math while adding both telemetry stages", async () => {
   const source = await Deno.readTextFile(

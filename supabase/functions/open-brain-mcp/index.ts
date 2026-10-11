@@ -19,6 +19,12 @@ import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
 import { clampInt, timingSafeEqualStr } from "../_shared/access-key.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
+import {
+  contentHash,
+  extractAndStoreActionItems as sharedExtractAndStoreActionItems,
+  extractMetadata as sharedExtractMetadata,
+  getEmbedding as sharedGetEmbedding,
+} from "../_shared/capture-pipeline.ts";
 import { buildRestEventUpdate } from "./_rest_event.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
@@ -113,20 +119,8 @@ function logToolInvocation(
   EdgeRuntime.waitUntil(writePromise);
 }
 
-function titleCase(s: string): string {
-  return s.replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^\w\s-]/g, "").replace(/\s+/g, "-");
-}
-
-async function contentHash(text: string): Promise<string> {
-  const data = new TextEncoder().encode(text.trim());
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 async function isDuplicate(hash: string): Promise<boolean> {
@@ -159,15 +153,8 @@ async function isNotionDuplicate(
   return (data?.length ?? 0) > 0;
 }
 
-async function getEmbedding(text: string): Promise<number[]> {
-  const { data } = await callOpenRouter({
-    function_slug: FUNCTION_SLUG,
-    call_site: "getEmbedding",
-    model: "openai/text-embedding-3-small",
-    endpoint: "embeddings",
-    input: text,
-  });
-  return data.data![0].embedding!;
+function getEmbedding(text: string): Promise<number[]> {
+  return sharedGetEmbedding(FUNCTION_SLUG, text);
 }
 
 // Near-duplicate guard: reworded re-captures of the same fact (session
@@ -203,58 +190,12 @@ async function findNearDuplicate(
   return (data?.[0]?.id as string | undefined) ?? null;
 }
 
-async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const { data } = await callOpenRouter({
-    function_slug: FUNCTION_SLUG,
-    call_site: "extractMetadata",
-    model: "openai/gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content:
-          `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned by full name when possible, e.g. "${loadProfile().example_person_name}" (use full name when possible) (empty if none)
-- "action_items": array of FUTURE to-dos the user still needs to do. STRICT RULES:
-    * Only include items phrased as future work: "need to X", "should X", "TODO: X", an imperative about something not yet done, or an explicit open question.
-    * NEVER include work described in past tense. If the note says "I updated X", "fixed Y", "shipped Z", "changed the ratio to 3px/1px", "replaced the background", those are DONE and must be excluded.
-    * NEVER restate completed work as an imperative. Do not turn "updated the ratio to 3px" into "Update the ratio to 3px".
-    * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
-    * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
-    * ONE request is ONE item. Never split a single instruction into its parts: the work itself, the output format, and where to deliver it all belong to the SAME item. "Research X and deliver the report under deliverables/foo/" is ONE action item, not two. A stranded clause like "Deliver the report under deliverables/<project-slug>/" is not work on its own, and it does real damage: when its sibling ships and resolves, the clause stays open and reads to downstream automation as an unhandled request, which is how a single request silently becomes a duplicate task-board card days later.
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "${
-            loadProfile().domain.vocabulary[0]
-          }" not "${
-            titleCase(loadProfile().domain.vocabulary[0])
-          }", "project management" not "Project Management" (always at least one). Preserve hyphenated tokens as a single tag: "fitness-training" stays as one tag, never split into ["fitness", "training"].
-- "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
-- "project": the project or system this note is ABOUT, e.g. ${
-            loadProfile().example_projects.map((p) => `"${p}"`).join(", ")
-          }, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
-- "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
-
-Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or MEETING:, use that to inform the type field (decision->observation, CLIENT->person_note, IDEA->idea, MEETING->observation) and extract structured fields accordingly.
-
-Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
-      },
-      { role: "user", content: text },
-    ],
-  });
-  const d = data as { choices: Array<{ message: { content: string } }> };
-  try {
-    return JSON.parse(d.choices![0].message!.content!);
-  } catch {
-    return { topics: ["uncategorized"], type: "observation" };
-  }
+// Prompt and model live in _shared/capture-pipeline.ts.
+function extractMetadata(text: string): Promise<Record<string, unknown>> {
+  return sharedExtractMetadata(FUNCTION_SLUG, text);
 }
 
 // --- Action Item Tracking ---
-
-function normalizeActionText(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ")
-    .trim();
-}
 
 // Content starting with any of these prefixes is a mechanical/informational capture
 // (calendar sync, notion sync, email thread, weekly review, trend analysis, Meta DM
@@ -368,66 +309,20 @@ const LOG_TRUNC = 200;
 // capture path toward the Edge Runtime wall.
 const AUTO_RESOLVE_LLM_TIMEOUT_MS = 30_000;
 
-async function extractAndStoreActionItems(
+// Moved to _shared/capture-pipeline.ts so external-crm-sync's capture_intake
+// reuses it. The mechanical test stays here (mirror list).
+function extractAndStoreActionItems(
   thoughtId: string,
   metadata: Record<string, unknown>,
   content: string,
 ): Promise<void> {
-  // Observations, references, and email-sourced captures are descriptive,
-  // not commitment-shaped, so they must not create open action items.
-  if (!shouldExtractActionItems(metadata)) return;
-
-  if (isOperationCommandCapture(content, String(metadata?.source ?? ""))) {
-    return;
-  }
-
-  // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
-  // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
-  // extraction LLM may still pick up advisory phrases ("should reduce volume",
-  // "needs more sleep") from prose summaries; suppress storing those as open
-  // action items so they don't pollute the digest's open-items section.
-  if (isMechanicalCapture(content)) return;
-
-  const items = metadata.action_items;
-  if (!Array.isArray(items) || items.length === 0) return;
-
-  // Fetch existing open items to dedup against
-  const { data: existingItems } = await supabase
-    .from("action_items")
-    .select("description")
-    .eq("status", "open");
-
-  const existingNormalized = new Set(
-    (existingItems || []).map((item) => normalizeActionText(item.description)),
+  return sharedExtractAndStoreActionItems(
+    supabase,
+    thoughtId,
+    metadata,
+    content,
+    isMechanicalCapture,
   );
-
-  const rows = items
-    .map((desc: unknown) => ({
-      source_thought_id: thoughtId,
-      description: String(desc),
-      status: "open",
-    }))
-    // Appointment guard: unanchored appointment reminders (no still-owed
-    // language, no future-date signal in item or source) are review-only —
-    // they duplicate the booking system, not real backlog.
-    .filter((row) => {
-      if (isUnanchoredAppointmentItem(row.description, content, new Date())) {
-        console.log(
-          `appointment guard: skipped unanchored item: ${
-            row.description.slice(0, LOG_TRUNC)
-          }`,
-        );
-        return false;
-      }
-      return true;
-    })
-    .filter((row) =>
-      !existingNormalized.has(normalizeActionText(row.description))
-    );
-
-  if (rows.length === 0) return;
-  const { error } = await supabase.from("action_items").insert(rows);
-  if (error) console.error("Action item insert error:", error);
 }
 
 async function checkAutoResolve(
