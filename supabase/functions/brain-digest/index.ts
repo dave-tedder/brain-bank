@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.47.10";
+import { serviceKey } from "../_shared/service-key.ts";
 import { loadProfile } from "../_shared/profile.ts";
 import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
@@ -14,7 +15,7 @@ import {
 } from "./sentinel-report.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_DIGEST_CHANNEL =
   Deno.env.get("SLACK_DIGEST_CHANNEL") || Deno.env.get("SLACK_CAPTURE_CHANNEL")!;

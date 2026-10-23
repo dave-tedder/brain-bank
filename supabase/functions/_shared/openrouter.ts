@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.47.10";
+import { serviceKey } from "./service-key.ts";
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 
@@ -81,7 +82,7 @@ function getSupabase(): ReturnType<typeof createClient> {
   if (!supabase) {
     supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+      serviceKey(),
     );
   }
   return supabase;

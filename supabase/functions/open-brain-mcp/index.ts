@@ -5,6 +5,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { serviceKey } from "../_shared/service-key.ts";
 import { loadProfile } from "../_shared/profile.ts";
 import {
   coerceMetadata,
@@ -85,7 +86,7 @@ import {
 } from "./_deliverables.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const FUNCTION_SLUG = "open-brain-mcp";
