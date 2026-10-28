@@ -16,6 +16,11 @@
 // so this module resolves the same from every function's import map.
 
 import { callOpenRouter } from "./openrouter.ts";
+import {
+  EMBEDDING_TIMEOUT_MS,
+  METADATA_TIMEOUT_MS,
+  withTimeout,
+} from "./capture-timeouts.ts";
 import { loadProfile } from "./profile.ts";
 import {
   isOperationCommandCapture,
@@ -41,13 +46,15 @@ export async function getEmbedding(
   functionSlug: string,
   text: string,
 ): Promise<number[]> {
-  const { data } = await callOpenRouter({
+  const { data } = await withTimeout(EMBEDDING_TIMEOUT_MS, (signal) =>
+    callOpenRouter({
+    signal,
     function_slug: functionSlug,
     call_site: "getEmbedding",
     model: "openai/text-embedding-3-small",
     endpoint: "embeddings",
     input: text,
-  });
+  }));
   return data.data![0].embedding!;
 }
 
@@ -55,7 +62,9 @@ export async function extractMetadata(
   functionSlug: string,
   text: string,
 ): Promise<Record<string, unknown>> {
-  const { data } = await callOpenRouter({
+  const { data } = await withTimeout(METADATA_TIMEOUT_MS, (signal) =>
+    callOpenRouter({
+    signal,
     function_slug: functionSlug,
     call_site: "extractMetadata",
     model: "openai/gpt-4o-mini",
@@ -91,7 +100,7 @@ Only extract what's explicitly there. Be conservative — empty arrays and null 
       },
       { role: "user", content: text },
     ],
-  });
+  }));
   const d = data as { choices: Array<{ message: { content: string } }> };
   try {
     return JSON.parse(d.choices![0].message!.content!);

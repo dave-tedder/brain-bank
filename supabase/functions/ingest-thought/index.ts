@@ -20,6 +20,11 @@ import {
   parseSlackTaskIntake,
 } from "../_shared/slack-task-intake.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import {
+  EMBEDDING_TIMEOUT_MS,
+  METADATA_TIMEOUT_MS,
+  withTimeout,
+} from "../_shared/capture-timeouts.ts";
 
 declare const EdgeRuntime: {
   waitUntil(promise: Promise<unknown>): void;
@@ -90,13 +95,15 @@ async function isDuplicate(hash: string): Promise<boolean> {
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const { data } = await callOpenRouter({
+  const { data } = await withTimeout(EMBEDDING_TIMEOUT_MS, (signal) =>
+    callOpenRouter({
+    signal,
     function_slug: FUNCTION_SLUG,
     call_site: "getEmbedding",
     model: "openai/text-embedding-3-small",
     endpoint: "embeddings",
     input: text,
-  });
+  }));
   return data.data![0].embedding!;
 }
 
@@ -134,7 +141,9 @@ async function findNearDuplicate(
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const { data } = await callOpenRouter({
+  const { data } = await withTimeout(METADATA_TIMEOUT_MS, (signal) =>
+    callOpenRouter({
+    signal,
     function_slug: FUNCTION_SLUG,
     call_site: "extractMetadata",
     model: "openai/gpt-4o-mini",
@@ -163,7 +172,7 @@ Only extract what's explicitly there. Be conservative — empty arrays and null 
         },
         { role: "user", content: text },
     ],
-  });
+  }));
   try {
     return JSON.parse(data.choices![0].message!.content!);
   } catch {

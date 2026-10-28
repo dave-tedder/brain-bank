@@ -8,6 +8,10 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+### Fixed
+
+- Capture requests now abort stalled OpenRouter embedding calls after 20 seconds and metadata calls after 45 seconds. Slack, REST, MCP and external CRM intake share the same timer helper. Timeouts are logged, failed captures remain available for retry, and successful requests clear their timers. Virtual-clock tests cover both deadlines and timer cleanup. Redeploy `ingest-thought`, `open-brain-mcp` and `external-crm-sync` when upgrading.
+
 ### Added
 
 - **ChatGPT can connect as an OAuth MCP connector, without ever holding `MCP_ACCESS_KEY`.** Three pieces. A new Edge Function, `open-brain-oauth`, is the MCP endpoint ChatGPT calls: it verifies each Supabase-issued bearer token's signature, issuer, audience, expiry, owner and client, forwards to `open-brain-mcp` with the server-side key, and exposes nine memory tools while refusing every task-board tool. A dashboard route, `/oauth/consent`, is the one page reachable without the dashboard password: email-code sign-in, an owner and client check, an explicit approve/deny, and a return only to an allowed `chatgpt.com` callback, served with a nonce CSP, `no-store`, `no-referrer` and frame denial, and refusing to render if handed anything but a publishable key. Migration `20261007_chatgpt_oauth_access.sql` adds a non-secret `brain_oauth_config` row and a token hook that binds tokens for that one owner/client pair to the gateway and leaves ordinary logins alone. Supabase Auth's OAuth server owns codes, PKCE, refresh and revocation. New env: `BRAIN_OAUTH_OWNER_ID`, `BRAIN_OAUTH_CLIENT_ID` (both sides) and `SUPABASE_ANON_KEY` (dashboard). Walkthrough in `docs/capture-sources/chatgpt-connector.md`. 25 gateway tests and 10 consent-page tests, now run in CI.
