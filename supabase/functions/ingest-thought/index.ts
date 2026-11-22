@@ -336,6 +336,13 @@ const MECHANICAL_CAPTURE_PREFIXES = [
   "Email thread:",
   "Meta DM Scan failed",
   ...loadProfile().mechanical_capture_prefixes,
+  // Closeout-controller bookkeeping records (apply batch, operator-resolution
+  // sweep, run summary). Mirror of CLOSEOUT_CAPTURE_PREFIX in
+  // scripts/open-engine/closeout-controller.mjs. Stored, never extracted,
+  // never a completion signal, operator-marker lines included (one such
+  // capture once auto-resolved the open design item its own card said was the
+  // operator's).
+  "[Open Engine Closeout]",
 ];
 
 function isMechanicalCapture(content: string): boolean {

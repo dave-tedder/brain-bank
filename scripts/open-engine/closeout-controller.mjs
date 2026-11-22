@@ -161,6 +161,16 @@ counts, short ids, hold reasons, remaining Agent Review count, and one notable
 clause. It never applies tasks, edits project files, changes gates, or resolves
 linked action items.
 
+Every capture this controller sends (apply batch, operator-resolution sweep,
+run summary) is a bookkeeping record, so each body is prefixed with
+${CLOSEOUT_CAPTURE_PREFIX} by asCloseoutCapture(). Both capture handlers list
+that prefix in MECHANICAL_CAPTURE_PREFIXES: the record is stored, but it never
+extracts action items and never auto-resolves one, FOR OPERATOR lines included.
+Linked-item outcomes belong to the explicit board verbs. The prefix is a
+classification mark, not authentication. Tracker and session-log prose is not
+prefixed. (2026-11-05: an apply capture had auto-resolved the open design item
+its card said was the operator's, and a sweep capture had stored two new items.)
+
 OE-8E (--operator-resolution-sweep) closes the operator-decision gap: closeout
 writes trackers at Agent Review time with the EXECUTOR's drafts, so a decision
 made later at the Needs Operator step (defer, reject, scope change) lives only
@@ -1293,7 +1303,7 @@ function buildProjectBatches(apply, registry, draftDate, generatedAt) {
       item.receipt_sections.session_log_draft
     ).join("\n\n");
     const captureDraft = items.map((item) =>
-      item.receipt_sections.open_brain_capture_draft
+      item.receipt_sections.brain_bank_capture_draft
     ).join("\n\n");
 
     const batch = {
@@ -1452,7 +1462,46 @@ function bracketedList(items) {
   return `[${items.join(", ")}]`;
 }
 
-function buildRunSummary(args) {
+// --- Closeout capture prefix (bookkeeping-only captures) -----------------
+// Mirror: the exact string below is an entry in MECHANICAL_CAPTURE_PREFIXES
+// in BOTH supabase/functions/open-brain-mcp/index.ts and
+// supabase/functions/ingest-thought/index.ts. The handlers key on the stored
+// content starting with it (leading whitespace allowed), so the prefix must be
+// the first thing in the body and must be spelled identically on every side.
+// The test suite reads both handler files and checks the literal.
+export const CLOSEOUT_CAPTURE_PREFIX = "[Open Engine Closeout]";
+
+// Prefix a capture body exactly once. Idempotent for an already-prefixed body
+// and preserves the body byte for byte after the separator newline. Tags and
+// everything else about the capture are untouched. This marks the record as
+// mechanical for the capture handlers; it does not authorize or authenticate
+// the caller.
+export function asCloseoutCapture(content) {
+  const body = String(content ?? "");
+  return body.trimStart().startsWith(CLOSEOUT_CAPTURE_PREFIX)
+    ? body
+    : `${CLOSEOUT_CAPTURE_PREFIX}\n${body}`;
+}
+
+// The three outbound capture_thought payloads. The call sites use ONLY these
+// builders so a test can pin the production payload shape. The batch and the
+// sweep item keep their unprefixed prose: tracker and session-log writes read
+// batch.tracker_draft / batch.session_log_draft / item.body directly.
+export function applyCaptureArgs(batch) {
+  return {
+    content: asCloseoutCapture(batch.open_brain_capture_draft),
+    tags: [batch.capture_tag, "open_engine"],
+  };
+}
+
+export function resolutionCaptureArgs(item) {
+  return {
+    content: asCloseoutCapture(item.body),
+    tags: [item.capture_tag, "open_engine", "operator-resolution"],
+  };
+}
+
+export function buildRunSummary(args) {
   const timestamp = args.runTimestamp || new Date().toISOString();
   if (Number.isNaN(Date.parse(timestamp))) {
     throw new Error(
@@ -1468,13 +1517,13 @@ function buildRunSummary(args) {
     .replace(/\.+$/, "");
 
   return {
-    content: `OE-8D closeout run ${
+    content: asCloseoutCapture(`OE-8D closeout run ${
       new Date(timestamp).toISOString()
     }: applied ${applied.length} ${
       bracketedList(applied)
     }, held ${held.length} ${
       bracketedList(heldItems)
-    }, ${remaining} Agent Review rows remaining. ${notable}.`,
+    }, ${remaining} Agent Review rows remaining. ${notable}.`),
     tags: ["open-engine", "closeout", "oe-8d"],
   };
 }
@@ -2047,7 +2096,7 @@ async function runUnrecordedAudit(args, registry) {
   return result;
 }
 
-async function runOperatorResolutionSweep(args, registry) {
+export async function runOperatorResolutionSweep(args, registry) {
   const config = mcpConfigFromEnv();
   const listed = await mcpCall(config, "list_agent_tasks", {
     statuses: ["Agent Done"],
@@ -2095,10 +2144,11 @@ async function runOperatorResolutionSweep(args, registry) {
     // Capture only on a real first append: a marker-skipped task was already
     // captured (or deliberately pre-seeded) on a prior run.
     if (write.action === "appended" && !args.noCapture) {
-      const capture = await mcpCall(config, "capture_thought", {
-        content: item.body,
-        tags: [item.capture_tag, "open_engine", "operator-resolution"],
-      });
+      const capture = await mcpCall(
+        config,
+        "capture_thought",
+        resolutionCaptureArgs(item),
+      );
       result.captures.push({
         task_id: item.task_id,
         capture_result: capture,
@@ -2109,7 +2159,7 @@ async function runOperatorResolutionSweep(args, registry) {
   console.log(JSON.stringify(result, null, 2));
 }
 
-async function runLive(args, registry) {
+export async function runLive(args, registry) {
   const config = mcpConfigFromEnv();
   const packet = await mcpCall(config, "get_agent_task", {
     task_id: args.taskId,
@@ -2271,10 +2321,11 @@ async function completeCloseoutFromJournal(config, journalPath, result = null) {
       });
       continue;
     }
-    const capture = await mcpCall(config, "capture_thought", {
-      content: batch.open_brain_capture_draft,
-      tags: [batch.capture_tag, "open_engine"],
-    });
+    const capture = await mcpCall(
+      config,
+      "capture_thought",
+      applyCaptureArgs(batch),
+    );
     target.captures.push({
       project_slug: batch.project_slug,
       capture_result: capture,
@@ -2371,7 +2422,9 @@ function isUuidish(value) {
   );
 }
 
-async function captureRunSummary(args) {
+export async function captureRunSummary(args) {
+  // summary.content is the exact body capture_thought receives, prefix
+  // included, so --summary-preview shows what would be sent.
   const summary = buildRunSummary(args);
   const result = {
     status: "CAPTURE_READY",

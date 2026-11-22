@@ -14,9 +14,14 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   appendResolutionBlock,
+  applyCaptureArgs,
   applyOperatorFields,
   applyReviewArgs,
   applyDocFlip,
+  asCloseoutCapture,
+  buildRunSummary,
+  captureRunSummary,
+  CLOSEOUT_CAPTURE_PREFIX,
   evaluate,
   evaluateResolutionSweep,
   evaluateUnrecordedAudit,
@@ -28,8 +33,11 @@ import {
   parseReceipt,
   planDocRefs,
   receiptNamesDeliverable,
+  resolutionCaptureArgs,
   resolvePlanDocPath,
   runExecutedCheck,
+  runLive,
+  runOperatorResolutionSweep,
   scanPlanDocDir,
   wasAutoPromoted,
 } from "./closeout-controller.mjs";
@@ -1814,4 +1822,238 @@ test("audit: a deliverables file must NOT be able to satisfy the check", () => {
     readText: readerFor({ [deliverable]: `content for ${packet.task.id}` }),
   });
   assert.equal(result.unrecorded.length, 1, "deliverable must not count");
+});
+
+// ---------------------------------------------------------------------------
+// Closeout captures are bookkeeping records (plan 2026-11-05 post-review
+// follow-through, Task 1). Every capture_thought body the controller sends
+// carries CLOSEOUT_CAPTURE_PREFIX, which both capture handlers list in
+// MECHANICAL_CAPTURE_PREFIXES, so a controller record never extracts action
+// items and never auto-resolves one. The live call sites are driven here with
+// fetch stubbed, not just the helper in isolation.
+// ---------------------------------------------------------------------------
+
+const PREFIX_LINE = "[Open Engine Closeout]\n";
+
+test("closeout prefix: asCloseoutCapture prefixes once and keeps the body byte for byte", () => {
+  assert.equal(CLOSEOUT_CAPTURE_PREFIX, "[Open Engine Closeout]");
+  const body = "Jordan Lee backyard garden concept brief drafted 2026-09-30 (task 83a4acfa).\nFOR OPERATOR: draw it\n  trailing  ";
+  const out = asCloseoutCapture(body);
+  assert.ok(out.startsWith(PREFIX_LINE), out);
+  assert.equal(out.slice(PREFIX_LINE.length), body);
+});
+
+test("closeout prefix: asCloseoutCapture is idempotent, including with leading whitespace", () => {
+  const once = asCloseoutCapture("sweep body");
+  assert.equal(asCloseoutCapture(once), once);
+  const padded = "  \n[Open Engine Closeout]\nalready marked";
+  assert.equal(asCloseoutCapture(padded), padded);
+  // A near-miss spelling is NOT the prefix and gets the real one in front.
+  assert.ok(asCloseoutCapture("[Open Engine Closeout:] x").startsWith(PREFIX_LINE));
+});
+
+test("closeout prefix: nullish and non-string input become a prefixed empty or stringified body", () => {
+  assert.equal(asCloseoutCapture(undefined), PREFIX_LINE);
+  assert.equal(asCloseoutCapture(null), PREFIX_LINE);
+  assert.equal(asCloseoutCapture(42), `${PREFIX_LINE}42`);
+});
+
+test("closeout prefix: the exact literal is listed in BOTH capture handlers' MECHANICAL_CAPTURE_PREFIXES", () => {
+  for (const fn of ["open-brain-mcp", "ingest-thought"]) {
+    const src = readFileSync(
+      join(HERE, "..", "..", "supabase", "functions", fn, "index.ts"),
+      "utf8",
+    );
+    const start = src.indexOf("const MECHANICAL_CAPTURE_PREFIXES = [");
+    assert.ok(start >= 0, `${fn}: list not found`);
+    const block = src.slice(start, src.indexOf("];", start));
+    assert.ok(
+      block.includes(`"${CLOSEOUT_CAPTURE_PREFIX}",`),
+      `${fn}: MECHANICAL_CAPTURE_PREFIXES lacks ${CLOSEOUT_CAPTURE_PREFIX}`,
+    );
+  }
+});
+
+test("closeout prefix: applyCaptureArgs prefixes the batch capture and leaves the tracker/log drafts alone", () => {
+  const batch = {
+    project_slug: "tmp-proj",
+    capture_tag: "tmp_proj",
+    tracker_draft: "- [x] did the thing",
+    session_log_draft: "did the thing",
+    open_brain_capture_draft: "did the thing\nFOR OPERATOR: install it",
+  };
+  const args = applyCaptureArgs(batch);
+  assert.deepEqual(Object.keys(args).sort(), ["content", "tags"]);
+  assert.equal(args.content, `${PREFIX_LINE}did the thing\nFOR OPERATOR: install it`);
+  assert.deepEqual(args.tags, ["tmp_proj", "open_engine"]);
+  // Prose destined for project files is not marked.
+  assert.equal(batch.tracker_draft, "- [x] did the thing");
+  assert.equal(batch.session_log_draft, "did the thing");
+  assert.equal(batch.open_brain_capture_draft, "did the thing\nFOR OPERATOR: install it");
+});
+
+test("closeout prefix: resolutionCaptureArgs prefixes the sweep capture, item.body (the tracker text) stays unprefixed", () => {
+  const item = evaluateResolutionSweep([operatorDonePacket()], sweepRegistry(), { now: SWEEP_NOW }).appendable[0];
+  const args = resolutionCaptureArgs(item);
+  assert.equal(args.content, `${PREFIX_LINE}${item.body}`);
+  assert.deepEqual(args.tags, ["example_project", "open_engine", "operator-resolution"]);
+  assert.ok(item.body.startsWith("Resolved by Sam Operator on 2026-07-18"), item.body);
+  assert.ok(!item.body.includes(CLOSEOUT_CAPTURE_PREFIX));
+});
+
+test("closeout prefix: buildRunSummary content is prefixed and keeps its tags and wording", () => {
+  const summary = buildRunSummary({
+    runTimestamp: "2026-11-05T21:51:20.842Z",
+    appliedTaskIds: "",
+    heldTasks: "381943e7-aaaa-bbbb-cccc-dddddddddddd:MISSING_PROJECT_SLUG",
+    remainingAgentReview: "3",
+    notable: "afternoon closeout lane",
+  });
+  assert.equal(
+    summary.content,
+    `${PREFIX_LINE}OE-8D closeout run 2026-11-05T21:51:20.842Z: applied 0 [], held 1 [381943e7: MISSING_PROJECT_SLUG], 3 Agent Review rows remaining. afternoon closeout lane.`,
+  );
+  assert.deepEqual(summary.tags, ["open-engine", "closeout", "oe-8d"]);
+});
+
+// Drive a live entry point with fetch replaced by a JSON-RPC stub that records
+// every tools/call and answers by tool name. Env creds are dummies; nothing
+// leaves the process. Returns the recorded calls.
+async function withMcpStub(handlers, fn) {
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  const realLog = console.log;
+  const printed = [];
+  const env = { url: process.env.BB_MCP_URL, key: process.env.BB_MCP_KEY };
+  process.env.BB_MCP_URL = "http://mcp.stub.invalid/";
+  process.env.BB_MCP_KEY = "stub-key";
+  globalThis.fetch = async (_url, init) => {
+    const rpc = JSON.parse(init.body);
+    const name = rpc.params.name;
+    calls.push({ name, args: rpc.params.arguments });
+    const handler = handlers[name];
+    if (!handler) throw new Error(`stub: no handler for ${name}`);
+    const payload = handler(rpc.params.arguments);
+    return new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      id: rpc.id,
+      result: { content: [{ type: "text", text: JSON.stringify(payload) }] },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  console.log = (...a) => { printed.push(a.map(String).join(" ")); };
+  try {
+    await fn();
+  } finally {
+    globalThis.fetch = realFetch;
+    console.log = realLog;
+    if (env.url === undefined) delete process.env.BB_MCP_URL; else process.env.BB_MCP_URL = env.url;
+    if (env.key === undefined) delete process.env.BB_MCP_KEY; else process.env.BB_MCP_KEY = env.key;
+  }
+  return { calls, printed };
+}
+
+test("closeout prefix (call site): captureRunSummary sends the prefixed body and --summary-preview prints the same body", async () => {
+  const args = {
+    runTimestamp: "2026-11-05T21:51:20.842Z",
+    appliedTaskIds: "",
+    heldTasks: "",
+    remainingAgentReview: "0",
+    notable: "nominal",
+    summaryPreview: false,
+  };
+  const live = await withMcpStub({ capture_thought: () => "Captured as observation" }, () => captureRunSummary(args));
+  assert.equal(live.calls.length, 1);
+  assert.equal(live.calls[0].name, "capture_thought");
+  assert.ok(live.calls[0].args.content.startsWith(`${PREFIX_LINE}OE-8D closeout run 2026-11-05T21:51:20.842Z`), live.calls[0].args.content);
+  assert.deepEqual(live.calls[0].args.tags, ["open-engine", "closeout", "oe-8d"]);
+
+  const preview = await withMcpStub({}, () => captureRunSummary({ ...args, summaryPreview: true }));
+  assert.equal(preview.calls.length, 0, "preview must not call the MCP");
+  const shown = JSON.parse(preview.printed.join("\n"));
+  assert.equal(shown.mode, "summary-preview");
+  assert.equal(shown.content, live.calls[0].args.content, "preview shows the exact outbound body");
+});
+
+test("closeout prefix (call site): the operator-resolution sweep captures the prefixed body and appends the unprefixed note to the tracker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "oe-sweep-live-"));
+  try {
+    writeFileSync(join(dir, "PROJECT-TRACKER.md"), "# Tracker\n", "utf8");
+    const registry = {
+      "tmp-proj": {
+        workspace_path: dir,
+        tracker_path: join(dir, "PROJECT-TRACKER.md"),
+        session_log_path: join(dir, "SESSION-LOG.md"),
+        capture_tag: "tmp_proj",
+      },
+    };
+    const doneAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const packet = operatorDonePacket({ project_slug: "tmp-proj", completed_at: doneAt });
+    packet.events[2].created_at = doneAt;
+    packet.task.title = "Local content research";
+    const { calls } = await withMcpStub({
+      list_agent_tasks: () => [{ id: packet.task.id, status: "Agent Done", completed_at: doneAt }],
+      get_agent_task: () => packet,
+      capture_thought: () => "Captured as observation",
+    }, () => runOperatorResolutionSweep({ lookbackDays: 7, liveCheck: false, noCapture: false }, registry));
+    const capture = calls.find((c) => c.name === "capture_thought");
+    assert.ok(capture, JSON.stringify(calls.map((c) => c.name)));
+    assert.ok(capture.args.content.startsWith(`${PREFIX_LINE}Resolved by Sam Operator on `), capture.args.content);
+    assert.ok(capture.args.content.includes("DEFERRED by operator decision"));
+    assert.deepEqual(capture.args.tags, ["tmp_proj", "open_engine", "operator-resolution"]);
+    const tracker = readFileSync(join(dir, "PROJECT-TRACKER.md"), "utf8");
+    assert.ok(tracker.includes("DEFERRED by operator decision"), tracker);
+    assert.ok(!tracker.includes(CLOSEOUT_CAPTURE_PREFIX), "tracker prose must not carry the capture prefix");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("closeout prefix (call site): --apply captures the prefixed batch draft after the board apply, files stay unprefixed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "oe-apply-live-"));
+  try {
+    writeFileSync(join(dir, "PROJECT-TRACKER.md"), "# Tracker\n", "utf8");
+    writeFileSync(join(dir, "SESSION-LOG.md"), "# Log\n", "utf8");
+    const journalDir = join(dir, "journals");
+    const taskId = "0a1b2c3d-e270-44dc-b414-d75e00080ae4";
+    const packet = {
+      task: {
+        id: taskId,
+        title: "live apply fixture",
+        status: "Agent Review",
+        risk: "low",
+        project_slug: "tmp-proj",
+        explicit_approval: false,
+        linked_action_item_id: null,
+        review_reason: null,
+        sources: [],
+      },
+      events: [{
+        task_id: taskId,
+        event_type: "AGENT DONE",
+        agent_code: "claude-code",
+        payload: { reason: validReceipt(), status: "Agent Review", from_status: "Agent Working" },
+        created_at: "2026-11-05T11:00:00.000Z",
+      }],
+      actionItems: [],
+    };
+    const { calls } = await withMcpStub({
+      get_agent_task: () => packet,
+      apply_agent_task_review: () => ({ ok: true, status: "Agent Done" }),
+      capture_thought: () => "Captured as observation",
+    }, () => runLive({ taskId, apply: true, liveCheck: false, operatorApply: false, expect: null, journalDir }, tmpRegistry(dir)));
+    assert.deepEqual(calls.map((c) => c.name), ["get_agent_task", "apply_agent_task_review", "capture_thought"]);
+    const capture = calls[2];
+    assert.equal(capture.args.content, `${PREFIX_LINE}did the thing`);
+    assert.deepEqual(capture.args.tags, ["tmp_proj", "open_engine"]);
+    // Apply payload unchanged by the capture change.
+    assert.equal(calls[1].args.task_id, taskId);
+    assert.equal(calls[1].args.resolve_linked_action_item, false);
+    for (const file of ["PROJECT-TRACKER.md", "SESSION-LOG.md"]) {
+      const text = readFileSync(join(dir, file), "utf8");
+      assert.ok(text.includes("did the thing"), `${file}: ${text}`);
+      assert.ok(!text.includes(CLOSEOUT_CAPTURE_PREFIX), `${file} must not carry the capture prefix`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

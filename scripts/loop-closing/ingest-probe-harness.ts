@@ -177,6 +177,31 @@ expect(l0.length === 1 && l0[0].layer === "L0" && l0[0].outcome === "blocked" &&
 expect(inserts("action_items").length === 0, "probe 4 mechanical capture must store no items, marker or not");
 origLog("probe 4 ok: mechanical capture wrote one capture-level L0 row and no items");
 
+// --- Probe 5: closeout-controller record (prefixed) with a FOR OPERATOR line ---
+// Post-review follow-through Task 1 (2026-11-05): every closeout-controller
+// capture carries "[Open Engine Closeout]" and both handlers list it as
+// mechanical. Same shape as the open-brain-mcp harness probes A/B, through the
+// signed Slack path here. Probe 2 above is the unprefixed positive control: an
+// ordinary completion still reaches the status-guarded update, so this prefix
+// does not switch resolution off for everything.
+recorded.length = 0; logs.length = 0;
+const closeoutCandId = crypto.randomUUID();
+scenario.metadata = { people: ["Jordan Lee"], action_items: ["Open questions for the client: cedar vs composite decking, plant palette."], dates_mentioned: ["2026-09-30"], topics: ["design", "open-engine"], type: "task", project: null, priority: "normal" };
+scenario.candidates = [{ id: closeoutCandId, description: "TODO: create a design for the backyard garden for Jordan Lee, incorporating a stone path, raised beds, a pergola, a water feature, lighting, and native plantings.", source_thought_id: crypto.randomUUID(), src_project: null, src_topics: ["design"], src_people: ["Jordan Lee"] }];
+const closeoutBody = "Jordan Lee backyard garden concept brief drafted 2026-09-30 (task 83a4acfa). Layout: stone path from the patio, raised beds along the fence, pergola over the seating area; water feature in the far corner facing the house. Open questions for the client: cedar vs composite decking, plant palette.";
+scenario.resolved = [{ num: 1, reason: closeoutBody }];
+scenario.updateAffected = [{ id: closeoutCandId }];
+const prefixed5 = `[Open Engine Closeout]\n${closeoutBody}\nFOR OPERATOR: draw the Jordan Lee garden and resolve the item`;
+expect(await postSlackMessage(prefixed5) === 200, "probe 5 HTTP");
+const thoughts5 = inserts("thoughts");
+expect(thoughts5.length === 1 && String(thoughts5[0].content) === prefixed5, "probe 5 thought stored once with the prefixed content");
+expect(inserts("action_items").length === 0, "probe 5 prefixed closeout record must store no items, FOR OPERATOR line included");
+expect(recorded.filter((r) => r.table.startsWith("action_items") && r.method === "PATCH").length === 0, "probe 5 prefixed closeout record must issue no status update");
+const l05 = inserts("auto_resolve_decisions");
+expect(l05.length === 1 && l05[0].layer === "L0" && l05[0].outcome === "blocked" && l05[0].reason === "mechanical_prefix" && l05[0].item_id === null, `probe 5 L0 row: ${JSON.stringify(l05)}`);
+expect(logs.some((l) => l.startsWith("checkAutoResolve: blocked mechanical capture")), "probe 5 L0 log line");
+origLog("probe 5 ok: prefixed closeout record stored, 0 items, 0 updates, one capture-level L0 row (probe 2 remains the unprefixed positive control)");
+
 console.log = origLog; console.error = origErr;
 console.log("INGEST PROBE PASSED");
 Deno.exit(0);

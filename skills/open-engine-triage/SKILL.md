@@ -66,7 +66,18 @@ if deferred.
    paused-project source of truth for this run; if no list exists, treat no
    projects as paused.
 2. **Read.** `list_open_action_items` (limit 100). Skip every item with
-   `has_active_draft: true`.
+   `has_active_draft: true`. Then read the board ONCE: `list_agent_tasks` with
+   `limit: 50, view: "compact"`. This read feeds the duplicate checks (semantic
+   twins, doc-seeded tasks) and step 5's carried-over drafts, so it is required,
+   and the result must actually come back: `limit` is 50, not 100 (the tool
+   rejects a larger value outright with "Number must be less than or equal to
+   50" instead of clamping; a call carrying 100 leaves the
+   board list silently empty on every run). `view: "compact"` is required
+   because the full projection returns every card's review_reason and a
+   board-wide listing exceeds the MCP response cap. If this call errors, say so
+   in the ledger note instead of proceeding as though the board were empty. The
+   50 rows come back `updated_at` DESC: judge coverage by the oldest row's date,
+   and if the board is at the cap say so rather than implying you saw all of it.
 3. **Classify each item** (rubric below) into: BOARD-ELIGIBLE, NEEDS-OPERATOR,
    SKIP. When useful, pull the source thought via `get_thought_by_id` for
    packet context.
@@ -102,9 +113,9 @@ if deferred.
 5. **Stage 4 — guarded auto-promote (auto-promote allowlist below).** AFTER all
    drafting this run, walk TWO sets: the drafts you created in THIS run, and
    your own earlier `triage-agent` Standing drafts created in the last 72 hours
-   that are still Standing (you already have these from the step-2 board read; an
-   already-promoted draft has left Standing and an archived one is excluded by
-   the default board read, so neither reappears). Do this run's drafts first,
+   that are still Standing (you already have these from the step-2
+   `list_agent_tasks` read; an already-promoted draft has left Standing and an
+   archived one is excluded by the default board read, so neither reappears). Do this run's drafts first,
    then the carried-over set. For each,
    decide whether it clears every rubric-side condition (J category fit, K live-
    surface veto, L not-redoing-finished-work). For the ones that do, call
