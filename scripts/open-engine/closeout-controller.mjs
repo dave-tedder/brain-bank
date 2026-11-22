@@ -2,14 +2,21 @@
 import {
   appendFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
+  rmdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, isAbsolute, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -102,6 +109,8 @@ function usage() {
   node scripts/open-engine/closeout-controller.mjs --audit-unrecorded [--lookback-days <n>]
   node scripts/open-engine/closeout-controller.mjs --capture-run-summary --remaining-agent-review <n> [--applied-task-ids <ids>] [--held-tasks <id:reason;...>] [--notable <text>] [--run-timestamp <iso>] [--summary-preview]
   node scripts/open-engine/closeout-controller.mjs --operator-resolution-sweep [--live-check] [--lookback-days <n>] [--no-capture]
+  node scripts/open-engine/closeout-controller.mjs --supersede <uuid> --reason <text> [--by <uuid>] [--premise <text>] [--generation <n>] [--live-check]
+  node scripts/open-engine/closeout-controller.mjs --repair-supersede <uuid> --generation <n> [--live-check]
   node scripts/open-engine/closeout-controller.mjs --sql
 
 OE-8A is dry-run only. It reads saved Agent Review evidence, validates receipt
@@ -212,10 +221,59 @@ is excluded from the search on purpose: <shortid>-<name>.md puts every card's
 id in its own filename, so counting it would build a detector that cannot fail.
 Null-slug and unknown-route cards are reported as skipped, never silently
 dropped. It appends nothing: writing project history from a receipt no human
-re-read at apply time is a worse risk than a reported gap.`;
+re-read at apply time is a worse risk than a reported gap. It also compares every TASK
+SUPERSEDED event on the board, whatever the card's status and however old, to its
+generation's history marker, because a close through the bare tool writes no
+history at all. Those rows land in the same unrecorded list, with severity
+SUPERSEDE_NO_HISTORY, SUPERSEDE_PARTIAL_HISTORY, SUPERSEDE_NO_ROUTE or
+SUPERSEDE_HISTORY_INVALID. A failed or truncated event scan is named in
+scan_truncated, so it cannot read as a clean result. It detects after the fact and
+only when something runs it; it does not stop an omission from happening.
+
+--supersede closes a card that should not finish: an executor hold such as
+PACKET_PREMISE_STALE or DUPLICATE_OF_EXISTING_DELIVERABLE, or an operator step
+that no longer applies. Legal from Needs Operator, Agent Needs Input and Agent
+Review. It re-reads the card and any replacement live, refuses when the
+replacement is archived or --premise (text quoted from the card's current hold
+note, required without --by) is no longer on the card, then journals, calls
+supersede_agent_task, appends one Superseded block to the routed tracker and
+session log, and captures one bookkeeping thought. A --premise match proves only
+that the quoted text is still on the card, not that the rest of the card is
+unchanged. The linked action item is not touched. A failed append is repaired by
+re-running the same command: the journal sees the verb already succeeded, skips
+it, and finishes the writes, even if the card has been reopened since, in which
+case it says so and does not close the card again. Each TASK SUPERSEDED event is
+one generation, named by payload.generation, never by event time or position; a
+history that is not exactly 1 to n holds with SUPERSEDE_HISTORY_INVALID. A card
+that was superseded and reopened is new work: closing it again requires
+--generation <n>, its next generation, which the verb re-checks under the row
+lock. A card closed by the bare supersede_agent_task tool has no journal: this
+command writes its history only while that generation is still the one closed
+right now. If it was reopened first, this command holds, --audit-unrecorded reports
+the generation and --repair-supersede writes it.
+--live-check prints the gates and writes nothing. Human use only: no scheduled lane
+passes it.
+
+--supersede and --repair-supersede share one claim per card in --journal-dir. A second
+command that overlaps the first holds with SUPERSEDE_HISTORY_BUSY and writes nothing.
+A claim left by a dead process on this machine is recovered by the next command;
+another host's or an unreadable one is not, and needs a person. The capture is pinned
+in the journal and names the event, so a retry resends the same bytes for
+capture_thought's content hash to collapse. That is at-least-once with a dedup, not
+exactly-once.
+
+--repair-supersede <uuid> --generation <n> writes the project history of one
+generation that already landed, taken entirely from that generation's own event:
+reason, replacement and date. It never calls the verb and never changes the card,
+whatever the card has done since. It takes no reason or replacement of its own,
+because the event is the record. A generation whose markers are already in the
+history writes nothing. A journal that disagrees with the event refuses, and a
+malformed history holds as SUPERSEDE_HISTORY_INVALID, because that needs a human.
+--live-check prints what it would do and writes nothing. Human use only, like
+--supersede: the audit only reports, and no scheduled lane runs this.`;
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {
     source: null,
     taskId: null,
@@ -238,6 +296,12 @@ function parseArgs(argv) {
     operatorResolutionSweep: false,
     operatorApply: false,
     auditUnrecorded: false,
+    supersedeTaskId: null,
+    supersedeBy: null,
+    supersedeReason: null,
+    supersedePremise: null,
+    supersedeGeneration: null,
+    repairSupersedeTaskId: null,
     lookbackDays: RESOLUTION_LOOKBACK_DAYS_DEFAULT,
     noCapture: false,
     help: false,
@@ -287,6 +351,18 @@ function parseArgs(argv) {
       args.operatorApply = true;
     } else if (arg === "--audit-unrecorded") {
       args.auditUnrecorded = true;
+    } else if (arg === "--supersede") {
+      args.supersedeTaskId = argv[++i];
+    } else if (arg === "--repair-supersede") {
+      args.repairSupersedeTaskId = argv[++i];
+    } else if (arg === "--by") {
+      args.supersedeBy = argv[++i];
+    } else if (arg === "--reason") {
+      args.supersedeReason = argv[++i];
+    } else if (arg === "--premise") {
+      args.supersedePremise = argv[++i];
+    } else if (arg === "--generation") {
+      args.supersedeGeneration = argv[++i];
     } else if (arg === "--lookback-days") {
       args.lookbackDays = argv[++i];
     } else if (arg === "--no-capture") {
@@ -326,7 +402,11 @@ function parseArgs(argv) {
       "--live-check/--apply/--resume fetch live packets; they cannot combine with --fixture, --input, or --write-drafts.",
     );
   }
-  if ((args.liveCheck || args.apply) && !args.taskId && !args.operatorResolutionSweep) {
+  if (
+    (args.liveCheck || args.apply) && !args.taskId &&
+    !args.operatorResolutionSweep && !args.supersedeTaskId &&
+    !args.repairSupersedeTaskId
+  ) {
     throw new Error(
       "--live-check/--apply require --task-id (OE-8C runs single-task).",
     );
@@ -381,6 +461,72 @@ function parseArgs(argv) {
       throw new Error("--lookback-days must be a positive integer.");
     }
     args.lookbackDays = Number(args.lookbackDays);
+  }
+  if (args.repairSupersedeTaskId) {
+    if (
+      args.apply || args.resumeTaskId || args.source || args.writeDrafts ||
+      args.captureRunSummary || args.printSql || args.taskId ||
+      args.operatorResolutionSweep || args.auditUnrecorded || args.operatorApply ||
+      args.supersedeTaskId || args.supersedeBy || args.supersedeReason ||
+      args.supersedePremise
+    ) {
+      throw new Error(
+        "--repair-supersede combines only with --generation, --live-check, --registry and --journal-dir. The reason and replacement come from the generation's event.",
+      );
+    }
+    if (!isUuidish(args.repairSupersedeTaskId)) {
+      throw new Error("--repair-supersede requires a full task uuid.");
+    }
+    if (
+      !/^\d+$/.test(String(args.supersedeGeneration ?? "")) ||
+      Number(args.supersedeGeneration) < 1
+    ) {
+      throw new Error("--repair-supersede requires --generation <n>, a positive integer.");
+    }
+    args.supersedeGeneration = Number(args.supersedeGeneration);
+  } else if (
+    args.supersedeBy || args.supersedeReason || args.supersedePremise ||
+    args.supersedeGeneration !== null
+  ) {
+    if (!args.supersedeTaskId) {
+      throw new Error(
+        "--by, --reason, --premise and --generation require --supersede.",
+      );
+    }
+  }
+  if (args.supersedeTaskId) {
+    if (
+      args.apply || args.resumeTaskId || args.source || args.writeDrafts ||
+      args.captureRunSummary || args.printSql || args.taskId ||
+      args.operatorResolutionSweep || args.auditUnrecorded || args.operatorApply
+    ) {
+      throw new Error(
+        "--supersede combines only with --by, --reason, --premise, --generation, --live-check, --registry and --journal-dir.",
+      );
+    }
+    if (!isUuidish(args.supersedeTaskId)) {
+      throw new Error("--supersede requires a full task uuid.");
+    }
+    if (args.supersedeBy && !isUuidish(args.supersedeBy)) {
+      throw new Error("--by requires a full task uuid.");
+    }
+    if (!String(args.supersedeReason || "").trim()) {
+      throw new Error("--supersede requires --reason.");
+    }
+    if (!args.supersedeBy && !String(args.supersedePremise || "").trim()) {
+      throw new Error(
+        "--supersede without --by requires --premise: text quoted from the card's current hold note. It is refused when the quoted text is gone; a match does not prove the rest of the card is unchanged.",
+      );
+    }
+    if (args.supersedeGeneration !== null) {
+      if (
+        !/^\d+$/.test(String(args.supersedeGeneration)) ||
+        Number(args.supersedeGeneration) < 1
+      ) {
+        throw new Error("--generation must be a positive integer.");
+      }
+      args.supersedeGeneration = Number(args.supersedeGeneration);
+    }
   }
   if (args.resumeTaskId && !isUuidish(args.resumeTaskId)) {
     throw new Error("--resume requires a task id.");
@@ -2043,7 +2189,176 @@ export function evaluateUnrecordedAudit(packets, registry, options = {}) {
   return { unrecorded, recorded, skipped };
 }
 
-async function runUnrecordedAudit(args, registry) {
+// Is a generation's marker in the project's tracker and in its session log? A marker
+// moved to an archive file by hand still counts: the record exists, and a repair
+// appending a second copy would be wrong. Unreadable reads as absent, so it is reported.
+function supersedeMarkerCoverage(route, marker, options = {}) {
+  const readText = options.readText || ((path) => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return null;
+    }
+  });
+  const listHistoryFiles = options.listHistoryFiles || historyPathsFor;
+  const foundIn = listHistoryFiles(route).all
+    .filter((path) => readText(path)?.includes(marker));
+  const tracker = foundIn.some((path) =>
+    path === route.tracker_path || /TRACKER/i.test(basename(path))
+  );
+  const sessionLog = foundIn.some((path) =>
+    path === route.session_log_path || /SESSION-LOG/i.test(basename(path))
+  );
+  return { tracker, sessionLog, foundIn };
+}
+
+function supersedeRepairCommand(taskId, generation) {
+  return `bash scripts/open-engine/closeout-run.sh --repair-supersede ${taskId} --generation ${generation}`;
+}
+
+// Every TASK SUPERSEDED generation against its history marker. packets are
+// get_agent_task-shaped, so a card's whole history is compared, not just the events
+// that made it into the listing.
+export function evaluateSupersedeHistoryAudit(packets, registry, options = {}) {
+  const unrecorded = [];
+  const recorded = [];
+  for (const packet of packets) {
+    const task = packet.task || packet;
+    const index = indexSupersedeGenerations(packet.events || []);
+    const base = {
+      task_id: task.id,
+      short_id: shortTaskId(task.id),
+      project_slug: task.project_slug || null,
+      status: task.status || null,
+    };
+    const problems = supersedeIdentityProblems(task, index);
+    if (problems.length > 0) {
+      unrecorded.push({ ...base, severity: "SUPERSEDE_HISTORY_INVALID", problems });
+      continue;
+    }
+    const route = task.project_slug ? registry[task.project_slug] : null;
+    const generations = [...index.byGeneration.keys()].sort((a, b) => a - b);
+    for (const generation of generations) {
+      const event = index.byGeneration.get(generation);
+      const row = {
+        ...base,
+        generation,
+        event_id: event.id,
+        superseded_at: event.created_at || null,
+      };
+      if (!route) {
+        unrecorded.push({
+          ...row,
+          severity: "SUPERSEDE_NO_ROUTE",
+          reason: task.project_slug ? "UNKNOWN_PROJECT_ROUTE" : "MISSING_PROJECT_SLUG",
+          repair: `Give the card a routed project_slug, then: ${supersedeRepairCommand(task.id, generation)}`,
+        });
+        continue;
+      }
+      const coverage = supersedeMarkerCoverage(route, supersedeMarker(task.id, generation), options);
+      const missing = [
+        ...(coverage.tracker ? [] : ["tracker"]),
+        ...(coverage.sessionLog ? [] : ["session_log"]),
+      ];
+      if (missing.length === 0) {
+        recorded.push({ ...row, found_in: coverage.foundIn });
+      } else {
+        unrecorded.push({
+          ...row,
+          severity: missing.length === 2 ? "SUPERSEDE_NO_HISTORY" : "SUPERSEDE_PARTIAL_HISTORY",
+          missing,
+          repair: supersedeRepairCommand(task.id, generation),
+        });
+      }
+    }
+  }
+  return { unrecorded, recorded };
+}
+
+// The inventory names real event ids, so a card's fetched history has to contain them.
+// A packet is read oldest first with no count check, so a capped one loses exactly the
+// newest events, and a reopened card's closed-generation check cannot see the missing
+// suffix. Anything listed and not fetched is reported as coverage, never dropped.
+// Pure: { packets: those safe to evaluate, gaps: one row per card that came up short }.
+export function reconcileSupersedeInventory(listedEvents, fetched) {
+  const packets = [];
+  const gaps = [];
+  for (const { task_id: taskId, packet } of fetched) {
+    const listed = listedEvents.filter((event) => event.task_id === taskId);
+    const sameCard = packet?.task?.id === taskId;
+    const fetchedEvents = sameCard && Array.isArray(packet.events) ? packet.events : [];
+    const fetchedIds = new Set(fetchedEvents.map((event) => event?.id));
+    const missing = listed.filter((event) => !event?.id || !fetchedIds.has(event.id));
+    if (sameCard) packets.push(packet);
+    if (missing.length > 0) {
+      gaps.push({
+        task_id: taskId,
+        short_id: shortTaskId(taskId),
+        project_slug: packet?.task?.project_slug || null,
+        status: packet?.task?.status || null,
+        severity: "SUPERSEDE_COVERAGE_INCOMPLETE",
+        listed_events: listed.length,
+        fetched_events: fetchedEvents.length,
+        missing_event_ids: missing.map((event) => event?.id ?? null),
+        message:
+          `The inventory lists ${missing.length} TASK SUPERSEDED event(s) that get_agent_task did not return for this card, so its history was not fully compared. Not clean. Read the card's complete events before trusting this audit.`,
+      });
+    }
+  }
+  return { packets, gaps };
+}
+
+// The whole board's supersede history, not a lookback window: a bare close is exactly
+// the thing nothing else reported, so age must not hide it. A failure here must never
+// read as "none found", and must not lose the apply audit that already ran. A null
+// error is not a clean bill either: coverage_complete is the only claim of that.
+async function scanSupersedeHistory(config, registry) {
+  try {
+    const listed = await mcpCall(config, "list_supersede_events", {
+      limit: SUPERSEDE_EVENT_SCAN_LIMIT,
+    });
+    if (!Array.isArray(listed?.events)) {
+      throw new Error("list_supersede_events returned no events array");
+    }
+    const ids = [...new Set(listed.events.map((event) => event.task_id))];
+    const fetched = [];
+    for (const id of ids) {
+      fetched.push({ task_id: id, packet: await mcpCall(config, "get_agent_task", { task_id: id }) });
+    }
+    const { packets, gaps } = reconcileSupersedeInventory(listed.events, fetched);
+    const evaluated = evaluateSupersedeHistoryAudit(packets, registry);
+    // At the ceiling older cards may never have been examined. A total that is absent
+    // or differs from the page says the same thing about a lower server-side cap.
+    const total = Number.isInteger(listed.total) ? listed.total : null;
+    const truncated = listed.events.length >= SUPERSEDE_EVENT_SCAN_LIMIT ||
+      total !== listed.events.length;
+    return {
+      unrecorded: [...evaluated.unrecorded, ...gaps],
+      recorded: evaluated.recorded,
+      gaps,
+      events_read: listed.events.length,
+      total_events: total,
+      cards: ids.length,
+      truncated,
+      coverage_complete: !truncated && gaps.length === 0,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      unrecorded: [],
+      recorded: [],
+      gaps: [],
+      events_read: 0,
+      total_events: null,
+      cards: 0,
+      truncated: false,
+      coverage_complete: false,
+      error: String(err?.message || err),
+    };
+  }
+}
+
+export async function runUnrecordedAudit(args, registry) {
   const config = mcpConfigFromEnv();
   // An applied card lands in Agent Done (normal) or Needs Operator (when the
   // receipt carried an OPERATOR-ACTION marker). Both are scanned.
@@ -2071,6 +2386,7 @@ async function runUnrecordedAudit(args, registry) {
   }
 
   const evaluated = evaluateUnrecordedAudit(packets, registry);
+  const supersede = await scanSupersedeHistory(config, registry);
   // list_agent_tasks caps at 50 PER STATUS; report truncation per status so a
   // partial scan is never read as full coverage (no-silent-caps).
   const truncated = statuses.filter((status) => {
@@ -2085,12 +2401,35 @@ async function runUnrecordedAudit(args, registry) {
     lookback_days: args.lookbackDays,
     scan_limit: RESOLUTION_SCAN_LIMIT,
     statuses_scanned: statuses,
-    scan_truncated: truncated,
+    // The lanes already pass a non-empty scan_truncated through, so an incomplete
+    // supersede scan reaches the operator without any lane changing.
+    scan_truncated: [
+      ...truncated,
+      ...(supersede.error
+        ? [`TASK SUPERSEDED events (scan failed: ${supersede.error})`]
+        : supersede.truncated
+        ? ["TASK SUPERSEDED events"]
+        : []),
+      ...(supersede.gaps.length > 0
+        ? [`TASK SUPERSEDED events (${supersede.gaps.reduce((sum, gap) => sum + gap.missing_event_ids.length, 0)} listed event(s) absent from fetched history on ${supersede.gaps.length} card(s))`]
+        : []),
+    ],
     swept: packets.length,
-    unrecorded_count: evaluated.unrecorded.length,
-    unrecorded: evaluated.unrecorded,
+    unrecorded_count: evaluated.unrecorded.length + supersede.unrecorded.length,
+    unrecorded: [...evaluated.unrecorded, ...supersede.unrecorded],
     recorded_count: evaluated.recorded.length,
     skipped: evaluated.skipped,
+    supersede_scan: {
+      events_read: supersede.events_read,
+      total_events: supersede.total_events,
+      cards: supersede.cards,
+      limit: SUPERSEDE_EVENT_SCAN_LIMIT,
+      coverage_complete: supersede.coverage_complete,
+      cards_with_missing_history: supersede.gaps.length,
+      recorded_generations: supersede.recorded.length,
+      unrecorded_generations: supersede.unrecorded.length,
+      error: supersede.error,
+    },
   };
   console.log(JSON.stringify(result, null, 2));
   return result;
@@ -2259,6 +2598,886 @@ export async function runLive(args, registry) {
   } finally {
     printResult(result);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Task 3.4: --supersede. Same order as apply: journal first, then the board verb,
+// then one tracker append and one session-log append, then the capture, then the
+// journal is marked complete.
+//
+// Each TASK SUPERSEDED event is one GENERATION, named by payload.generation, because
+// a card can be reopened off Done and superseded again. Event time and position are
+// never the identity: created_at is the transaction's start, so serialized closes
+// can read back 1, 3, 2 and closes in one transaction tie. The journal, the history
+// marker and the verb's expected_generation all carry that number. A retry reads the
+// card first, and when its journal shows generation n landed, it finishes generation
+// n's history and never calls the verb, whatever the card has done since. Closing a
+// reopened card takes a new --generation.
+// ---------------------------------------------------------------------------
+
+const SUPERSEDE_EVENT_SCAN_LIMIT = 500;
+const SUPERSEDE_LEGAL_STATUSES = new Set([
+  "Needs Operator",
+  "Agent Needs Input",
+  "Agent Review",
+]);
+
+function normalizeNote(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+export function supersedeMarker(taskId, generation) {
+  // Per-generation and date-free: a reopened card superseded again gets its own
+  // history block, and a retry of one generation never writes a second one.
+  return `<!-- open-engine supersede task: ${taskId} generation: ${generation} -->`;
+}
+
+// Every TASK SUPERSEDED event by the generation it names, plus what is wrong with
+// them. Array order means nothing here. A history that is not exactly 1 to n is
+// reported, never repaired by guessing: a missing number, a duplicate, or a value
+// that is not a positive integer (the string "2" included) cannot be matched to a
+// journal safely, so every path refuses until a human has looked.
+export function indexSupersedeGenerations(events) {
+  const byGeneration = new Map();
+  const problems = [];
+  for (const event of events || []) {
+    if (event?.event_type !== "TASK SUPERSEDED") continue;
+    const generation = event?.payload?.generation;
+    if (!Number.isInteger(generation) || generation < 1) {
+      problems.push(`event ${event?.id ?? "(no id)"} names no valid generation (${JSON.stringify(generation ?? null)})`);
+    } else if (byGeneration.has(generation)) {
+      problems.push(`generation ${generation} appears on more than one event`);
+    } else {
+      byGeneration.set(generation, event);
+    }
+  }
+  const latest = byGeneration.size ? Math.max(...byGeneration.keys()) : 0;
+  if (latest !== byGeneration.size) {
+    problems.push(`generations run to ${latest} but only ${byGeneration.size} are present`);
+  }
+  return { byGeneration, latest, problems };
+}
+
+function sameSupersedeArgs(a, b) {
+  return String(a?.reason ?? "") === String(b?.reason ?? "") &&
+    (a?.by ?? null) === (b?.by ?? null);
+}
+
+function eventSupersedeArgs(event) {
+  return {
+    reason: event?.payload?.reason,
+    by: event?.payload?.superseded_by ?? null,
+  };
+}
+
+// The superseded_* columns survive a reopen, so they alone do not say the card is
+// closed. superseded_closed_generation does: the verb sets it, and a trigger clears
+// it on any move off Done, whatever wrote the status and even inside one transaction.
+function closedBySupersede(task) {
+  return task.status === "Agent Done" &&
+    Number.isInteger(task.superseded_closed_generation);
+}
+
+// What the card and its events must agree on before any of them is trusted. The
+// task is read before the events, so a concurrent close can make these disagree for
+// one read; that holds, and a re-run reads again.
+function supersedeIdentityProblems(task, index) {
+  const problems = [...index.problems];
+  if (problems.length > 0 || !closedBySupersede(task)) return problems;
+  const closed = task.superseded_closed_generation;
+  if (closed !== index.latest) {
+    problems.push(`the card says generation ${closed} closed it, but its events end at generation ${index.latest}`);
+  } else if (!sameSupersedeArgs(
+    { reason: task.superseded_reason, by: task.superseded_by ?? null },
+    eventSupersedeArgs(index.byGeneration.get(closed)),
+  )) {
+    problems.push(`the card's reason or replacement differs from generation ${closed}'s event`);
+  }
+  return problems;
+}
+
+// True only for THIS supersede already on the board: closed by the verb, and that
+// generation's own event carries the same reason and replacement.
+export function supersedeAlreadyDone(task, events, args) {
+  if (!closedBySupersede(task)) return false;
+  const event = indexSupersedeGenerations(events).byGeneration.get(task.superseded_closed_generation);
+  return Boolean(event) && sameSupersedeArgs(
+    eventSupersedeArgs(event),
+    { reason: String(args.reason || "").trim(), by: args.by || null },
+  );
+}
+
+function pathEntryExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Is this directory of Git metadata a repository's own? commondir means it is a linked
+// worktree's private metadata, however it was reached. Otherwise it must pass the test
+// git itself applies (HEAD, objects, refs); a directory that does not is garbled. And a
+// directory named .git that belongs to some other checkout makes this one a second
+// working tree over that repository, not a repository of its own. A relocated gitdir
+// with any other name (the separate-git-dir shape, a submodule's .git/modules entry) is.
+function metadataIsOwnRepository(dir, metadata) {
+  if (pathEntryExists(join(metadata, "commondir"))) return false;
+  const hasDir = (path) => {
+    try {
+      return statSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  if (
+    !existsSync(join(metadata, "HEAD")) ||
+    !hasDir(join(metadata, "objects")) || !hasDir(join(metadata, "refs"))
+  ) {
+    return false;
+  }
+  const real = realpathSync(metadata);
+  return basename(real) !== ".git" || real === join(dir, ".git");
+}
+
+// One directory's .git, in every form it can take. lstat first, because a dangling or
+// looping symlink is still metadata someone put there: following it would read as "no
+// .git here" and the walk would carry on past it. Then the directory form (real or
+// through symlinks) and the file form get the same test on the metadata they lead to.
+// A file must start with its gitdir line, as git requires. Anything unreadable, garbled
+// or pruned fails closed.
+function dotGitIsLinkedWorktree(dir, dotGit) {
+  if (!pathEntryExists(dotGit)) return false;
+  try {
+    const stat = statSync(dotGit);
+    if (stat.isDirectory()) return !metadataIsOwnRepository(dir, dotGit);
+    if (!stat.isFile()) return true;
+    const gitdir = /^gitdir: *(.+?)\s*$/.exec(readFileSync(dotGit, "utf8"))?.[1];
+    if (!gitdir) return true;
+    return !metadataIsOwnRepository(dir, isAbsolute(gitdir) ? gitdir : resolve(dir, gitdir));
+  } catch {
+    return true;
+  }
+}
+
+// GAP C: is this path inside a linked git worktree, at ANY level? Every reader
+// resolves the main checkout, so a route into a worktree writes history nobody can
+// see. The test is the structure of every checkout containing the path's real
+// location, not a directory name, and it never stops at the first .git: a nested
+// repository or an initialized submodule inside a disposable worktree is still inside
+// it. No .git at all (the Websites folder) is not a worktree. Reads the disk only, so
+// it needs no git binary and works from a git-free lane. It cannot tell a durable
+// main checkout from a disposable independent clone; the registry is trusted for that.
+function isInLinkedWorktree(path) {
+  let real;
+  try {
+    real = realpathSync(path);
+  } catch {
+    real = resolve(String(path));
+  }
+  for (let dir = dirname(real); ; dir = dirname(dir)) {
+    const dotGit = join(dir, ".git");
+    if (dotGitIsLinkedWorktree(dir, dotGit)) return true;
+    if (dirname(dir) === dir) return false;
+  }
+}
+
+// The route gate runs on every attempt, retry included, because the appends need it.
+function supersedeRouteGate(task, registry, reasons) {
+  if (!task.project_slug) {
+    reasons.push("MISSING_PROJECT_SLUG");
+    return null;
+  }
+  const route = registry[task.project_slug];
+  if (!route) {
+    reasons.push("UNKNOWN_PROJECT_ROUTE");
+    return null;
+  }
+  for (const path of [route.tracker_path, route.session_log_path]) {
+    if (String(path || "").includes("/.claude/worktrees/")) {
+      reasons.push("APPEND_TARGET_IN_WORKTREE");
+    } else if (!path || !existsSync(path)) {
+      reasons.push("APPEND_TARGET_MISSING");
+    } else if (isInLinkedWorktree(path)) {
+      reasons.push("APPEND_TARGET_IN_WORKTREE");
+    }
+  }
+  return route;
+}
+
+// Pure, apart from the route gate's read of the disk. replacement is the packet's
+// task, or null when absent or not found. generation is the number this attempt
+// acts on: the live one when the card is already closed, otherwise the next one.
+export function evaluateSupersede({ task, events, replacement, args, registry }) {
+  const reasons = [];
+  const route = supersedeRouteGate(task, registry, reasons);
+  const index = indexSupersedeGenerations(events);
+  const problems = supersedeIdentityProblems(task, index);
+  if (problems.length > 0) {
+    reasons.push("SUPERSEDE_HISTORY_INVALID");
+    return { reasons, route, already_done: false, generation: null, problems };
+  }
+  const prior = index.latest;
+  if (supersedeAlreadyDone(task, events, args)) {
+    if (args.generation != null && args.generation !== prior) {
+      reasons.push("GENERATION_MISMATCH");
+    }
+    return { reasons, route, already_done: true, generation: prior };
+  }
+  if (task.archived_at) reasons.push("TASK_ARCHIVED");
+  if (closedBySupersede(task)) {
+    reasons.push("ALREADY_SUPERSEDED_DIFFERENTLY");
+  } else if (!SUPERSEDE_LEGAL_STATUSES.has(task.status)) {
+    reasons.push("SUPERSEDE_STATUS_NOT_LEGAL");
+  } else if (prior > 0 && args.generation == null) {
+    reasons.push("REOPENED_CARD_NEEDS_GENERATION");
+  } else if (args.generation != null && args.generation !== prior + 1) {
+    reasons.push("GENERATION_MISMATCH");
+  }
+  if (args.by) {
+    if (args.by === task.id) reasons.push("REPLACEMENT_IS_SELF");
+    else if (!replacement) reasons.push("REPLACEMENT_NOT_FOUND");
+    else if (replacement.archived_at) reasons.push("REPLACEMENT_ARCHIVED");
+  }
+  if (args.premise) {
+    const note = normalizeNote(
+      [task.blocked_reason, task.review_reason, task.operator_action].join(" "),
+    );
+    if (!note.includes(normalizeNote(args.premise))) {
+      reasons.push("PREMISE_NOTE_MISMATCH");
+    }
+  }
+  return { reasons, route, already_done: false, generation: prior + 1 };
+}
+
+function supersedeHoldMessage(reasons, generation) {
+  const messages = {
+    MISSING_PROJECT_SLUG:
+      "The card has no project_slug, so no history can be written. Set one with admin_amend_agent_task, then re-run.",
+    UNKNOWN_PROJECT_ROUTE:
+      "The card's project_slug has no closeout route in the registry.",
+    APPEND_TARGET_IN_WORKTREE:
+      "A route's tracker or session log sits in a git worktree, which every reader treats as invisible, or under Git metadata too damaged to tell.",
+    APPEND_TARGET_MISSING: "A route's tracker or session log does not exist.",
+    SUPERSEDE_HISTORY_INVALID:
+      "The card's TASK SUPERSEDED history cannot be matched to generations, so nothing was changed. Re-run once if another writer may be active; otherwise a human has to repair the events first.",
+    TASK_ARCHIVED: "The card is archived.",
+    ALREADY_SUPERSEDED_DIFFERENTLY:
+      "The card was superseded with a different reason or replacement.",
+    SUPERSEDE_STATUS_NOT_LEGAL:
+      "Supersede is legal only from Needs Operator, Agent Needs Input or Agent Review.",
+    REOPENED_CARD_NEEDS_GENERATION:
+      `The card was superseded before and has since been reopened, so this is new work. Read the card; to close it again pass --generation ${generation}.`,
+    GENERATION_MISMATCH:
+      `--generation does not match the card, whose generation for this action is ${generation}. Read the card again.`,
+    REPLACEMENT_IS_SELF: "A card cannot supersede itself.",
+    REPLACEMENT_NOT_FOUND: "The --by card does not exist.",
+    REPLACEMENT_ARCHIVED: "The --by card is archived.",
+    REPAIR_GENERATION_NOT_FOUND:
+      `The card has no TASK SUPERSEDED event naming generation ${generation}, so there is nothing to record.`,
+    PREMISE_NOTE_MISMATCH:
+      "--premise is no longer in the card's hold note. The quoted text is gone, so read the card again before closing it.",
+    SUPERSEDE_HISTORY_BUSY:
+      "Another command holds this card's supersede history. Nothing was written. Run this again when it finishes. A claim left by a dead process on this machine is recovered automatically. One from another host, or one that cannot be read, is not: confirm that process is gone, then delete the claim file named in holders.",
+  };
+  return [...new Set(reasons)].map((reason) => messages[reason] || reason).join(" ");
+}
+
+function supersedeJournalPath(journalDir, taskId, generation) {
+  return join(journalDir, `${taskId}.supersede.g${generation}.json`);
+}
+
+// Every journal for this card, oldest generation first. Retired ones carry a suffix
+// and do not match.
+function readSupersedeJournals(journalDir, taskId) {
+  if (!existsSync(journalDir)) return [];
+  const pattern = new RegExp(`^${taskId}\\.supersede\\.g(\\d+)\\.json$`);
+  return readdirSync(journalDir)
+    .map((name) => ({ name, match: pattern.exec(name) }))
+    .filter((entry) => entry.match)
+    .map((entry) => ({
+      path: join(journalDir, entry.name),
+      generation: Number(entry.match[1]),
+      journal: parseJson(join(journalDir, entry.name)),
+    }))
+    .sort((a, b) => a.generation - b.generation);
+}
+
+// What one journal means against the live events. Pure.
+//   retry-verb: the intent is on file and the verb never landed; same arguments.
+//   replace-intent: the same, with new arguments. Nothing happened, so nothing mixes.
+//   resume: this journal's generation landed; finish its history, never the verb.
+//   lost-to-another: only an intent, and that generation landed with other arguments.
+//   different-args: this generation landed, and this command asks for something else.
+//   event-missing / event-mismatch: the journal claims what the board does not show.
+export function classifySupersedeJournal({ generation, journal }, index, args) {
+  const event = index.byGeneration.get(generation);
+  const sameArgs = sameSupersedeArgs(journal.args, args);
+  if (journal.state === "intent-written" && !event) {
+    return sameArgs ? "retry-verb" : "replace-intent";
+  }
+  if (!event) return "event-missing";
+  if (!sameSupersedeArgs(journal.args, eventSupersedeArgs(event))) {
+    return journal.state === "intent-written" ? "lost-to-another" : "event-mismatch";
+  }
+  // Past the intent, the journal recorded which event it saw. Two generations can
+  // carry identical arguments, so matching them is not enough on its own.
+  if (journal.state !== "intent-written" && journal.event_id !== event.id) {
+    return "event-mismatch";
+  }
+  return sameArgs ? "resume" : "different-args";
+}
+
+async function fetchReplacement(config, id) {
+  try {
+    const packet = await mcpCall(config, "get_agent_task", { task_id: id });
+    return packet?.task || null;
+  } catch (err) {
+    // get_agent_task surfaces only PostgREST's message for .single() on zero
+    // rows, read live on 2026-11-06: "Cannot coerce the result to a single JSON
+    // object". Anything else, a network failure above all, must stay an error:
+    // "the replacement could not be read" is not "the replacement does not exist".
+    if (/Cannot coerce the result to a single JSON object/.test(String(err?.message))) return null;
+    throw err;
+  }
+}
+
+// Who may write a card's supersede history right now: one claim file per running
+// command, in the journal directory the commands share. Claim first, then look: of two
+// overlapping claimants the later one always sees the earlier, so at most one goes on
+// and at worst both refuse. Every name is unique, so removing a dead claim can never
+// remove its successor's. A claim is only ever removed by its owner on the way out or by
+// a process that proved the owner gone; another host or an unreadable claim cannot be
+// proved gone and stays a refusal until a person looks. This serializes commands sharing
+// a directory on one machine. It is not a distributed lock, and it does not make delivery
+// exactly-once: see the pinned capture in supersedeUnderLease for what covers the rest.
+function supersedeLeasePattern(taskId) {
+  return new RegExp(`^${taskId}\\.supersede\\.lease\\.[0-9a-f-]+\\.json$`);
+}
+
+// ps renders a start time in its caller's zone and language. Pinned, so the string in a
+// claim compares equal whoever wrote it and whoever reads it: launchd beside a Terminal
+// would otherwise read a live owner as a dead one and delete its claim.
+function processStartedAt(pid) {
+  const run = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+  });
+  return run.status === 0 ? run.stdout.trim() || null : null;
+}
+
+// True only on proof: this host, and the pid is gone or now belongs to a later process.
+function supersedeLeaseHolderIsGone(claim) {
+  if (claim?.host !== hostname() || !Number.isInteger(claim?.pid)) return false;
+  try {
+    process.kill(claim.pid, 0);
+  } catch (err) {
+    return err?.code === "ESRCH";
+  }
+  const started = processStartedAt(claim.pid);
+  return Boolean(started && claim.process_started && started !== claim.process_started);
+}
+
+function acquireSupersedeLease(journalDir, taskId, mode) {
+  const createdDir = !existsSync(journalDir);
+  mkdirSync(journalDir, { recursive: true });
+  const token = randomUUID();
+  const path = join(journalDir, `${taskId}.supersede.lease.${token}.json`);
+  const temp = `${path}.tmp`;
+  writeFileSync(temp, `${JSON.stringify({
+    version: 1,
+    task_id: taskId,
+    token,
+    mode,
+    pid: process.pid,
+    host: hostname(),
+    process_started: processStartedAt(process.pid),
+    claimed_at: new Date().toISOString(),
+  }, null, 2)}\n`, "utf8");
+  renameSync(temp, path);
+
+  const pattern = supersedeLeasePattern(taskId);
+  const holders = [];
+  const recovered = [];
+  for (const name of readdirSync(journalDir)) {
+    const other = join(journalDir, name);
+    if (other === path || !pattern.test(name)) continue;
+    let claim = null;
+    try {
+      claim = JSON.parse(readFileSync(other, "utf8"));
+    } catch (err) {
+      if (err?.code === "ENOENT") continue; // released while this looked
+    }
+    if (claim && supersedeLeaseHolderIsGone(claim)) {
+      rmSync(other, { force: true });
+      recovered.push({ path: other, pid: claim.pid, mode: claim.mode, claimed_at: claim.claimed_at });
+      continue;
+    }
+    holders.push({
+      path: other,
+      pid: claim?.pid ?? null,
+      host: claim?.host ?? null,
+      mode: claim?.mode ?? null,
+      claimed_at: claim?.claimed_at ?? null,
+    });
+  }
+  if (holders.length > 0) {
+    rmSync(path, { force: true });
+    return { busy: holders, recovered };
+  }
+  return { path, token, recovered, createdDir, journalDir };
+}
+
+// A command that wrote nothing leaves nothing, the directory included.
+function releaseSupersedeLease(lease) {
+  rmSync(lease.path, { force: true });
+  if (lease.createdDir) {
+    try {
+      rmdirSync(lease.journalDir);
+    } catch {
+      // Not empty: this command journaled something, which is the normal case.
+    }
+  }
+}
+
+function assertSupersedeLeaseHeld(lease) {
+  if (lease && !existsSync(lease.path)) {
+    throw new Error(`SUPERSEDE_LEASE_LOST: ${lease.path} was removed while this command held it. Stopping before any further write; re-run to resume from the journal.`);
+  }
+}
+
+async function withSupersedeLease(cli, taskId, mode, work) {
+  if (cli.liveCheck) return await work(null);
+  const lease = acquireSupersedeLease(cli.journalDir, taskId, mode);
+  if (lease.busy) {
+    printResult({
+      status: "HELD",
+      mode,
+      dry_run: true,
+      board_mutations: false,
+      task_id: taskId,
+      reasons: ["SUPERSEDE_HISTORY_BUSY"],
+      holders: lease.busy,
+      message: supersedeHoldMessage(["SUPERSEDE_HISTORY_BUSY"], null),
+    });
+    throw new Error("Refusing to run: SUPERSEDE_HISTORY_BUSY");
+  }
+  try {
+    return await work(lease);
+  } finally {
+    releaseSupersedeLease(lease);
+  }
+}
+
+export async function runSupersede(cli, registry) {
+  return await withSupersedeLease(
+    cli,
+    cli.supersedeTaskId,
+    "supersede",
+    (lease) => supersedeUnderLease(cli, registry, lease),
+  );
+}
+
+async function supersedeUnderLease(cli, registry, lease) {
+  const config = mcpConfigFromEnv();
+  const taskId = cli.supersedeTaskId;
+  const repairGeneration = cli.repairGeneration ?? null;
+  const args = {
+    reason: String(cli.supersedeReason || "").trim(),
+    by: cli.supersedeBy || null,
+    premise: cli.supersedePremise || null,
+    generation: cli.supersedeGeneration ?? null,
+  };
+
+  // Always the live card first. A journal says what this machine did, never what
+  // the card is now.
+  const packet = await mcpCall(config, "get_agent_task", { task_id: taskId });
+  const task = packet?.task;
+  const events = packet?.events || [];
+  if (!task?.id) throw new Error("get_agent_task packet has no task.");
+  const index = indexSupersedeGenerations(events);
+  const identityProblems = supersedeIdentityProblems(task, index);
+  if (identityProblems.length > 0) {
+    // Before any journal is read or retired, and before any write.
+    printResult({
+      status: "HELD",
+      mode: "supersede",
+      dry_run: !!cli.liveCheck,
+      board_mutations: false,
+      task_id: taskId,
+      reasons: ["SUPERSEDE_HISTORY_INVALID"],
+      problems: identityProblems,
+      message: supersedeHoldMessage(["SUPERSEDE_HISTORY_INVALID"], null),
+    });
+    throw new Error("Refusing to supersede: SUPERSEDE_HISTORY_INVALID");
+  }
+  const replacement = args.by && args.by !== taskId
+    ? await fetchReplacement(config, args.by)
+    : null;
+
+  const journals = readSupersedeJournals(cli.journalDir, taskId);
+  const retired = [];
+  let resume = null;
+  for (const entry of journals) {
+    if (
+      entry.journal.task_id !== taskId ||
+      entry.journal.generation !== entry.generation ||
+      entry.generation < 1
+    ) {
+      throw new Error(
+        `Journal ${entry.path} does not describe generation ${entry.generation} of card ${taskId}. Refusing to read it.`,
+      );
+    }
+    // A repair finishes the one generation it names and leaves the others alone.
+    if (repairGeneration !== null && entry.generation !== repairGeneration) continue;
+    if (entry.journal.state === "complete") {
+      const verdict = classifySupersedeJournal(entry, index, entry.journal.args);
+      if (verdict !== "resume") {
+        throw new Error(
+          `Journal ${entry.path} says generation ${entry.generation} completed, but the board's events do not back it (${verdict}; latest generation ${index.latest}). Refusing to guess.`,
+        );
+      }
+      continue;
+    }
+    const verdict = classifySupersedeJournal(entry, index, args);
+    if (verdict === "retry-verb") continue;
+    if (verdict === "replace-intent" || verdict === "lost-to-another") {
+      entry.retired = verdict;
+      retired.push({ path: entry.path, generation: entry.generation, why: verdict });
+      if (!cli.liveCheck) renameSync(entry.path, `${entry.path}.${verdict}-${Date.now()}`);
+      continue;
+    }
+    if (verdict === "different-args") {
+      throw new Error(
+        `Journal ${entry.path} holds a different reason or replacement, and its generation ${entry.generation} landed; refusing to mix two supersedes of one card. Re-run with the journaled arguments to finish that generation's history first.`,
+      );
+    }
+    if (verdict === "event-missing" || verdict === "event-mismatch") {
+      throw new Error(
+        `Journal ${entry.path} records generation ${entry.generation} landing, but the board's events do not show it (${verdict}). Refusing to write history from it.`,
+      );
+    }
+    resume = entry;
+    break;
+  }
+
+  let evaluation;
+  if (resume) {
+    // The verb already ran for this generation. Only the route matters now, and it
+    // is the route the close was journaled under, in case the card has moved since.
+    const reasons = [];
+    const route = supersedeRouteGate(
+      { project_slug: resume.journal.project_slug || task.project_slug },
+      registry,
+      reasons,
+    );
+    evaluation = { reasons, route, already_done: true, generation: resume.generation };
+  } else {
+    evaluation = evaluateSupersede({ task, events, replacement, args, registry });
+  }
+  const generation = evaluation.generation;
+  const journalPath = supersedeJournalPath(cli.journalDir, taskId, generation);
+  const existing = journals.find((entry) => entry.generation === generation && !entry.retired);
+  const cardChanged = Boolean(resume) &&
+    !(closedBySupersede(task) && task.superseded_closed_generation === generation);
+
+  if (
+    evaluation.already_done && existing?.journal.state === "complete" &&
+    !evaluation.reasons.includes("GENERATION_MISMATCH")
+  ) {
+    printResult({
+      status: "ALREADY_COMPLETE",
+      mode: "supersede",
+      dry_run: true,
+      board_mutations: false,
+      task_id: taskId,
+      generation,
+      journal: { path: existing.path, state: existing.journal.state },
+    });
+    return;
+  }
+
+  const result = {
+    mode: "supersede",
+    dry_run: !!cli.liveCheck,
+    board_mutations: false,
+    task_id: taskId,
+    from_status: task.status,
+    project_slug: task.project_slug || null,
+    superseded_by: args.by,
+    generation,
+    verb_already_done: evaluation.already_done,
+    card_changed_since_generation: cardChanged,
+    ...(retired.length ? { retired_journals: retired } : {}),
+    ...(lease?.recovered.length ? { recovered_leases: lease.recovered } : {}),
+  };
+  if (evaluation.reasons.length > 0) {
+    result.status = "HELD";
+    result.reasons = [...new Set(evaluation.reasons)];
+    result.message = supersedeHoldMessage(evaluation.reasons, generation);
+    printResult(result);
+    throw new Error(`Refusing to supersede: ${result.reasons.join(", ")}`);
+  }
+  if (cli.liveCheck) {
+    result.status = "SUPERSEDE_READY";
+    printResult(result);
+    return;
+  }
+
+  const route = evaluation.route;
+  mkdirSync(cli.journalDir, { recursive: true });
+  if (!existing) {
+    writeFileSync(journalPath, `${JSON.stringify({
+      version: 3,
+      kind: "supersede",
+      state: "intent-written",
+      task_id: taskId,
+      generation,
+      project_slug: task.project_slug,
+      created_at: new Date().toISOString(),
+      args: { reason: args.reason, by: args.by },
+    }, null, 2)}\n`, "utf8");
+  }
+  result.journal = { path: journalPath };
+
+  try {
+    // The event is this generation's record, found by the number it names. The verb
+    // returns only the card, so read it back: this is also what makes a lost read
+    // resumable, since the journal is still an intent and the retry adopts the event.
+    let event = index.byGeneration.get(generation);
+    if (!evaluation.already_done) {
+      await mcpCall(config, "supersede_agent_task", {
+        task_id: taskId,
+        reason: args.reason,
+        actor: "operator",
+        ...(args.by ? { superseded_by: args.by } : {}),
+        expected_generation: generation,
+      });
+      result.board_mutations = true;
+      const after = await mcpCall(config, "get_agent_task", { task_id: taskId });
+      const afterIndex = indexSupersedeGenerations(after?.events);
+      event = afterIndex.byGeneration.get(generation);
+      if (
+        afterIndex.problems.length > 0 || !event ||
+        !sameSupersedeArgs(eventSupersedeArgs(event), args)
+      ) {
+        throw new Error(
+          `The verb returned, but generation ${generation}'s event is not readable with these arguments. Re-run the same command to reconcile against the board.`,
+        );
+      }
+    }
+    const closedAt = String(event.created_at);
+    const date = closedAt.slice(0, 10);
+    updateApplyJournal(journalPath, {
+      state: "board-superseded",
+      superseded_at: closedAt,
+      event_id: event.id,
+    });
+
+    const replacementText = args.by
+      ? `Replaced by ${shortTaskId(args.by)}${replacement?.title ? ` (${replacement.title})` : ""}.`
+      : "No replacement; the premise no longer holds.";
+    const generationText = generation > 1 ? ` (supersede generation ${generation})` : "";
+    const eventBody =
+      `Card ${shortTaskId(taskId)} (${task.title || "untitled"}) closed as superseded on ${date}${generationText}. ${replacementText} Reason: ${args.reason} The linked action item was not touched.`;
+    const body =
+      `${eventBody}${repairGeneration !== null ? ` History written later by --repair-supersede on ${new Date().toISOString().slice(0, 10)}, from the event.` : ""}`;
+    const heading = `## Superseded — ${date} (Open Engine)`;
+    const marker = supersedeMarker(taskId, generation);
+    assertSupersedeLeaseHeld(lease);
+    result.closeout_writes = [
+      appendCloseoutBlock(route.tracker_path, heading, marker, body),
+      appendCloseoutBlock(route.session_log_path, heading, marker, body),
+    ];
+    updateApplyJournal(journalPath, {
+      state: "files-written",
+      closeout_writes: result.closeout_writes,
+    });
+
+    if (parseJson(journalPath).capture_result) {
+      result.capture_result = "skipped: capture already journaled";
+    } else {
+      // The capture is this event's, not this run's: no run date, the event id in it, and
+      // pinned in the journal before it goes out. A retry after a lost response or a dead
+      // owner resends these exact bytes for capture_thought's content hash to collapse.
+      // That is at-least-once with a dedup, not exactly-once.
+      const journaled = parseJson(journalPath);
+      const captureContent = journaled.capture_content ??
+        asCloseoutCapture(`${eventBody} Event ${event.id}.`);
+      if (!String(captureContent).includes(event.id)) {
+        throw new Error(`Journal ${journalPath} pins a capture that does not name generation ${generation}'s event ${event.id}. Refusing to send it.`);
+      }
+      const captureTags = journaled.capture_tags ?? [route.capture_tag, "open_engine", "superseded"];
+      if (!journaled.capture_content) {
+        updateApplyJournal(journalPath, { capture_content: captureContent, capture_tags: captureTags });
+      }
+      result.capture_result = await mcpCall(config, "capture_thought", {
+        content: captureContent,
+        tags: captureTags,
+      });
+      updateApplyJournal(journalPath, {
+        state: "captures-written",
+        capture_result: result.capture_result,
+      });
+    }
+    updateApplyJournal(journalPath, {
+      state: "complete",
+      completed_at: new Date().toISOString(),
+    });
+    if (cardChanged) {
+      result.status = "HISTORY_REPAIRED_CARD_CHANGED";
+      result.live_status = task.status;
+      result.live_generations = index.latest;
+      result.message =
+        `History for generation ${generation} is complete. The card has changed since that close (status ${task.status}, ${index.latest} generation(s)), so this run did not close it. To close it again, read it and pass --generation ${index.latest + 1}.`;
+    } else {
+      result.status = repairGeneration !== null ? "HISTORY_REPAIRED" : "SUPERSEDED";
+    }
+  } catch (err) {
+    result.status = "PARTIAL";
+    result.error = String(err?.message || err);
+    result.retry = "Re-run the same command: the journal resumes the remaining writes.";
+    throw err;
+  } finally {
+    printResult(result);
+  }
+}
+
+// One generation's missing history, written from that generation's own event. The
+// journal is made to say what the board already shows, then the ordinary resume path
+// does the writes, so a repair and a retry are the same code and neither can reach the
+// verb: a generation that exists is never the next one.
+export async function runSupersedeRepair(cli, registry) {
+  return await withSupersedeLease(
+    cli,
+    cli.repairSupersedeTaskId,
+    "supersede-repair",
+    (lease) => repairUnderLease(cli, registry, lease),
+  );
+}
+
+async function repairUnderLease(cli, registry, lease) {
+  const config = mcpConfigFromEnv();
+  const taskId = cli.repairSupersedeTaskId;
+  const generation = cli.supersedeGeneration;
+  const hold = (reasons, extra = {}) => {
+    printResult({
+      status: "HELD",
+      mode: "supersede-repair",
+      dry_run: true,
+      board_mutations: false,
+      task_id: taskId,
+      generation,
+      reasons,
+      message: supersedeHoldMessage(reasons, generation),
+      ...extra,
+    });
+    throw new Error(`Refusing to repair: ${reasons.join(", ")}`);
+  };
+
+  const packet = await mcpCall(config, "get_agent_task", { task_id: taskId });
+  const task = packet?.task;
+  if (!task?.id) throw new Error("get_agent_task packet has no task.");
+  const index = indexSupersedeGenerations(packet?.events || []);
+  const problems = supersedeIdentityProblems(task, index);
+  if (problems.length > 0) hold(["SUPERSEDE_HISTORY_INVALID"], { problems });
+  const event = index.byGeneration.get(generation);
+  if (!event) hold(["REPAIR_GENERATION_NOT_FOUND"], { latest_generation: index.latest });
+  const eventArgs = eventSupersedeArgs(event);
+  if (!String(eventArgs.reason ?? "").trim()) {
+    hold(["SUPERSEDE_HISTORY_INVALID"], { problems: [`generation ${generation}'s event has no reason`] });
+  }
+
+  const routeReasons = [];
+  const route = supersedeRouteGate(task, registry, routeReasons);
+  if (routeReasons.length > 0) hold([...new Set(routeReasons)]);
+
+  let entry = readSupersedeJournals(cli.journalDir, taskId)
+    .find((candidate) => candidate.generation === generation) || null;
+  let retired = null;
+  if (entry) {
+    if (entry.journal.task_id !== taskId || entry.journal.generation !== generation) {
+      throw new Error(`Journal ${entry.path} does not describe generation ${generation} of card ${taskId}. Refusing to read it.`);
+    }
+    const verdict = classifySupersedeJournal(entry, index, eventArgs);
+    if (verdict === "lost-to-another") {
+      // An intent that never landed: another writer closed this generation with
+      // different arguments. The event is what happened.
+      retired = entry;
+      entry = null;
+    } else if (verdict !== "resume") {
+      throw new Error(`Journal ${entry.path} disagrees with generation ${generation}'s event (${verdict}). Refusing to write history from either.`);
+    }
+  }
+
+  const coverage = supersedeMarkerCoverage(route, supersedeMarker(taskId, generation));
+  const covered = coverage.tracker && coverage.sessionLog;
+  if (covered && (!entry || entry.journal.state === "complete")) {
+    printResult({
+      status: "ALREADY_RECORDED",
+      mode: "supersede-repair",
+      dry_run: true,
+      board_mutations: false,
+      task_id: taskId,
+      generation,
+      found_in: coverage.foundIn,
+    });
+    return;
+  }
+  if (cli.liveCheck) {
+    printResult({
+      status: "REPAIR_READY",
+      mode: "supersede-repair",
+      dry_run: true,
+      board_mutations: false,
+      task_id: taskId,
+      generation,
+      event_id: event.id,
+      superseded_at: event.created_at,
+      reason: eventArgs.reason,
+      superseded_by: eventArgs.by,
+      already_present: { tracker: coverage.tracker, session_log: coverage.sessionLog },
+    });
+    return;
+  }
+
+  if (retired) renameSync(retired.path, `${retired.path}.lost-to-another-${Date.now()}`);
+  mkdirSync(cli.journalDir, { recursive: true });
+  const journalPath = supersedeJournalPath(cli.journalDir, taskId, generation);
+  const stamp = {
+    state: "board-superseded",
+    event_id: event.id,
+    superseded_at: String(event.created_at),
+    repaired_at: new Date().toISOString(),
+  };
+  if (entry) {
+    // A complete journal whose markers are gone goes back a step; its capture stays
+    // journaled, so it is not sent twice. Any other journal already resumes.
+    if (entry.journal.state === "complete") updateApplyJournal(journalPath, stamp);
+  } else {
+    writeFileSync(journalPath, `${JSON.stringify({
+      version: 3,
+      kind: "supersede",
+      task_id: taskId,
+      generation,
+      project_slug: task.project_slug,
+      created_at: new Date().toISOString(),
+      args: { reason: eventArgs.reason, by: eventArgs.by },
+      ...stamp,
+    }, null, 2)}\n`, "utf8");
+  }
+
+  await supersedeUnderLease({
+    supersedeTaskId: taskId,
+    supersedeBy: eventArgs.by,
+    supersedeReason: eventArgs.reason,
+    supersedePremise: null,
+    supersedeGeneration: generation,
+    repairGeneration: generation,
+    journalDir: cli.journalDir,
+    liveCheck: false,
+  }, registry, lease);
 }
 
 async function completeCloseoutFromJournal(config, journalPath, result = null) {
@@ -2517,6 +3736,14 @@ async function main() {
   }
   if (args.operatorResolutionSweep) {
     await runOperatorResolutionSweep(args, loadRegistry(args.registry));
+    return;
+  }
+  if (args.supersedeTaskId) {
+    await runSupersede(args, loadRegistry(args.registry));
+    return;
+  }
+  if (args.repairSupersedeTaskId) {
+    await runSupersedeRepair(args, loadRegistry(args.registry));
     return;
   }
   if (args.auditUnrecorded) {

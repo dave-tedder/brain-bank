@@ -2,15 +2,24 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
+  copyFileSync,
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   appendResolutionBlock,
@@ -24,10 +33,15 @@ import {
   CLOSEOUT_CAPTURE_PREFIX,
   evaluate,
   evaluateResolutionSweep,
+  evaluateSupersede,
+  evaluateSupersedeHistoryAudit,
+  reconcileSupersedeInventory,
+  indexSupersedeGenerations,
   evaluateUnrecordedAudit,
   extractOperatorAction,
   scanCoversWindow,
   flipDocLineText,
+  parseArgs,
   parseCheckRef,
   parseCheckSpec,
   parseReceipt,
@@ -38,6 +52,11 @@ import {
   runExecutedCheck,
   runLive,
   runOperatorResolutionSweep,
+  runSupersede,
+  runSupersedeRepair,
+  runUnrecordedAudit,
+  supersedeAlreadyDone,
+  supersedeMarker,
   scanPlanDocDir,
   wasAutoPromoted,
 } from "./closeout-controller.mjs";
@@ -1933,7 +1952,7 @@ async function withMcpStub(handlers, fn) {
     calls.push({ name, args: rpc.params.arguments });
     const handler = handlers[name];
     if (!handler) throw new Error(`stub: no handler for ${name}`);
-    const payload = handler(rpc.params.arguments);
+    const payload = await handler(rpc.params.arguments);
     return new Response(JSON.stringify({
       jsonrpc: "2.0",
       id: rpc.id,
@@ -2056,4 +2075,2176 @@ test("closeout prefix (call site): --apply captures the prefixed batch draft aft
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// --- Task 3.4: --supersede ---------------------------------------------------
+
+const SUPERSEDE_ID = "aaaaaaaa-1111-4111-8111-111111111111";
+const REPLACEMENT_ID = "bbbbbbbb-2222-4222-8222-222222222222";
+
+function heldCard(overrides = {}) {
+  return {
+    id: SUPERSEDE_ID,
+    title: "held fixture",
+    status: "Agent Needs Input",
+    project_slug: "tmp-proj",
+    blocked_reason: "AGENT HUMAN HOLD: PACKET_PREMISE_STALE, the option was killed",
+    review_reason: null,
+    operator_action: null,
+    archived_at: null,
+    superseded_at: null,
+    superseded_reason: null,
+    superseded_by: null,
+    superseded_closed_generation: null,
+    ...overrides,
+  };
+}
+
+function supersedeDir() {
+  const dir = mkdtempSync(join(tmpdir(), "oe-supersede-"));
+  writeFileSync(join(dir, "PROJECT-TRACKER.md"), "# Tracker\n", "utf8");
+  writeFileSync(join(dir, "SESSION-LOG.md"), "# Log\n", "utf8");
+  return dir;
+}
+
+function supersedeCli(dir, overrides = {}) {
+  return {
+    supersedeTaskId: SUPERSEDE_ID,
+    supersedeBy: REPLACEMENT_ID,
+    supersedeReason: "duplicate of the replacement",
+    supersedePremise: null,
+    journalDir: join(dir, "journals"),
+    liveCheck: false,
+    ...overrides,
+  };
+}
+
+function closedRow(cli) {
+  return heldCard({
+    status: "Agent Done",
+    completed_at: "2026-11-06T12:00:00.000Z",
+    superseded_at: "2026-11-06T12:00:00.000Z",
+    superseded_reason: cli.supersedeReason,
+    superseded_by: cli.supersedeBy,
+    superseded_closed_generation: 1,
+    blocked_reason: null,
+  });
+}
+
+function supersededEvent(generation, reason, by, at) {
+  return {
+    id: `event-${generation}`,
+    event_type: "TASK SUPERSEDED",
+    created_at: at,
+    payload: { status: "Agent Done", generation, reason, superseded_by: by },
+  };
+}
+
+// What a reopen leaves behind: the status writer clears completed_at on any move off
+// Done, the trigger clears superseded_closed_generation, and the superseded_* columns
+// stay.
+function reopenCard(board, status = "Agent Review") {
+  board.state.row = { ...board.state.row, status, completed_at: null, superseded_closed_generation: null };
+}
+
+// A stub board: get_agent_task reads whatever the verb last wrote.
+function stubBoard(cli, overrides = {}) {
+  const state = { row: overrides.row || heldCard(), events: overrides.events || [] };
+  return {
+    state,
+    handlers: {
+      get_agent_task: ({ task_id }) => {
+        if (task_id === SUPERSEDE_ID) return { task: state.row, events: state.events };
+        return { task: overrides.replacement || { id: REPLACEMENT_ID, title: "the replacement", archived_at: null }, events: [] };
+      },
+      supersede_agent_task: (a) => {
+        const generation = state.events.length + 1;
+        const at = `2026-11-06T12:00:0${generation}.000Z`;
+        state.row = {
+          ...closedRow(cli),
+          completed_at: at,
+          superseded_at: at,
+          superseded_reason: a.reason,
+          superseded_by: a.superseded_by ?? null,
+          superseded_closed_generation: generation,
+        };
+        state.events = [...state.events, supersededEvent(generation, a.reason, a.superseded_by ?? null, at)];
+        return { receipt: "TASK SUPERSEDED", task: state.row };
+      },
+      capture_thought: overrides.capture || (() => "Captured as observation"),
+    },
+  };
+}
+
+test("supersede parseArgs: reason required, --by or --premise required, full uuids, no mixing", () => {
+  const base = ["--supersede", SUPERSEDE_ID, "--reason", "r"];
+  assert.throws(() => parseArgs(["--supersede", SUPERSEDE_ID, "--by", REPLACEMENT_ID]), /requires --reason/);
+  assert.throws(() => parseArgs(base), /requires --premise/);
+  assert.throws(() => parseArgs(["--supersede", "aaaaaaaa", "--reason", "r", "--premise", "p"]), /full task uuid/);
+  assert.throws(() => parseArgs([...base, "--by", "bbbbbbbb"]), /full task uuid/);
+  assert.throws(() => parseArgs([...base, "--by", REPLACEMENT_ID, "--apply", "--task-id", SUPERSEDE_ID]), /combines only/);
+  assert.throws(() => parseArgs(["--reason", "r"]), /require --supersede/);
+  assert.throws(() => parseArgs(["--generation", "2"]), /require --supersede/);
+  assert.throws(() => parseArgs([...base, "--by", REPLACEMENT_ID, "--generation", "0"]), /positive integer/);
+  assert.throws(() => parseArgs([...base, "--by", REPLACEMENT_ID, "--generation", "two"]), /positive integer/);
+  assert.equal(parseArgs([...base, "--by", REPLACEMENT_ID, "--generation", "2"]).supersedeGeneration, 2);
+  assert.equal(parseArgs([...base, "--by", REPLACEMENT_ID]).supersedeGeneration, null);
+  assert.equal(parseArgs([...base, "--premise", "p"]).supersedePremise, "p");
+  assert.equal(parseArgs([...base, "--by", REPLACEMENT_ID, "--live-check"]).liveCheck, true);
+});
+
+test("supersede gates: each hold fires on the input only it can catch", () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const replacement = { id: REPLACEMENT_ID, archived_at: null };
+    const run = (task, args, repl = replacement, reg = registry) =>
+      evaluateSupersede({ task, events: [], replacement: repl, args: { reason: "r", ...args }, registry: reg }).reasons;
+    assert.deepEqual(run(heldCard(), { by: REPLACEMENT_ID }), []);
+    assert.deepEqual(run(heldCard(), { premise: "packet_premise_stale,   the OPTION" }), [], "premise is whitespace and case tolerant");
+    assert.deepEqual(run(heldCard({ status: "Agent Todo" }), { by: REPLACEMENT_ID }), ["SUPERSEDE_STATUS_NOT_LEGAL"]);
+    assert.deepEqual(run(heldCard({ status: "Agent Done" }), { by: REPLACEMENT_ID }), ["SUPERSEDE_STATUS_NOT_LEGAL"]);
+    assert.deepEqual(run(heldCard({ archived_at: "2026-01-01" }), { by: REPLACEMENT_ID }), ["TASK_ARCHIVED"]);
+    assert.deepEqual(run(heldCard(), { by: SUPERSEDE_ID }), ["REPLACEMENT_IS_SELF"]);
+    assert.deepEqual(run(heldCard(), { by: REPLACEMENT_ID }, null), ["REPLACEMENT_NOT_FOUND"]);
+    assert.deepEqual(run(heldCard(), { by: REPLACEMENT_ID }, { id: REPLACEMENT_ID, archived_at: "2026-01-01" }), ["REPLACEMENT_ARCHIVED"]);
+    assert.deepEqual(run(heldCard({ blocked_reason: "a different hold now" }), { premise: "PACKET_PREMISE_STALE" }), ["PREMISE_NOTE_MISMATCH"]);
+    assert.deepEqual(run(heldCard({ project_slug: null }), { by: REPLACEMENT_ID }), ["MISSING_PROJECT_SLUG"]);
+    assert.deepEqual(run(heldCard({ project_slug: "nope" }), { by: REPLACEMENT_ID }), ["UNKNOWN_PROJECT_ROUTE"]);
+    const inWorktree = { "tmp-proj": { ...registry["tmp-proj"], tracker_path: "/x/.claude/worktrees/w/PROJECT-TRACKER.md" } };
+    assert.deepEqual(run(heldCard(), { by: REPLACEMENT_ID }, replacement, inWorktree), ["APPEND_TARGET_IN_WORKTREE"]);
+    const missing = { "tmp-proj": { ...registry["tmp-proj"], session_log_path: join(dir, "absent.md") } };
+    assert.deepEqual(run(heldCard(), { by: REPLACEMENT_ID }, replacement, missing), ["APPEND_TARGET_MISSING"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersedeAlreadyDone needs the closed generation, that generation's own event, and equal arguments", () => {
+  const args = { reason: "r", by: REPLACEMENT_ID };
+  const row = heldCard({ status: "Agent Done", completed_at: "x", superseded_at: "x", superseded_reason: "r", superseded_by: REPLACEMENT_ID, superseded_closed_generation: 1 });
+  const events = [supersededEvent(1, "r", REPLACEMENT_ID, "x")];
+  assert.equal(supersedeAlreadyDone(row, events, args), true);
+  assert.equal(supersedeAlreadyDone(row, [], args), false, "no event");
+  assert.equal(supersedeAlreadyDone({ ...row, superseded_by: null }, [], { reason: "", by: null }), false, "no event, even when the arguments are empty");
+  assert.equal(supersedeAlreadyDone({ ...row, status: "Needs Operator" }, events, args), false, "not Done");
+  assert.equal(supersedeAlreadyDone({ ...row, superseded_closed_generation: null }, events, args), false, "finished normally after a reopen");
+  assert.equal(supersedeAlreadyDone(row, events, { ...args, reason: "other" }), false, "other reason");
+  assert.equal(supersedeAlreadyDone(row, events, { ...args, by: null }), false, "other replacement");
+  // The closed generation's event decides, not whichever event comes first.
+  const two = [supersededEvent(1, "first", null, "x"), supersededEvent(2, "r", REPLACEMENT_ID, "x")];
+  assert.equal(supersedeAlreadyDone({ ...row, superseded_closed_generation: 2 }, two, args), true);
+  assert.equal(supersedeAlreadyDone({ ...row, superseded_closed_generation: 2 }, [...two].reverse(), args), true, "array order means nothing");
+  assert.equal(supersedeAlreadyDone({ ...row, superseded_closed_generation: 1 }, two, args), false, "generation 1 had other arguments");
+});
+
+test("supersede: journal is written before the verb, then tracker, log and prefixed capture", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const board = stubBoard(cli);
+    const journalPath = join(cli.journalDir, `${SUPERSEDE_ID}.supersede.g1.json`);
+    let journalStateAtVerb = null;
+    const verb = board.handlers.supersede_agent_task;
+    board.handlers.supersede_agent_task = (a) => {
+      journalStateAtVerb = JSON.parse(readFileSync(journalPath, "utf8")).state;
+      return verb(a);
+    };
+    const { calls } = await withMcpStub(board.handlers, () => runSupersede(cli, tmpRegistry(dir)));
+    assert.equal(journalStateAtVerb, "intent-written", "journal must exist before the verb runs");
+    assert.deepEqual(calls.map((c) => c.name), ["get_agent_task", "get_agent_task", "supersede_agent_task", "get_agent_task", "capture_thought"]);
+    const verbCall = calls[2];
+    assert.deepEqual(verbCall.args, { task_id: SUPERSEDE_ID, reason: cli.supersedeReason, actor: "operator", superseded_by: REPLACEMENT_ID, expected_generation: 1 });
+    for (const file of ["PROJECT-TRACKER.md", "SESSION-LOG.md"]) {
+      const text = readFileSync(join(dir, file), "utf8");
+      assert.ok(text.includes("## Superseded"), `${file} heading`);
+      assert.ok(text.includes(supersedeMarker(SUPERSEDE_ID, 1)), `${file} marker`);
+      assert.ok(text.includes(cli.supersedeReason), `${file} reason`);
+      assert.ok(text.includes("bbbbbbbb"), `${file} names the replacement`);
+      assert.ok(!text.includes(CLOSEOUT_CAPTURE_PREFIX), `${file} must not carry the capture prefix`);
+    }
+    assert.ok(calls[4].args.content.startsWith(`${CLOSEOUT_CAPTURE_PREFIX}\n`), "capture is bookkeeping");
+    assert.deepEqual(calls[4].args.tags, ["tmp_proj", "open_engine", "superseded"]);
+    assert.equal(JSON.parse(readFileSync(journalPath, "utf8")).state, "complete");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersede: a failed append followed by a retry completes without a second verb call", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const board = stubBoard(cli);
+    const registry = tmpRegistry(dir);
+    // The session log is gone at the moment of the append, after the gate passed.
+    const verb = board.handlers.supersede_agent_task;
+    board.handlers.supersede_agent_task = (a) => {
+      rmSync(join(dir, "SESSION-LOG.md"));
+      return verb(a);
+    };
+    await assert.rejects(
+      withMcpStub(board.handlers, () => runSupersede(cli, registry)),
+      /ENOENT/,
+    );
+    assert.equal(board.state.row.status, "Agent Done", "the verb landed before the failure");
+    writeFileSync(join(dir, "SESSION-LOG.md"), "# Log\n", "utf8");
+    board.handlers.supersede_agent_task = verb;
+    const { calls } = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.equal(calls.filter((c) => c.name === "supersede_agent_task").length, 0, "retry must not call the verb");
+    assert.equal(calls.filter((c) => c.name === "capture_thought").length, 1);
+    const tracker = readFileSync(join(dir, "PROJECT-TRACKER.md"), "utf8");
+    assert.equal(tracker.split(supersedeMarker(SUPERSEDE_ID, 1)).length, 2, "tracker appended exactly once across both runs");
+    assert.ok(readFileSync(join(dir, "SESSION-LOG.md"), "utf8").includes(supersedeMarker(SUPERSEDE_ID, 1)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersede: a capture failure retries the capture only; a completed journal writes nothing", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli, { capture: () => { throw new Error("capture down"); } });
+    await assert.rejects(withMcpStub(board.handlers, () => runSupersede(cli, registry)));
+    board.handlers.capture_thought = () => "Captured as observation";
+    const second = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.deepEqual(second.calls.map((c) => c.name).filter((n) => n !== "get_agent_task"), ["capture_thought"]);
+    const third = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.deepEqual([...new Set(third.calls.map((c) => c.name))], ["get_agent_task"], "a complete journal reads the card and writes nothing");
+    assert.ok(third.printed.join("\n").includes("ALREADY_COMPLETE"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersede: a card closed by the bare MCP verb gets its missing history without a second verb call", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const board = stubBoard(cli, { row: closedRow(cli), events: [supersededEvent(1, cli.supersedeReason, cli.supersedeBy, closedRow(cli).superseded_at)] });
+    const { calls } = await withMcpStub(board.handlers, () => runSupersede(cli, tmpRegistry(dir)));
+    assert.equal(calls.filter((c) => c.name === "supersede_agent_task").length, 0);
+    assert.ok(readFileSync(join(dir, "PROJECT-TRACKER.md"), "utf8").includes(supersedeMarker(SUPERSEDE_ID, 1)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersede refuses before any write: archived replacement, changed hold note, and a different retry", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const archived = stubBoard(cli, { replacement: { id: REPLACEMENT_ID, archived_at: "2026-01-01" } });
+    await assert.rejects(withMcpStub(archived.handlers, () => runSupersede(cli, registry)), /REPLACEMENT_ARCHIVED/);
+    assert.equal(existsSync(join(cli.journalDir, `${SUPERSEDE_ID}.supersede.g1.json`)), false, "no journal on a refusal");
+
+    const stale = supersedeCli(dir, { supersedeBy: null, supersedePremise: "PACKET_PREMISE_STALE" });
+    const changed = stubBoard(stale, { row: heldCard({ blocked_reason: "something else now" }) });
+    await assert.rejects(withMcpStub(changed.handlers, () => runSupersede(stale, registry)), /PREMISE_NOTE_MISMATCH/);
+    assert.equal(readFileSync(join(dir, "PROJECT-TRACKER.md"), "utf8"), "# Tracker\n", "nothing appended");
+
+    const ok = stubBoard(cli);
+    await withMcpStub(ok.handlers, () => runSupersede(cli, registry));
+    const different = supersedeCli(dir, { supersedeReason: "another reason" });
+    await assert.rejects(withMcpStub(ok.handlers, () => runSupersede(different, registry)), /ALREADY_SUPERSEDED_DIFFERENTLY/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersede --live-check writes nothing and calls no writer", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir, { liveCheck: true });
+    const board = stubBoard(cli);
+    const { calls, printed } = await withMcpStub(board.handlers, () => runSupersede(cli, tmpRegistry(dir)));
+    assert.deepEqual([...new Set(calls.map((c) => c.name))], ["get_agent_task"]);
+    assert.ok(printed.join("\n").includes("SUPERSEDE_READY"));
+    assert.equal(existsSync(cli.journalDir), false);
+    assert.equal(readFileSync(join(dir, "PROJECT-TRACKER.md"), "utf8"), "# Tracker\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a superseded card is skipped by the operator-resolution sweep, even with an earlier OPERATOR DONE", () => {
+  const dir = supersedeDir();
+  try {
+    const task = heldCard({ status: "Agent Done" });
+    const events = [
+      { event_type: "OPERATOR DONE", created_at: "2026-11-05T00:00:00Z", payload: { status: "Agent Done", completed_by: "The operator", note: "n".repeat(90) } },
+      { event_type: "TASK SUPERSEDED", created_at: "2026-11-06T00:00:00Z", payload: { status: "Agent Done", from_status: "Needs Operator" } },
+    ];
+    const result = evaluateResolutionSweep([{ task, events }], tmpRegistry(dir), { now: "2026-11-06T12:00:00Z" });
+    assert.deepEqual(result.appendable, []);
+    assert.deepEqual(result.skipped.map((s) => s.reason), ["NOT_OPERATOR_DONE"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersede: a capture already journaled is not sent again when only the complete stamp was lost", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    mkdirSync(cli.journalDir, { recursive: true });
+    writeFileSync(join(cli.journalDir, `${SUPERSEDE_ID}.supersede.g1.json`), JSON.stringify({
+      version: 3,
+      kind: "supersede",
+      state: "captures-written",
+      task_id: SUPERSEDE_ID,
+      generation: 1,
+      event_id: "event-1",
+      args: { reason: cli.supersedeReason, by: cli.supersedeBy },
+      capture_result: "Captured as observation",
+    }), "utf8");
+    const board = stubBoard(cli, { row: closedRow(cli), events: [supersededEvent(1, cli.supersedeReason, cli.supersedeBy, closedRow(cli).superseded_at)] });
+    const { calls, printed } = await withMcpStub(board.handlers, () => runSupersede(cli, tmpRegistry(dir)));
+    assert.equal(calls.filter((c) => c.name === "capture_thought").length, 0, "must not capture twice");
+    assert.ok(printed.join("\n").includes("SUPERSEDED"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersede: zero rows reads as a missing replacement; any other read failure stays an error", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const failing = (message) => {
+      const board = stubBoard(cli);
+      const read = board.handlers.get_agent_task;
+      board.handlers.get_agent_task = (a) => {
+        if (a.task_id === REPLACEMENT_ID) throw new Error(message);
+        return read(a);
+      };
+      return board.handlers;
+    };
+    await assert.rejects(
+      withMcpStub(failing("MCP get_agent_task tool error: Error fetching agent task: Cannot coerce the result to a single JSON object"), () => runSupersede(cli, tmpRegistry(dir))),
+      /REPLACEMENT_NOT_FOUND/,
+    );
+    await assert.rejects(
+      withMcpStub(failing("MCP get_agent_task HTTP 503: upstream down"), () => runSupersede(cli, tmpRegistry(dir))),
+      /HTTP 503/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- PR 19 amendment: generations, reopened cards, external worktrees ----------
+
+const supersedeCalls = (calls) => calls.filter((c) => c.name === "supersede_agent_task");
+const trackerText = (dir) => readFileSync(join(dir, "PROJECT-TRACKER.md"), "utf8");
+const occurrences = (text, needle) => text.split(needle).length - 1;
+const journalFile = (cli, generation) => join(cli.journalDir, `${SUPERSEDE_ID}.supersede.g${generation}.json`);
+const journalOf = (cli, generation) => JSON.parse(readFileSync(journalFile(cli, generation), "utf8"));
+
+test("regression: a partial retry repairs generation 1 and never closes the reopened card", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli, { capture: () => { throw new Error("capture down"); } });
+    await assert.rejects(withMcpStub(board.handlers, () => runSupersede(cli, registry)), /capture down/);
+    reopenCard(board);
+    board.handlers.capture_thought = () => "Captured as observation";
+    const retry = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.equal(supersedeCalls(retry.calls).length, 0, "the verb must not run again");
+    assert.equal(board.state.row.status, "Agent Review", "the reopened card stays open");
+    assert.equal(retry.calls.filter((c) => c.name === "capture_thought").length, 1, "history is finished");
+    const output = retry.printed.join("\n");
+    assert.ok(output.includes("HISTORY_REPAIRED_CARD_CHANGED"), output);
+    assert.ok(output.includes('"card_changed_since_generation": true'), output);
+    assert.equal(occurrences(trackerText(dir), supersedeMarker(SUPERSEDE_ID, 1)), 1);
+    assert.equal(journalOf(cli, 1).state, "complete");
+    assert.equal(journalOf(cli, 1).event_id, "event-1", "the landed event is journaled");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a lost verb response is adopted from the event even if the card was reopened", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    const verb = board.handlers.supersede_agent_task;
+    board.handlers.supersede_agent_task = (a) => {
+      verb(a);
+      throw new Error("MCP supersede_agent_task HTTP 503: response lost");
+    };
+    await assert.rejects(withMcpStub(board.handlers, () => runSupersede(cli, registry)), /response lost/);
+    assert.equal(journalOf(cli, 1).state, "intent-written", "the client never learned the verb landed");
+    reopenCard(board);
+    board.handlers.supersede_agent_task = verb;
+    const retry = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.equal(supersedeCalls(retry.calls).length, 0);
+    assert.equal(board.state.row.status, "Agent Review");
+    assert.equal(occurrences(trackerText(dir), supersedeMarker(SUPERSEDE_ID, 1)), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: replaying a completed command reads the card and holds a reopened one", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    reopenCard(board);
+    const replay = await withMcpStub(board.handlers, () =>
+      assert.rejects(runSupersede(cli, registry), /REOPENED_CARD_NEEDS_GENERATION/));
+    assert.ok(replay.calls.some((c) => c.name === "get_agent_task"), "the live card is read first");
+    assert.equal(supersedeCalls(replay.calls).length, 0, "no second verb call");
+    assert.ok(replay.printed.join("\n").includes("--generation 2"), "the hold names the next generation");
+    assert.ok(!replay.printed.join("\n").includes("ALREADY_COMPLETE"));
+    assert.equal(board.state.row.status, "Agent Review", "no second close");
+    assert.equal(board.state.events.length, 1, "no second event");
+    const after = await withMcpStub(board.handlers, () =>
+      runSupersede(supersedeCli(dir, { liveCheck: true, supersedeGeneration: 2 }), registry));
+    assert.ok(after.printed.join("\n").includes("SUPERSEDE_READY"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a second generation with --generation writes its own journal, history and capture", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    const first = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    reopenCard(board);
+    const second = await withMcpStub(board.handlers, () =>
+      runSupersede(supersedeCli(dir, { supersedeGeneration: 2 }), registry));
+    assert.deepEqual(supersedeCalls(second.calls).map((c) => c.args.expected_generation), [2]);
+    assert.equal(board.state.events.length, 2);
+    assert.equal(occurrences(trackerText(dir), supersedeMarker(SUPERSEDE_ID, 1)), 1);
+    assert.equal(occurrences(trackerText(dir), supersedeMarker(SUPERSEDE_ID, 2)), 1);
+    assert.equal(occurrences(readFileSync(join(dir, "SESSION-LOG.md"), "utf8"), supersedeMarker(SUPERSEDE_ID, 2)), 1);
+    assert.equal(journalOf(cli, 1).state, "complete", "generation 1's journal is left as it was");
+    assert.equal(journalOf(cli, 2).state, "complete");
+    const captures = [first, second].map((run) => run.calls.find((c) => c.name === "capture_thought").args.content);
+    assert.notEqual(captures[0], captures[1], "the fingerprint dedup must not swallow generation 2's capture");
+    assert.ok(captures[1].includes("supersede generation 2"));
+
+    const replay = await withMcpStub(board.handlers, () =>
+      runSupersede(supersedeCli(dir, { supersedeGeneration: 2 }), registry));
+    assert.equal(supersedeCalls(replay.calls).length, 0);
+    assert.ok(replay.printed.join("\n").includes("ALREADY_COMPLETE"));
+    assert.ok(replay.printed.join("\n").includes('"generation": 2'));
+
+    reopenCard(board);
+    await assert.rejects(
+      withMcpStub(board.handlers, () => runSupersede(supersedeCli(dir, { supersedeGeneration: 2 }), registry)),
+      /GENERATION_MISMATCH/,
+      "the old authorization does not close the card a third time",
+    );
+    assert.equal(board.state.events.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a new reason on a reopened card is not stuck behind the old journal", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    reopenCard(board);
+    const fresh = supersedeCli(dir, { supersedeReason: "a new reason", supersedeGeneration: 2 });
+    const run = await withMcpStub(board.handlers, () => runSupersede(fresh, registry));
+    assert.deepEqual(supersedeCalls(run.calls).map((c) => c.args.reason), ["a new reason"]);
+    assert.ok(trackerText(dir).includes("a new reason"));
+    assert.equal(journalOf(cli, 1).args.reason, cli.supersedeReason);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a replay on a card still closed reads it, then answers ALREADY_COMPLETE with a stale generation refused", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    const replay = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.ok(replay.calls.some((c) => c.name === "get_agent_task"));
+    assert.ok(replay.printed.join("\n").includes("ALREADY_COMPLETE"));
+    await assert.rejects(
+      withMcpStub(board.handlers, () => runSupersede(supersedeCli(dir, { supersedeGeneration: 2 }), registry)),
+      /GENERATION_MISMATCH/,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a card reopened and then finished normally is not treated as superseded", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    // Stale columns, same arguments, the old event still there. Only the cleared
+    // closed generation tells; a timestamp could not inside one transaction.
+    board.state.row = { ...board.state.row, status: "Agent Done", completed_at: board.state.row.superseded_at, superseded_closed_generation: null };
+    await assert.rejects(
+      withMcpStub(board.handlers, () => runSupersede(cli, registry)),
+      /SUPERSEDE_STATUS_NOT_LEGAL/,
+    );
+    assert.equal(supersedeAlreadyDone(board.state.row, board.state.events, { reason: cli.supersedeReason, by: cli.supersedeBy }), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: an unlanded intent can be retried or replaced; a landed one cannot be remixed", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    const verb = board.handlers.supersede_agent_task;
+    board.handlers.supersede_agent_task = () => { throw new Error("MCP supersede_agent_task HTTP 503: never reached"); };
+    await assert.rejects(withMcpStub(board.handlers, () => runSupersede(cli, registry)), /never reached/);
+    assert.equal(journalOf(cli, 1).state, "intent-written");
+
+    // --live-check reports the replacement and leaves the file where it is.
+    const fresh = supersedeCli(dir, { supersedeReason: "a better reason" });
+    const preview = await withMcpStub(board.handlers, () =>
+      runSupersede({ ...fresh, liveCheck: true }, registry));
+    assert.ok(preview.printed.join("\n").includes("replace-intent"));
+    assert.equal(journalOf(cli, 1).args.reason, cli.supersedeReason);
+
+    board.handlers.supersede_agent_task = verb;
+    const run = await withMcpStub(board.handlers, () => runSupersede(fresh, registry));
+    assert.deepEqual(supersedeCalls(run.calls).map((c) => c.args.reason), ["a better reason"]);
+    assert.equal(journalOf(cli, 1).args.reason, "a better reason");
+    assert.ok(
+      readdirSync(cli.journalDir).some((name) => name.startsWith(`${SUPERSEDE_ID}.supersede.g1.json.replace-intent-`)),
+      "the replaced intent is kept as evidence",
+    );
+
+    const landedDir = supersedeDir();
+    try {
+      const landed = supersedeCli(landedDir);
+      const landedRegistry = tmpRegistry(landedDir);
+      const partial = stubBoard(landed, { capture: () => { throw new Error("capture down"); } });
+      await assert.rejects(withMcpStub(partial.handlers, () => runSupersede(landed, landedRegistry)));
+      const before = partial.state.events.length;
+      await assert.rejects(
+        withMcpStub(partial.handlers, () =>
+          runSupersede(supersedeCli(landedDir, { supersedeReason: "another reason" }), landedRegistry)),
+        /different reason or replacement/,
+      );
+      assert.equal(partial.state.events.length, before);
+    } finally {
+      rmSync(landedDir, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: an intent another writer beat is retired, and no history is written from it", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const other = "somebody else's reason";
+    const board = stubBoard(cli, {
+      row: { ...closedRow(cli), superseded_reason: other },
+      events: [supersededEvent(1, other, cli.supersedeBy, closedRow(cli).superseded_at)],
+    });
+    mkdirSync(cli.journalDir, { recursive: true });
+    writeFileSync(journalFile(cli, 1), JSON.stringify({
+      version: 3, kind: "supersede", state: "intent-written", task_id: SUPERSEDE_ID, generation: 1,
+      args: { reason: cli.supersedeReason, by: cli.supersedeBy },
+    }), "utf8");
+    await assert.rejects(
+      withMcpStub(board.handlers, () => runSupersede(cli, registry)),
+      /ALREADY_SUPERSEDED_DIFFERENTLY/,
+    );
+    assert.equal(existsSync(journalFile(cli, 1)), false);
+    assert.equal(trackerText(dir), "# Tracker\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a journal the board does not back is refused, never written as history", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    mkdirSync(cli.journalDir, { recursive: true });
+    const seed = (state) => writeFileSync(journalFile(cli, 1), JSON.stringify({
+      version: 3, kind: "supersede", state, task_id: SUPERSEDE_ID, generation: 1, event_id: "event-1",
+      args: { reason: cli.supersedeReason, by: cli.supersedeBy },
+    }), "utf8");
+    for (const state of ["board-superseded", "complete"]) {
+      seed(state);
+      const board = stubBoard(cli);
+      await assert.rejects(withMcpStub(board.handlers, () => runSupersede(cli, registry)), /Refusing/);
+      assert.equal(trackerText(dir), "# Tracker\n", state);
+      assert.equal(board.state.events.length, 0, state);
+    }
+    seed("board-superseded");
+    const mismatched = stubBoard(cli, {
+      row: { ...closedRow(cli), superseded_reason: "some other reason" },
+      events: [supersededEvent(1, "some other reason", cli.supersedeBy, "2026-11-06T12:00:00.000Z")],
+    });
+    await assert.rejects(withMcpStub(mismatched.handlers, () => runSupersede(cli, registry)), /event-mismatch/);
+    assert.equal(trackerText(dir), "# Tracker\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: GAP C reads the real checkout, not a directory name", () => {
+  const base = mkdtempSync(join(realpathSync(tmpdir()), "oe-gapc-"));
+  try {
+    const main = join(base, "main");
+    mkdirSync(main);
+    const git = (...args) => execFileSync("git", ["-C", main, "-c", "user.email=oe@test", "-c", "user.name=oe-test", ...args], { stdio: "pipe" });
+    git("init", "-q");
+    writeFileSync(join(main, "PROJECT-TRACKER.md"), "# T\n");
+    writeFileSync(join(main, "SESSION-LOG.md"), "# L\n");
+    git("add", "-A");
+    git("commit", "-q", "-m", "seed");
+    const external = join(base, "plain-named-folder");
+    git("worktree", "add", "-q", "--detach", external);
+    const reasonsFor = (trackerPath, logPath = trackerPath) => evaluateSupersede({
+      task: heldCard(),
+      events: [],
+      replacement: { id: REPLACEMENT_ID },
+      args: { reason: "r", by: REPLACEMENT_ID },
+      registry: { "tmp-proj": { tracker_path: trackerPath, session_log_path: logPath } },
+    }).reasons;
+
+    assert.deepEqual(reasonsFor(join(main, "PROJECT-TRACKER.md"), join(main, "SESSION-LOG.md")), [], "main checkout passes");
+    assert.deepEqual(
+      [...new Set(reasonsFor(join(external, "PROJECT-TRACKER.md"), join(external, "SESSION-LOG.md")))],
+      ["APPEND_TARGET_IN_WORKTREE"],
+      "a worktree with an ordinary name is refused",
+    );
+    assert.deepEqual(reasonsFor(join(main, "PROJECT-TRACKER.md"), join(external, "SESSION-LOG.md")), ["APPEND_TARGET_IN_WORKTREE"], "one bad path is enough");
+
+    const links = join(base, "links");
+    mkdirSync(links);
+    symlinkSync(join(external, "PROJECT-TRACKER.md"), join(links, "tracker.md"));
+    symlinkSync(external, join(links, "dir"));
+    assert.deepEqual(reasonsFor(join(links, "tracker.md"), join(main, "SESSION-LOG.md")), ["APPEND_TARGET_IN_WORKTREE"], "a symlink to a worktree file");
+    assert.deepEqual(reasonsFor(join(links, "dir", "SESSION-LOG.md"), join(main, "SESSION-LOG.md")), ["APPEND_TARGET_IN_WORKTREE"], "a symlinked worktree directory");
+    symlinkSync(join(main, "PROJECT-TRACKER.md"), join(links, "main-tracker.md"));
+    assert.deepEqual(reasonsFor(join(links, "main-tracker.md"), join(main, "SESSION-LOG.md")), [], "a symlink into main is main");
+
+    mkdirSync(join(external, "sub"));
+    writeFileSync(join(external, "sub", "T.md"), "# T\n");
+    assert.deepEqual(reasonsFor(join(external, "sub", "T.md"), join(main, "SESSION-LOG.md")), ["APPEND_TARGET_IN_WORKTREE"], "a nested path");
+
+    const bare = join(base, "not-git");
+    mkdirSync(bare);
+    writeFileSync(join(bare, "T.md"), "# T\n");
+    assert.deepEqual(reasonsFor(join(bare, "T.md"), join(main, "SESSION-LOG.md")), [], "no repository at all is not a worktree");
+
+    const submodule = join(base, "sub-checkout");
+    mkdirSync(submodule);
+    // A gitdir of its own, as .git/modules/<name> is. It has to be a real one now: an
+    // empty directory is not a git directory, to git or to this check.
+    execFileSync("git", ["init", "-q", "--bare", join(base, "modules-gitdir")], { stdio: "pipe" });
+    writeFileSync(join(submodule, ".git"), `gitdir: ${join(base, "modules-gitdir")}\n`);
+    writeFileSync(join(submodule, "T.md"), "# T\n");
+    assert.deepEqual(reasonsFor(join(submodule, "T.md"), join(main, "SESSION-LOG.md")), [], "a submodule has a .git file but no commondir");
+
+    for (const [name, content] of [
+      ["pruned", `gitdir: ${join(base, "gone")}\n`],
+      ["garbled", "not a gitdir line\n"],
+    ]) {
+      const odd = join(base, name);
+      mkdirSync(odd);
+      writeFileSync(join(odd, ".git"), content);
+      writeFileSync(join(odd, "T.md"), "# T\n");
+      assert.deepEqual(reasonsFor(join(odd, "T.md"), join(main, "SESSION-LOG.md")), ["APPEND_TARGET_IN_WORKTREE"], `${name} fails closed`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("regression: premise wording claims only what a fragment match proves", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    // The documented limit: everything but the quoted text changed, and it still passes.
+    const changed = heldCard({
+      blocked_reason: "AGENT HUMAN HOLD: PACKET_PREMISE_STALE, plus a brand new instruction",
+      operator_action: "a different operator step",
+      review_reason: "a new review note",
+    });
+    assert.deepEqual(
+      evaluateSupersede({ task: changed, events: [], replacement: null, args: { reason: "r", premise: "PACKET_PREMISE_STALE" }, registry }).reasons,
+      [],
+    );
+    let parseMessage = "";
+    try {
+      parseArgs(["--supersede", SUPERSEDE_ID, "--reason", "r"]);
+    } catch (err) {
+      parseMessage = err.message;
+    }
+    assert.match(parseMessage, /does not prove the rest of the card is unchanged/);
+    assert.doesNotMatch(parseMessage, /card that changed since you read it is refused/);
+
+    const stale = supersedeCli(dir, { supersedeBy: null, supersedePremise: "gone text" });
+    const board = stubBoard(stale);
+    const { printed } = await withMcpStub(board.handlers, () =>
+      assert.rejects(runSupersede(stale, registry), /PREMISE_NOTE_MISMATCH/));
+    const held = printed.join("\n");
+    assert.match(held, /quoted text is gone/);
+    assert.doesNotMatch(held, /card changed since it was read/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: repairing generation 1 after a bare close of generation 2 dates and reports the right one", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    // The session log is gone at the moment of the append, so generation 1's log
+    // block is still to be written when the retry comes.
+    const verb = board.handlers.supersede_agent_task;
+    board.handlers.supersede_agent_task = (a) => {
+      rmSync(join(dir, "SESSION-LOG.md"));
+      return verb(a);
+    };
+    await assert.rejects(withMcpStub(board.handlers, () => runSupersede(cli, registry)), /ENOENT/);
+    writeFileSync(join(dir, "SESSION-LOG.md"), "# Log\n", "utf8");
+    board.handlers.supersede_agent_task = verb;
+    // Someone reopened the card and closed it again through the bare MCP tool, same
+    // arguments, two weeks later. The card reads closed, by a different generation.
+    const later = "2026-11-20T09:00:00.000Z";
+    board.state.row = { ...board.state.row, status: "Agent Done", completed_at: later, superseded_at: later, superseded_closed_generation: 2 };
+    board.state.events = [...board.state.events, supersededEvent(2, cli.supersedeReason, cli.supersedeBy, later)];
+    const retry = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.equal(supersedeCalls(retry.calls).length, 0);
+    const output = retry.printed.join("\n");
+    assert.ok(output.includes("HISTORY_REPAIRED_CARD_CHANGED"), "generation 2 is not this run's to report as done");
+    assert.ok(output.includes("2 generation(s)"), output);
+    const log = readFileSync(join(dir, "SESSION-LOG.md"), "utf8");
+    assert.ok(log.includes("## Superseded — 2026-11-06"), "dated from generation 1's own event");
+    assert.ok(!log.includes("2026-11-20"), "the columns already describe generation 2");
+    assert.equal(occurrences(log, supersedeMarker(SUPERSEDE_ID, 2)), 0, "generation 2's history is a separate run");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- PR 19 second amendment: explicit generation identity, checkout ancestry ------
+
+// One card through three generations, read back in the order PostgreSQL produced for
+// serialized closes whose transactions started out of order: 1, 3, 2.
+function threeGenerationBoard(cli, reasons = ["reason one", "reason two", "reason three"]) {
+  const events = [
+    supersededEvent(1, reasons[0], cli.supersedeBy, "2026-11-01T12:00:00.000Z"),
+    supersededEvent(3, reasons[2], cli.supersedeBy, "2026-11-03T12:00:00.000Z"),
+    supersededEvent(2, reasons[1], cli.supersedeBy, "2026-11-02T12:00:00.000Z"),
+  ];
+  return stubBoard(cli, {
+    events,
+    row: { ...closedRow(cli), superseded_reason: reasons[2], superseded_closed_generation: 3, superseded_at: events[1].created_at, completed_at: events[1].created_at },
+  });
+}
+
+function seedJournal(cli, generation, fields) {
+  mkdirSync(cli.journalDir, { recursive: true });
+  writeFileSync(journalFile(cli, generation), JSON.stringify({
+    version: 3, kind: "supersede", task_id: SUPERSEDE_ID, generation,
+    args: { reason: cli.supersedeReason, by: cli.supersedeBy },
+    ...fields,
+  }), "utf8");
+}
+
+test("indexSupersedeGenerations keys on payload.generation and reports every malformed history", () => {
+  const ev = (generation, id = `e${generation}`) => ({ id, event_type: "TASK SUPERSEDED", payload: { generation } });
+  const index = indexSupersedeGenerations([ev(3), { event_type: "AGENT STATUS", payload: { generation: 99 } }, ev(1), ev(2)]);
+  assert.deepEqual(index.problems, []);
+  assert.equal(index.latest, 3);
+  assert.equal(index.byGeneration.get(2).id, "e2");
+  assert.deepEqual(indexSupersedeGenerations([]), { byGeneration: new Map(), latest: 0, problems: [] });
+  const problems = (events) => indexSupersedeGenerations(events).problems;
+  assert.match(problems([ev(1), ev(1, "other")]).join(), /generation 1 appears on more than one event/);
+  assert.match(problems([ev(1), ev(3)]).join(), /run to 3 but only 2/);
+  assert.match(problems([ev(2)]).join(), /run to 2 but only 1/);
+  for (const bad of ["2", null, undefined, 0, -1, 1.5, true, {}]) {
+    assert.match(problems([ev(bad, "bad")]).join(), /event bad names no valid generation/, JSON.stringify(bad));
+  }
+  assert.match(problems([{ event_type: "TASK SUPERSEDED", payload: {} }]).join(), /\(no id\) names no valid generation/);
+  assert.match(problems([{ event_type: "TASK SUPERSEDED" }]).join(), /names no valid generation/);
+});
+
+for (const [label, reasons] of [
+  ["different reasons", ["reason one", "reason two", "reason three"]],
+  ["identical reasons", ["same reason", "same reason", "same reason"]],
+]) {
+  test(`regression: events read back 1, 3, 2 with ${label}: repairing generation 2 uses generation 2's event`, async () => {
+    const dir = supersedeDir();
+    try {
+      const cli = supersedeCli(dir, { supersedeReason: reasons[1] });
+      const board = threeGenerationBoard(cli, reasons);
+      seedJournal(cli, 2, { state: "board-superseded", event_id: "event-2" });
+      const { calls, printed } = await withMcpStub(board.handlers, () => runSupersede(cli, tmpRegistry(dir)));
+      assert.equal(supersedeCalls(calls).length, 0, "the verb must not run");
+      const journal = journalOf(cli, 2);
+      assert.equal(journal.state, "complete");
+      assert.equal(journal.event_id, "event-2", "array slot 1 holds generation 3's event");
+      assert.equal(journal.superseded_at, "2026-11-02T12:00:00.000Z", "dated from generation 2's event");
+      const log = readFileSync(join(dir, "SESSION-LOG.md"), "utf8");
+      assert.ok(log.includes("## Superseded — 2026-11-02"), log);
+      assert.ok(!log.includes("2026-11-03"), "generation 3's date must not appear");
+      assert.equal(occurrences(log, supersedeMarker(SUPERSEDE_ID, 2)), 1);
+      assert.equal(occurrences(log, supersedeMarker(SUPERSEDE_ID, 3)), 0);
+      assert.ok(printed.join("\n").includes("HISTORY_REPAIRED_CARD_CHANGED"), "generation 3 closed it, not this run");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`regression: tied timestamps with ${label}: a lost response adopts the journaled generation`, async () => {
+    const dir = supersedeDir();
+    try {
+      const cli = supersedeCli(dir, { supersedeReason: reasons[1] });
+      const tie = "2026-11-02T12:00:00.000Z";
+      const events = [3, 1, 2].map((g) => ({ ...supersededEvent(g, reasons[g - 1], cli.supersedeBy, tie) }));
+      const board = stubBoard(cli, {
+        events,
+        row: { ...closedRow(cli), superseded_reason: reasons[2], superseded_closed_generation: 3, superseded_at: tie, completed_at: tie },
+      });
+      seedJournal(cli, 2, { state: "intent-written" });
+      const { calls } = await withMcpStub(board.handlers, () => runSupersede(cli, tmpRegistry(dir)));
+      assert.equal(supersedeCalls(calls).length, 0);
+      assert.equal(journalOf(cli, 2).event_id, "event-2");
+      assert.equal(occurrences(trackerText(dir), supersedeMarker(SUPERSEDE_ID, 2)), 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("regression: a replay of the live close finds its event by the closed generation in any order", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir, { supersedeReason: "reason three" });
+    const board = threeGenerationBoard(cli);
+    const { calls } = await withMcpStub(board.handlers, () => runSupersede(cli, tmpRegistry(dir)));
+    assert.equal(supersedeCalls(calls).length, 0);
+    assert.equal(journalOf(cli, 3).event_id, "event-3");
+    assert.ok(trackerText(dir).includes("## Superseded — 2026-11-03"));
+    assert.equal(occurrences(trackerText(dir), supersedeMarker(SUPERSEDE_ID, 3)), 1);
+    // A reopened card's next generation is the highest number plus one, in any order.
+    reopenCard(board);
+    await assert.rejects(withMcpStub(board.handlers, () => runSupersede(cli, tmpRegistry(dir))), /REOPENED_CARD_NEEDS_GENERATION/);
+    assert.equal(evaluateSupersede({ task: board.state.row, events: board.state.events, replacement: { id: REPLACEMENT_ID }, args: { reason: "x", by: REPLACEMENT_ID, generation: 4 }, registry: tmpRegistry(dir) }).generation, 4);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a malformed generation history holds every path before any journal or write", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const e = (generation, id) => ({ ...supersededEvent(generation, cli.supersedeReason, cli.supersedeBy, "2026-11-01T00:00:00Z"), id });
+    const histories = {
+      missing: [{ id: "x", event_type: "TASK SUPERSEDED", created_at: "2026-11-01T00:00:00Z", payload: { reason: cli.supersedeReason, superseded_by: cli.supersedeBy } }],
+      string: [e("1", "x")],
+      duplicate: [e(1, "x"), e(1, "y")],
+      gap: [e(1, "x"), e(3, "y")],
+    };
+    for (const [label, events] of Object.entries(histories)) {
+      for (const state of ["intent-written", "board-superseded", "complete"]) {
+        seedJournal(cli, 1, { state, event_id: "x" });
+        const before = readFileSync(journalFile(cli, 1), "utf8");
+        const board = stubBoard(cli, { row: heldCard({ status: "Needs Operator" }), events });
+        const { calls, printed } = await withMcpStub(board.handlers, () =>
+          assert.rejects(runSupersede(cli, registry), /SUPERSEDE_HISTORY_INVALID/, `${label} ${state}`));
+        assert.deepEqual(calls.map((c) => c.name), ["get_agent_task"], `${label} ${state}: nothing but the read`);
+        assert.ok(printed.join("\n").includes('"problems"'), "the hold says what is wrong");
+        assert.equal(readFileSync(journalFile(cli, 1), "utf8"), before, `${label} ${state}: journal untouched`);
+        assert.equal(trackerText(dir), "# Tracker\n", `${label} ${state}`);
+      }
+    }
+    const gated = evaluateSupersede({ task: heldCard(), events: histories.gap, replacement: { id: REPLACEMENT_ID }, args: { reason: "r", by: REPLACEMENT_ID }, registry });
+    assert.deepEqual(gated.reasons, ["SUPERSEDE_HISTORY_INVALID"]);
+    assert.equal(gated.generation, null, "no number is offered from a broken history");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: the card and its events must agree on which generation closed it", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const events = [supersededEvent(1, cli.supersedeReason, cli.supersedeBy, "2026-11-01T00:00:00Z")];
+    const held = async (row, boardEvents, pattern) => {
+      const board = stubBoard(cli, { row, events: boardEvents });
+      const { calls, printed } = await withMcpStub(board.handlers, () =>
+        assert.rejects(runSupersede(cli, registry), /SUPERSEDE_HISTORY_INVALID/));
+      assert.deepEqual(calls.map((c) => c.name), ["get_agent_task"]);
+      assert.match(printed.join("\n"), pattern);
+    };
+    await held({ ...closedRow(cli), superseded_closed_generation: 2 }, events, /says generation 2 closed it, but its events end at generation 1/);
+    await held({ ...closedRow(cli), superseded_closed_generation: 1 }, [...events, supersededEvent(2, cli.supersedeReason, cli.supersedeBy, "2026-11-02T00:00:00Z")], /says generation 1 closed it, but its events end at generation 2/);
+    await held({ ...closedRow(cli), superseded_closed_generation: 1 }, [], /says generation 1 closed it, but its events end at generation 0/);
+    await held({ ...closedRow(cli), superseded_reason: "edited by hand" }, events, /reason or replacement differs/);
+    await held({ ...closedRow(cli), superseded_by: null }, events, /reason or replacement differs/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a journal past its intent must name the very event it saw", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = () => stubBoard(cli, {
+      row: closedRow(cli),
+      events: [supersededEvent(1, cli.supersedeReason, cli.supersedeBy, "2026-11-01T00:00:00Z")],
+    });
+    seedJournal(cli, 1, { state: "complete", event_id: "not-event-1" });
+    await assert.rejects(withMcpStub(board().handlers, () => runSupersede(cli, registry)), /completed, but the board's events do not back it \(event-mismatch/);
+    seedJournal(cli, 1, { state: "complete", event_id: "event-1", args: { reason: "another", by: cli.supersedeBy } });
+    await assert.rejects(withMcpStub(board().handlers, () => runSupersede(cli, registry)), /event-mismatch/);
+    seedJournal(cli, 1, { state: "board-superseded", event_id: "not-event-1" });
+    await assert.rejects(withMcpStub(board().handlers, () => runSupersede(cli, registry)), /event-mismatch/);
+    assert.equal(trackerText(dir), "# Tracker\n");
+    // The positive control: the same journal naming the right event finishes.
+    seedJournal(cli, 1, { state: "board-superseded", event_id: "event-1" });
+    await withMcpStub(board().handlers, () => runSupersede(cli, registry));
+    assert.equal(journalOf(cli, 1).state, "complete");
+    // A completed journal with no event id at all is not trusted either.
+    seedJournal(cli, 1, { state: "complete" });
+    await assert.rejects(withMcpStub(board().handlers, () => runSupersede(cli, registry)), /event-mismatch/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a journal whose body disagrees with its file name is refused", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    for (const fields of [{ generation: 2 }, { generation: "1" }, { task_id: REPLACEMENT_ID }]) {
+      seedJournal(cli, 1, { state: "intent-written", ...fields });
+      const board = stubBoard(cli);
+      const { calls } = await withMcpStub(board.handlers, () =>
+        assert.rejects(runSupersede(cli, registry), /does not describe generation 1/));
+      assert.equal(supersedeCalls(calls).length, 0, JSON.stringify(fields));
+    }
+    rmSync(journalFile(cli, 1));
+    writeFileSync(join(cli.journalDir, `${SUPERSEDE_ID}.supersede.g0.json`), JSON.stringify({ state: "intent-written", task_id: SUPERSEDE_ID, generation: 0, args: {} }), "utf8");
+    await withMcpStub(stubBoard(cli).handlers, () =>
+      assert.rejects(runSupersede(cli, registry), /does not describe generation 0/));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a read-back lost after the verb resumes from the event, once", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const board = stubBoard(cli);
+    const read = board.handlers.get_agent_task;
+    let verbRan = false;
+    const verb = board.handlers.supersede_agent_task;
+    board.handlers.supersede_agent_task = (a) => { verbRan = true; return verb(a); };
+    board.handlers.get_agent_task = (a) => {
+      if (verbRan && a.task_id === SUPERSEDE_ID) throw new Error("MCP get_agent_task HTTP 503: read-back lost");
+      return read(a);
+    };
+    await assert.rejects(withMcpStub(board.handlers, () => runSupersede(cli, registry)), /read-back lost/);
+    assert.equal(journalOf(cli, 1).state, "intent-written", "no history from a close it could not see");
+    assert.equal(trackerText(dir), "# Tracker\n");
+    board.handlers.get_agent_task = read;
+    const retry = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.equal(supersedeCalls(retry.calls).length, 0);
+    assert.equal(journalOf(cli, 1).event_id, "event-1");
+    assert.equal(occurrences(trackerText(dir), supersedeMarker(SUPERSEDE_ID, 1)), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: the verb returning without its event, or with another writer's, writes no history", async () => {
+  const dir = supersedeDir();
+  try {
+    const cli = supersedeCli(dir);
+    const registry = tmpRegistry(dir);
+    const noEvent = stubBoard(cli);
+    noEvent.handlers.supersede_agent_task = () => ({ receipt: "TASK SUPERSEDED", task: noEvent.state.row });
+    await assert.rejects(withMcpStub(noEvent.handlers, () => runSupersede(cli, registry)), /event is not readable/);
+    assert.equal(trackerText(dir), "# Tracker\n");
+    rmSync(cli.journalDir, { recursive: true, force: true });
+    const otherArgs = stubBoard(cli);
+    const verb = otherArgs.handlers.supersede_agent_task;
+    otherArgs.handlers.supersede_agent_task = (a) => verb({ ...a, reason: "another writer's reason" });
+    await assert.rejects(withMcpStub(otherArgs.handlers, () => runSupersede(cli, registry)), /event is not readable/);
+    assert.equal(trackerText(dir), "# Tracker\n");
+    rmSync(cli.journalDir, { recursive: true, force: true });
+    const broken = stubBoard(cli);
+    const brokenVerb = broken.handlers.supersede_agent_task;
+    broken.handlers.supersede_agent_task = (a) => {
+      const out = brokenVerb(a);
+      broken.state.events = [...broken.state.events, supersededEvent(1, a.reason, a.superseded_by, "2026-11-01T00:00:00Z")];
+      return out;
+    };
+    await assert.rejects(withMcpStub(broken.handlers, () => runSupersede(cli, registry)), /event is not readable/);
+    assert.equal(trackerText(dir), "# Tracker\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: GAP C walks every containing checkout: nested repositories and submodules", () => {
+  const base = mkdtempSync(join(realpathSync(tmpdir()), "oe-gapc-ancestry-"));
+  try {
+    const run = (cwd, ...args) => execFileSync("git", ["-C", cwd, "-c", "user.email=oe@test", "-c", "user.name=oe-test", "-c", "protocol.file.allow=always", ...args], { stdio: "pipe" });
+    const seedRepo = (path) => {
+      mkdirSync(path, { recursive: true });
+      run(path, "init", "-q");
+      writeFileSync(join(path, "T.md"), "# T\n");
+      run(path, "add", "-A");
+      run(path, "commit", "-q", "-m", "seed");
+    };
+    const main = join(base, "main");
+    const source = join(base, "module-source");
+    seedRepo(main);
+    seedRepo(source);
+    run(main, "submodule", "add", "-q", source, "module");
+    run(main, "commit", "-q", "-m", "add module");
+    const linked = join(base, "plain-named-folder");
+    run(main, "worktree", "add", "-q", "--detach", linked);
+    run(linked, "submodule", "update", "--init", "-q");
+    assert.ok(existsSync(join(linked, "module", "T.md")), "fixture: the submodule really is initialized in the linked worktree");
+    assert.ok(statSync(join(linked, "module", ".git")).isFile(), "fixture: a real submodule has a .git file");
+    assert.ok(statSync(join(linked, ".git")).isFile(), "fixture: a real linked worktree has a .git file");
+
+    const mainSafe = join(main, "T.md");
+    const reasonsFor = (tracker) => evaluateSupersede({
+      task: heldCard(),
+      events: [],
+      replacement: { id: REPLACEMENT_ID },
+      args: { reason: "r", by: REPLACEMENT_ID },
+      registry: { "tmp-proj": { tracker_path: tracker, session_log_path: mainSafe } },
+    }).reasons;
+    const refused = ["APPEND_TARGET_IN_WORKTREE"];
+
+    // The controls: the same shapes inside the main checkout are durable.
+    assert.deepEqual(reasonsFor(mainSafe), [], "main checkout");
+    assert.deepEqual(reasonsFor(join(main, "module", "T.md")), [], "initialized submodule in main");
+    seedRepo(join(main, "nested"));
+    assert.deepEqual(reasonsFor(join(main, "nested", "T.md")), [], "nested repository in main");
+
+    // The defect.
+    seedRepo(join(linked, "nested"));
+    assert.deepEqual(reasonsFor(join(linked, "T.md")), refused, "the linked worktree itself");
+    assert.deepEqual(reasonsFor(join(linked, "nested", "T.md")), refused, "nested repository in a linked worktree");
+    assert.deepEqual(reasonsFor(join(linked, "module", "T.md")), refused, "initialized submodule in a linked worktree");
+    seedRepo(join(linked, "nested", "deeper"));
+    assert.deepEqual(reasonsFor(join(linked, "nested", "deeper", "T.md")), refused, "two nested repositories deep");
+    seedRepo(join(linked, "module", "inner"));
+    assert.deepEqual(reasonsFor(join(linked, "module", "inner", "T.md")), refused, "a repository inside the submodule inside the worktree");
+
+    // A linked worktree of the submodule itself, even though it sits under main.
+    const moduleLinked = join(main, "module-linked");
+    run(join(main, "module"), "worktree", "add", "-q", "--detach", moduleLinked);
+    assert.deepEqual(reasonsFor(join(moduleLinked, "T.md")), refused, "a linked worktree under main is still a linked worktree");
+
+    // Symlinks resolve to where the file really is, in both directions.
+    const links = join(base, "links");
+    mkdirSync(links);
+    symlinkSync(join(linked, "module", "T.md"), join(links, "to-module.md"));
+    symlinkSync(join(linked, "nested"), join(links, "to-nested"));
+    symlinkSync(join(main, "module", "T.md"), join(links, "to-main-module.md"));
+    symlinkSync(mainSafe, join(linked, "nested", "to-main.md"));
+    assert.deepEqual(reasonsFor(join(links, "to-module.md")), refused, "symlink to a linked worktree's submodule");
+    assert.deepEqual(reasonsFor(join(links, "to-nested", "T.md")), refused, "symlinked nested directory");
+    assert.deepEqual(reasonsFor(join(links, "to-main-module.md")), [], "symlink into main's submodule");
+    assert.deepEqual(reasonsFor(join(linked, "nested", "to-main.md")), [], "symlink out of a worktree into main is main");
+
+    // Relative paths resolve from the working directory.
+    assert.deepEqual(reasonsFor(relative(process.cwd(), join(linked, "module", "T.md"))), refused, "relative submodule path");
+    assert.deepEqual(reasonsFor(relative(process.cwd(), join(linked, "nested", "T.md"))), refused, "relative nested path");
+    assert.deepEqual(reasonsFor(relative(process.cwd(), join(main, "module", "T.md"))), [], "relative main submodule path");
+
+    // A genuinely pruned worktree: moved away, then pruned by git, a nested repository inside.
+    const moved = join(base, "moved-away");
+    const prunable = join(base, "prunable");
+    run(main, "worktree", "add", "-q", "--detach", prunable);
+    seedRepo(join(prunable, "nested"));
+    renameSync(prunable, moved);
+    run(main, "worktree", "prune", "--expire", "now");
+    assert.equal(run(main, "worktree", "list").toString().includes("prunable"), false, "fixture: git forgot it");
+    assert.deepEqual(reasonsFor(join(moved, "T.md")), refused, "pruned worktree");
+    assert.deepEqual(reasonsFor(join(moved, "nested", "T.md")), refused, "nested repository in a pruned worktree");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// --- PR 19 third amendment: every form of .git, the bare-tool audit, the repair ---
+
+test("regression: GAP C inspects .git in every form: directory-form metadata, symlinks and dangling entries", () => {
+  const base = mkdtempSync(join(realpathSync(tmpdir()), "oe-gapc-forms-"));
+  try {
+    const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, "-c", "user.email=oe@test", "-c", "user.name=oe-test", ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+    const seed = (path) => {
+      mkdirSync(path, { recursive: true });
+      git(path, "init", "-q");
+      writeFileSync(join(path, "T.md"), "# T\n");
+      git(path, "add", "-A");
+      git(path, "commit", "-q", "-m", "seed");
+    };
+    const main = join(base, "main");
+    seed(main);
+    const safe = join(main, "T.md");
+    const reasonsFor = (path) => evaluateSupersede({
+      task: heldCard(),
+      events: [],
+      replacement: { id: REPLACEMENT_ID },
+      args: { reason: "r", by: REPLACEMENT_ID },
+      registry: { "tmp-proj": { tracker_path: path, session_log_path: safe } },
+    }).reasons;
+    const refused = ["APPEND_TARGET_IN_WORKTREE"];
+    const linked = (name) => {
+      const wt = join(base, name);
+      git(main, "worktree", "add", "-q", "--detach", wt);
+      const metadata = readFileSync(join(wt, ".git"), "utf8").trim().replace("gitdir: ", "");
+      return { wt, metadata, file: join(wt, "T.md") };
+    };
+
+    // The finding as reviewed: git still resolves the linked worktree through the link.
+    const direct = linked("direct");
+    unlinkSync(join(direct.wt, ".git"));
+    symlinkSync(direct.metadata, join(direct.wt, ".git"), "dir");
+    assert.equal(git(direct.wt, "rev-parse", "--absolute-git-dir"), direct.metadata, "fixture: git resolves the same metadata");
+    assert.equal(git(direct.wt, "rev-parse", "--path-format=absolute", "--git-common-dir"), join(main, ".git"), "fixture: and the main repository's common dir");
+    assert.deepEqual(reasonsFor(direct.file), refused, "absolute .git symlink to the metadata");
+    assert.deepEqual(reasonsFor(relative(process.cwd(), direct.file)), refused, "and through a relative destination");
+    assert.deepEqual(reasonsFor(safe), [], "the same repository's main checkout still passes");
+
+    const rel = linked("relative-link");
+    unlinkSync(join(rel.wt, ".git"));
+    symlinkSync(relative(rel.wt, rel.metadata), join(rel.wt, ".git"), "dir");
+    assert.deepEqual(reasonsFor(rel.file), refused, "relative .git symlink");
+
+    const chained = linked("chained");
+    unlinkSync(join(chained.wt, ".git"));
+    symlinkSync(chained.metadata, join(base, "chain"), "dir");
+    symlinkSync(join(base, "chain"), join(chained.wt, ".git"), "dir");
+    assert.deepEqual(reasonsFor(chained.file), refused, "a chain of symlinks");
+
+    const nested = linked("nested-under-link");
+    unlinkSync(join(nested.wt, ".git"));
+    symlinkSync(nested.metadata, join(nested.wt, ".git"), "dir");
+    seed(join(nested.wt, "inner"));
+    assert.deepEqual(reasonsFor(join(nested.wt, "inner", "T.md")), refused, "a repository nested inside it");
+
+    const fileLink = linked("gitfile-link");
+    copyFileSync(join(fileLink.wt, ".git"), join(base, "gitfile-copy"));
+    unlinkSync(join(fileLink.wt, ".git"));
+    symlinkSync(join(base, "gitfile-copy"), join(fileLink.wt, ".git"), "file");
+    assert.deepEqual(reasonsFor(fileLink.file), refused, "a .git symlink to a gitfile");
+
+    const toLink = linked("gitfile-to-link");
+    symlinkSync(toLink.metadata, join(base, "metadata-link"), "dir");
+    writeFileSync(join(toLink.wt, ".git"), `gitdir: ${join(base, "metadata-link")}\n`);
+    assert.deepEqual(reasonsFor(toLink.file), refused, "a gitfile naming a symlink to the metadata");
+
+    const copied = linked("copied-metadata");
+    unlinkSync(join(copied.wt, ".git"));
+    cpSync(copied.metadata, join(copied.wt, ".git"), { recursive: true });
+    assert.deepEqual(reasonsFor(copied.file), refused, "a real .git directory holding commondir");
+
+    // A second working tree over another checkout's repository, either form.
+    for (const [name, make] of [
+      ["symlink", (dir) => symlinkSync(join(main, ".git"), join(dir, ".git"), "dir")],
+      ["file", (dir) => writeFileSync(join(dir, ".git"), `gitdir: ${join(main, ".git")}\n`)],
+    ]) {
+      const dir = join(base, `second-${name}`);
+      mkdirSync(dir);
+      writeFileSync(join(dir, "T.md"), "# T\n");
+      make(dir);
+      assert.equal(git(dir, "rev-parse", "--absolute-git-dir"), join(main, ".git"), `fixture: git uses main's repository (${name})`);
+      assert.deepEqual(reasonsFor(join(dir, "T.md")), refused, `a ${name} pointing at another checkout's .git`);
+    }
+
+    // Dangling metadata: nothing here is readable, so it fails closed, never skipped.
+    const dangling = linked("dangling");
+    unlinkSync(join(dangling.wt, ".git"));
+    symlinkSync(join(base, "gone"), join(dangling.wt, ".git"), "dir");
+    assert.deepEqual(reasonsFor(dangling.file), refused, "dangling .git symlink");
+
+    const looped = linked("looped");
+    unlinkSync(join(looped.wt, ".git"));
+    symlinkSync(join(looped.wt, ".git"), join(looped.wt, ".git"));
+    assert.deepEqual(reasonsFor(looped.file), refused, "a .git symlink to itself");
+
+    // A dangling link inside a repository that also encloses it: the parent's .git must
+    // not rescue it, and a link above a clean repository still counts.
+    const danglingUnder = join(main, "dangling-child");
+    mkdirSync(danglingUnder);
+    writeFileSync(join(danglingUnder, "T.md"), "# T\n");
+    symlinkSync(join(base, "gone"), join(danglingUnder, ".git"), "dir");
+    assert.deepEqual(reasonsFor(join(danglingUnder, "T.md")), refused, "dangling .git inside main is still dangling");
+
+    const removed = linked("metadata-removed");
+    unlinkSync(join(removed.wt, ".git"));
+    symlinkSync(removed.metadata, join(removed.wt, ".git"), "dir");
+    rmSync(removed.metadata, { recursive: true, force: true });
+    assert.deepEqual(reasonsFor(removed.file), refused, "the metadata removed behind the link");
+
+    const noCommondir = linked("commondir-removed");
+    unlinkSync(join(noCommondir.wt, ".git"));
+    symlinkSync(noCommondir.metadata, join(noCommondir.wt, ".git"), "dir");
+    rmSync(join(noCommondir.metadata, "commondir"));
+    assert.deepEqual(reasonsFor(noCommondir.file), refused, "linked metadata that lost commondir is not a repository");
+
+    const danglingCommondir = join(base, "dangling-commondir");
+    mkdirSync(join(danglingCommondir, "meta", "objects"), { recursive: true });
+    mkdirSync(join(danglingCommondir, "meta", "refs"));
+    writeFileSync(join(danglingCommondir, "meta", "HEAD"), "ref: refs/heads/main\n");
+    symlinkSync(join(base, "gone"), join(danglingCommondir, "meta", "commondir"));
+    writeFileSync(join(danglingCommondir, ".git"), `gitdir: ${join(danglingCommondir, "meta")}\n`);
+    writeFileSync(join(danglingCommondir, "T.md"), "# T\n");
+    assert.deepEqual(reasonsFor(join(danglingCommondir, "T.md")), refused, "commondir that is itself a dangling symlink");
+
+    for (const [name, build] of [
+      ["empty .git directory", (dir) => mkdirSync(join(dir, ".git"))],
+      ["gitfile naming a non-git directory", (dir) => { mkdirSync(join(dir, "empty")); writeFileSync(join(dir, ".git"), `gitdir: ${join(dir, "empty")}\n`); }],
+      ["gitfile naming a regular file", (dir) => { writeFileSync(join(dir, "plain"), "x\n"); writeFileSync(join(dir, ".git"), `gitdir: ${join(dir, "plain")}\n`); }],
+      ["gitfile whose first line is not gitdir", (dir) => { execFileSync("git", ["init", "-q", "--bare", join(dir, "own.git")], { stdio: "pipe" }); writeFileSync(join(dir, ".git"), `noise\ngitdir: ${join(dir, "own.git")}\n`); }],
+      ["a .git that is neither file nor directory", (dir) => execFileSync("mkfifo", [join(dir, ".git")], { stdio: "pipe" })],
+      ["a gitdir missing HEAD", (dir) => { mkdirSync(join(dir, "m", "objects"), { recursive: true }); mkdirSync(join(dir, "m", "refs")); writeFileSync(join(dir, ".git"), `gitdir: ${join(dir, "m")}\n`); }],
+      ["a gitdir missing objects", (dir) => { mkdirSync(join(dir, "m", "refs"), { recursive: true }); writeFileSync(join(dir, "m", "HEAD"), "x\n"); writeFileSync(join(dir, ".git"), `gitdir: ${join(dir, "m")}\n`); }],
+      ["a gitdir missing refs", (dir) => { mkdirSync(join(dir, "m", "objects"), { recursive: true }); writeFileSync(join(dir, "m", "HEAD"), "x\n"); writeFileSync(join(dir, ".git"), `gitdir: ${join(dir, "m")}\n`); }],
+    ]) {
+      const dir = join(base, `odd-${name.replace(/\W+/g, "-")}`);
+      mkdirSync(dir);
+      writeFileSync(join(dir, "T.md"), "# T\n");
+      build(dir);
+      assert.deepEqual(reasonsFor(join(dir, "T.md")), refused, `${name} fails closed`);
+    }
+
+    // The controls these rules must not break.
+    const separate = join(base, "separate");
+    mkdirSync(separate);
+    git(separate, "init", "-q", `--separate-git-dir=${join(base, "separate.git")}`);
+    writeFileSync(join(separate, "T.md"), "# T\n");
+    assert.deepEqual(reasonsFor(join(separate, "T.md")), [], "a separate-git-dir repository");
+    const relocated = join(base, "relocated");
+    seed(relocated);
+    renameSync(join(relocated, ".git"), join(base, "relocated-meta.git"));
+    symlinkSync(join(base, "relocated-meta.git"), join(relocated, ".git"), "dir");
+    assert.equal(git(relocated, "rev-parse", "--absolute-git-dir"), join(base, "relocated-meta.git"), "fixture");
+    assert.deepEqual(reasonsFor(join(relocated, "T.md")), [], "a .git symlink to its own relocated repository");
+    const relGitfile = join(base, "relative-gitfile");
+    mkdirSync(relGitfile);
+    git(relGitfile, "init", "-q", `--separate-git-dir=${join(base, "relative-gitfile.git")}`);
+    writeFileSync(join(relGitfile, ".git"), "gitdir: ../relative-gitfile.git\n");
+    writeFileSync(join(relGitfile, "T.md"), "# T\n");
+    assert.deepEqual(reasonsFor(join(relGitfile, "T.md")), [], "a relative gitfile resolves from its own directory");
+    seed(join(main, "nested-ok"));
+    assert.deepEqual(reasonsFor(join(main, "nested-ok", "T.md")), [], "a nested repository in main");
+    const noRepo = join(base, "no-repo");
+    mkdirSync(noRepo);
+    writeFileSync(join(noRepo, "T.md"), "# T\n");
+    assert.deepEqual(reasonsFor(join(noRepo, "T.md")), [], "no repository at all");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// A card closed twice by the bare tool, reopened since, with no journal and no history.
+function bareClosedBoard(cli, overrides = {}) {
+  const events = overrides.events || [
+    supersededEvent(2, "second reason", null, "2026-11-02T12:00:00.000Z"),
+    supersededEvent(1, "first reason", REPLACEMENT_ID, "2026-11-01T12:00:00.000Z"),
+  ];
+  const board = stubBoard(cli, {
+    events,
+    row: overrides.row || heldCard({ status: "Needs Operator", superseded_at: "2026-11-02T12:00:00.000Z", superseded_reason: "second reason" }),
+  });
+  board.handlers.list_supersede_events = () => ({ count: events.length, total: events.length, limit: 500, events: events.map((e) => ({ id: e.id, task_id: SUPERSEDE_ID, created_at: e.created_at })) });
+  board.handlers.list_agent_tasks = () => ({ count: 0, tasks: [] });
+  return board;
+}
+
+const repairCli = (dir, generation, overrides = {}) => ({
+  repairSupersedeTaskId: SUPERSEDE_ID,
+  supersedeGeneration: generation,
+  journalDir: join(dir, "journals"),
+  liveCheck: false,
+  ...overrides,
+});
+const historyOf = (dir) => ({
+  tracker: readFileSync(join(dir, "PROJECT-TRACKER.md"), "utf8"),
+  log: readFileSync(join(dir, "SESSION-LOG.md"), "utf8"),
+});
+const captureCalls = (calls) => calls.filter((c) => c.name === "capture_thought");
+const repairFile = (dir, generation) => join(dir, "journals", `${SUPERSEDE_ID}.supersede.g${generation}.json`);
+
+test("supersede history audit: each generation is compared, in both files, by its own marker", () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const packet = { task: heldCard({ status: "Needs Operator" }), events: [
+      supersededEvent(3, "c", null, "2026-11-03T00:00:00.000Z"),
+      supersededEvent(1, "a", null, "2026-11-01T00:00:00.000Z"),
+      supersededEvent(2, "b", null, "2026-11-02T00:00:00.000Z"),
+    ] };
+    const audit = () => evaluateSupersedeHistoryAudit([packet], registry);
+    assert.deepEqual(audit().unrecorded.map((r) => [r.generation, r.severity, r.missing]), [
+      [1, "SUPERSEDE_NO_HISTORY", ["tracker", "session_log"]],
+      [2, "SUPERSEDE_NO_HISTORY", ["tracker", "session_log"]],
+      [3, "SUPERSEDE_NO_HISTORY", ["tracker", "session_log"]],
+    ]);
+    assert.match(audit().unrecorded[1].repair, new RegExp(`--repair-supersede ${SUPERSEDE_ID} --generation 2$`));
+    assert.equal(audit().unrecorded[1].event_id, "event-2", "the row names that generation's event, whatever the array order");
+
+    // Generation 1 fully recorded, 2 only in the tracker, 3 only in the log.
+    writeFileSync(join(dir, "PROJECT-TRACKER.md"), `${supersedeMarker(SUPERSEDE_ID, 1)}\n${supersedeMarker(SUPERSEDE_ID, 2)}\n`);
+    writeFileSync(join(dir, "SESSION-LOG.md"), `${supersedeMarker(SUPERSEDE_ID, 1)}\n${supersedeMarker(SUPERSEDE_ID, 3)}\n`);
+    assert.deepEqual(audit().recorded.map((r) => r.generation), [1]);
+    assert.deepEqual(audit().unrecorded.map((r) => [r.generation, r.severity, r.missing]), [
+      [2, "SUPERSEDE_PARTIAL_HISTORY", ["session_log"]],
+      [3, "SUPERSEDE_PARTIAL_HISTORY", ["tracker"]],
+    ]);
+
+    // The bare card id is not the marker: a hand note naming the card does not count,
+    // and neither does another card's or another generation's marker.
+    writeFileSync(join(dir, "PROJECT-TRACKER.md"), `${SUPERSEDE_ID} ${supersedeMarker(REPLACEMENT_ID, 1)} ${supersedeMarker(SUPERSEDE_ID, 9)}\n`);
+    writeFileSync(join(dir, "SESSION-LOG.md"), `${SUPERSEDE_ID}\n`);
+    assert.equal(audit().recorded.length, 0);
+
+    // A marker moved to an archive file is still a record.
+    writeFileSync(join(dir, "PROJECT-TRACKER-ARCHIVE.md"), supersedeMarker(SUPERSEDE_ID, 1));
+    writeFileSync(join(dir, "SESSION-LOG-ARCHIVE.md"), supersedeMarker(SUPERSEDE_ID, 1));
+    assert.deepEqual(audit().recorded.map((r) => r.generation), [1]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("supersede history audit: no route and a broken history are reported, never dropped", () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const events = [supersededEvent(1, "a", null, "2026-11-01T00:00:00.000Z")];
+    const unrecorded = (task, ev = events) => evaluateSupersedeHistoryAudit([{ task, events: ev }], registry).unrecorded;
+    assert.deepEqual(unrecorded(heldCard({ project_slug: null })).map((r) => [r.severity, r.reason, r.generation]), [["SUPERSEDE_NO_ROUTE", "MISSING_PROJECT_SLUG", 1]]);
+    assert.deepEqual(unrecorded(heldCard({ project_slug: "nope" })).map((r) => [r.severity, r.reason]), [["SUPERSEDE_NO_ROUTE", "UNKNOWN_PROJECT_ROUTE"]]);
+    const broken = unrecorded(heldCard(), [{ ...events[0], payload: { generation: "1" } }]);
+    assert.equal(broken[0].severity, "SUPERSEDE_HISTORY_INVALID");
+    assert.match(broken[0].problems.join(), /names no valid generation/);
+    assert.equal(broken[0].repair, undefined, "a broken history has no mechanical repair");
+    // A card closed by a generation its events do not back is the same class.
+    const disagree = unrecorded(heldCard({ status: "Agent Done", superseded_closed_generation: 2 }));
+    assert.equal(disagree[0].severity, "SUPERSEDE_HISTORY_INVALID");
+    assert.deepEqual(evaluateSupersedeHistoryAudit([{ task: heldCard(), events: [{ event_type: "AGENT STATUS", payload: {} }] }], registry), { unrecorded: [], recorded: [] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: --audit-unrecorded finds a bare close that was reopened, on a card no status list returns", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const board = bareClosedBoard(supersedeCli(dir));
+    const run = await withMcpStub(board.handlers, () => runUnrecordedAudit({ lookbackDays: 7 }, registry));
+    const result = JSON.parse(run.printed.join("\n"));
+    assert.equal(result.unrecorded_count, 2);
+    assert.deepEqual(result.unrecorded.map((r) => [r.short_id, r.generation, r.severity]), [
+      [SUPERSEDE_ID.slice(0, 8), 1, "SUPERSEDE_NO_HISTORY"],
+      [SUPERSEDE_ID.slice(0, 8), 2, "SUPERSEDE_NO_HISTORY"],
+    ]);
+    assert.deepEqual(result.scan_truncated, []);
+    assert.equal(result.supersede_scan.events_read, 2);
+    assert.equal(result.supersede_scan.error, null);
+    assert.equal(run.calls.filter((c) => c.name === "get_agent_task" && c.args.task_id === SUPERSEDE_ID).length, 1, "one read per card");
+    assert.deepEqual(run.calls.filter((c) => !["get_agent_task", "list_agent_tasks", "list_supersede_events"].includes(c.name)), [], "the audit is read-only");
+    assert.equal(historyOf(dir).tracker, "# Tracker\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a failed or cut-short supersede scan is named in scan_truncated, and the apply audit survives it", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const applied = { id: "cccccccc-3333-4333-8333-333333333333", status: "Agent Done", project_slug: "tmp-proj", updated_at: new Date().toISOString() };
+    const handlers = (list) => ({
+      list_agent_tasks: ({ statuses }) => ({ tasks: statuses[0] === "Agent Done" ? [applied] : [] }),
+      // Carries every id the listing below names, so what these cases measure is the ceiling.
+      get_agent_task: () => ({ task: applied, events: [
+        { event_type: "AGENT APPLIED", created_at: applied.updated_at, payload: { applied_by: "x" } },
+        ...Array.from({ length: 500 }, (_, i) => ({ id: `e${i}`, event_type: "AGENT STATUS", created_at: applied.updated_at, payload: {} })),
+      ] }),
+      list_supersede_events: list,
+    });
+    const run = async (list) => JSON.parse((await withMcpStub(handlers(list), () => runUnrecordedAudit({ lookbackDays: 7 }, registry))).printed.join("\n"));
+
+    const failed = await run(() => { throw new Error("tool not deployed"); });
+    assert.equal(failed.unrecorded_count, 1, "the apply audit's finding is not lost");
+    assert.equal(failed.scan_truncated.length, 1);
+    assert.match(failed.scan_truncated[0], /TASK SUPERSEDED events \(scan failed: .*tool not deployed/);
+    assert.match(failed.supersede_scan.error, /tool not deployed/);
+
+    const shapeless = await run(() => ({ nope: true }));
+    assert.match(shapeless.scan_truncated[0], /scan failed: list_supersede_events returned no events array/);
+
+    const page = (length) => Array.from({ length }, (_, i) => ({ id: `e${i}`, task_id: applied.id }));
+    const short = await run(() => ({ total: 499, events: page(499) }));
+    assert.deepEqual(short.scan_truncated, [], "under the limit is complete");
+    assert.equal(short.supersede_scan.coverage_complete, true);
+    const full = await run(() => ({ total: 500, events: page(500) }));
+    assert.deepEqual(full.scan_truncated, ["TASK SUPERSEDED events"], "at the limit it may be cut short, even when the total agrees");
+    assert.equal(full.supersede_scan.coverage_complete, false);
+
+    // A server-side cap below the ceiling: the page looks short and complete, the total says otherwise.
+    const capped = await run(() => ({ total: 900, events: page(100) }));
+    assert.deepEqual(capped.scan_truncated, ["TASK SUPERSEDED events"], "a total above the page is cut short");
+    assert.equal(capped.supersede_scan.total_events, 900);
+    assert.equal(capped.supersede_scan.coverage_complete, false);
+    const untold = await run(() => ({ events: page(100) }));
+    assert.deepEqual(untold.scan_truncated, ["TASK SUPERSEDED events"], "no total is no proof");
+    assert.equal(untold.supersede_scan.coverage_complete, false);
+
+    assert.equal(failed.supersede_scan.coverage_complete, false, "a failed scan is not complete");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: a listed supersede event missing from its card's packet is never a clean audit", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const board = bareClosedBoard(supersedeCli(dir));
+    const audit = async (packet) => {
+      const handlers = { ...board.handlers, get_agent_task: packet };
+      return JSON.parse((await withMcpStub(handlers, () => runUnrecordedAudit({ lookbackDays: 7 }, registry))).printed.join("\n"));
+    };
+    const [newest, oldest] = board.state.events;
+
+    const complete = await audit(() => ({ task: board.state.row, events: board.state.events }));
+    assert.equal(complete.supersede_scan.coverage_complete, true, "the control is complete");
+    assert.equal(complete.supersede_scan.cards_with_missing_history, 0);
+    assert.deepEqual(complete.scan_truncated, []);
+    assert.deepEqual(complete.unrecorded.map((r) => r.severity), ["SUPERSEDE_NO_HISTORY", "SUPERSEDE_NO_HISTORY"]);
+
+    // Oldest first and capped: the newest event is the one that goes.
+    const capped = await audit(() => ({ task: board.state.row, events: [oldest] }));
+    assert.equal(capped.supersede_scan.error, null, "a null error, which is exactly why it cannot be the test");
+    assert.equal(capped.supersede_scan.coverage_complete, false);
+    assert.equal(capped.supersede_scan.cards_with_missing_history, 1);
+    assert.deepEqual(capped.scan_truncated, ["TASK SUPERSEDED events (1 listed event(s) absent from fetched history on 1 card(s))"]);
+    const gap = capped.unrecorded.find((r) => r.severity === "SUPERSEDE_COVERAGE_INCOMPLETE");
+    assert.equal(gap.task_id, SUPERSEDE_ID);
+    assert.deepEqual(gap.missing_event_ids, [newest.id]);
+    assert.equal(gap.listed_events, 2);
+    assert.equal(gap.fetched_events, 1);
+    assert.deepEqual(capped.unrecorded.filter((r) => r.generation).map((r) => r.generation), [1], "what was fetched is still compared");
+
+    // Not one supersede event in the packet at all: the shape the review reproduced.
+    const none = await audit(() => ({ task: board.state.row, events: [{ id: "older", event_type: "AGENT STATUS", payload: {} }] }));
+    assert.equal(none.unrecorded_count, 1);
+    assert.deepEqual(none.unrecorded[0].missing_event_ids, [newest.id, oldest.id]);
+    assert.equal(none.supersede_scan.coverage_complete, false);
+
+    for (const [label, packet] of Object.entries({
+      "no events array": () => ({ task: board.state.row }),
+      "another card's packet": () => ({ task: { ...board.state.row, id: REPLACEMENT_ID }, events: board.state.events }),
+      "no task": () => ({ events: board.state.events }),
+    })) {
+      const short = await audit(packet);
+      assert.equal(short.supersede_scan.coverage_complete, false, label);
+      const row = short.unrecorded.find((r) => r.severity === "SUPERSEDE_COVERAGE_INCOMPLETE");
+      assert.equal(row.missing_event_ids.length, 2, label);
+      assert.equal(short.unrecorded.filter((r) => r.generation).length, 0, `${label}: it is not compared as this card`);
+    }
+    assert.equal(board.state.events.length, 2, "the audit is read-only");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("contract, source text only: list_supersede_events asks PostgREST for an exact count and returns it as total", () => {
+  // No real PostgREST here. This pins that the wrapper asks; a rollout check must prove it answers.
+  const source = readFileSync(join(HERE, "..", "..", "supabase", "functions", "open-brain-mcp", "index.ts"), "utf8");
+  const start = source.indexOf('"list_supersede_events",');
+  const block = source.slice(start, source.indexOf("server.registerTool(", start));
+  assert.match(block, /const \{ data, error, count \} = await supabase/);
+  assert.match(block, /\.select\("id, task_id, created_at", \{ count: "exact" \}\)/);
+  assert.match(block, /total: count \?\? null,/);
+});
+
+test("reconcileSupersedeInventory: a listed row with no id cannot match and is not dropped", () => {
+  const task = { id: SUPERSEDE_ID, project_slug: "tmp-proj", status: "Agent Done" };
+  const { packets, gaps } = reconcileSupersedeInventory(
+    [{ id: "known", task_id: SUPERSEDE_ID }, { task_id: SUPERSEDE_ID }, { id: "elsewhere", task_id: REPLACEMENT_ID }],
+    [{ task_id: SUPERSEDE_ID, packet: { task, events: [{ id: "known" }, { id: undefined }] } }],
+  );
+  assert.equal(packets.length, 1);
+  assert.deepEqual(gaps.map((g) => g.missing_event_ids), [[null]]);
+  assert.equal(gaps[0].listed_events, 2, "only this card's listed rows");
+});
+
+// A card the bare tool closed: its generation exists, nothing has been written for it.
+function closedGenerationBoard(cli, overrides = {}) {
+  const at = "2026-11-06T12:00:01.000Z";
+  return stubBoard(cli, {
+    row: { ...closedRow(cli), completed_at: at, superseded_at: at, superseded_reason: cli.supersedeReason, superseded_by: REPLACEMENT_ID, superseded_closed_generation: 1 },
+    events: [supersededEvent(1, cli.supersedeReason, REPLACEMENT_ID, at)],
+    ...overrides,
+  });
+}
+
+const leaseFiles = (cli) => (existsSync(cli.journalDir) ? readdirSync(cli.journalDir).filter((n) => n.includes(".lease.")) : []);
+const leasePath = (cli, token) => join(cli.journalDir, `${SUPERSEDE_ID}.supersede.lease.${token}.json`);
+function plantLease(cli, token, claim) {
+  mkdirSync(cli.journalDir, { recursive: true });
+  writeFileSync(leasePath(cli, token), typeof claim === "string" ? claim : JSON.stringify({ version: 1, task_id: SUPERSEDE_ID, token, mode: "supersede", claimed_at: "2026-11-06T00:00:00.000Z", ...claim }));
+}
+// In the controller's pinned form: a claim records its start time with LC_ALL=C and TZ=UTC.
+const ownStart = () => execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).trim();
+const deadPid = () => Number(execFileSync(process.execPath, ["-e", "console.log(process.pid)"], { encoding: "utf8" }).trim());
+
+function holdFirstCapture(overrideReply = "Captured as observation") {
+  let entered;
+  let release;
+  const seen = new Promise((r) => { entered = r; });
+  const gate = new Promise((r) => { release = r; });
+  const contents = [];
+  return {
+    seen,
+    release,
+    contents,
+    capture: async ({ content }) => {
+      contents.push(content);
+      if (contents.length === 1) {
+        entered();
+        await gate;
+      }
+      return overrideReply;
+    },
+  };
+}
+
+for (const [label, first, second] of [
+  ["ordinary closeout, then repair", "ordinary", "repair"],
+  ["repair, then ordinary closeout", "repair", "ordinary"],
+  ["repair, then repair", "repair", "repair"],
+  ["ordinary closeout, then ordinary closeout", "ordinary", "ordinary"],
+]) {
+  test(`regression: overlap on one generation sends one capture and the second writes nothing: ${label}`, async () => {
+    const dir = supersedeDir();
+    try {
+      const registry = tmpRegistry(dir);
+      const cli = supersedeCli(dir);
+      const held = holdFirstCapture();
+      const board = closedGenerationBoard(cli, { capture: held.capture });
+      const before = JSON.stringify(board.state);
+      const go = (kind) => (kind === "repair" ? runSupersedeRepair(repairCli(dir, 1), registry) : runSupersede(supersedeCli(dir), registry));
+      const run = await withMcpStub(board.handlers, async () => {
+        const a = go(first);
+        await held.seen;
+        const journalAtOverlap = readFileSync(repairFile(dir, 1), "utf8");
+        const trackerAtOverlap = historyOf(dir).tracker;
+        assert.equal(leaseFiles(cli).length, 1, "the first command holds it");
+        await assert.rejects(go(second), /SUPERSEDE_HISTORY_BUSY/);
+        assert.equal(readFileSync(repairFile(dir, 1), "utf8"), journalAtOverlap, "the second did not touch the journal");
+        assert.equal(historyOf(dir).tracker, trackerAtOverlap, "or the history");
+        assert.equal(leaseFiles(cli).length, 1, "it withdrew its own claim and left the holder's");
+        held.release();
+        await a;
+      });
+      assert.equal(captureCalls(run.calls).length, 1, "one capture");
+      assert.equal(supersedeCalls(run.calls).length, 0, "and no verb: the generation already landed");
+      assert.equal(JSON.stringify(board.state), before, "the card did not move");
+      const { tracker, log } = historyOf(dir);
+      assert.equal(occurrences(tracker, supersedeMarker(SUPERSEDE_ID, 1)), 1);
+      assert.equal(occurrences(log, supersedeMarker(SUPERSEDE_ID, 1)), 1);
+      assert.equal(JSON.parse(readFileSync(repairFile(dir, 1), "utf8")).state, "complete");
+      assert.deepEqual(leaseFiles(cli), [], "released");
+      const printedHold = run.printed.find((line) => line.includes("SUPERSEDE_HISTORY_BUSY"));
+      assert.match(printedHold, /holders/);
+      assert.ok(!printedHold.includes('"status": "PARTIAL"'));
+
+      const replay = await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 1), registry));
+      assert.equal(captureCalls(replay.calls).length, 0, "a later sequential run sends nothing");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("regression: an overlapping close of a new generation reaches the verb once", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const held = holdFirstCapture();
+    const board = stubBoard(cli, { capture: held.capture });
+    const run = await withMcpStub(board.handlers, async () => {
+      const a = runSupersede(cli, registry);
+      await held.seen;
+      await assert.rejects(runSupersede(cli, registry), /SUPERSEDE_HISTORY_BUSY/);
+      held.release();
+      await a;
+    });
+    assert.equal(supersedeCalls(run.calls).length, 1);
+    assert.equal(captureCalls(run.calls).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the claim covers the first read: a hold at the very start leaves no read, no write and no directory change", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const board = closedGenerationBoard(cli);
+    plantLease(cli, "11111111-1111-4111-8111-111111111111", { pid: process.pid, host: hostname(), process_started: ownStart() });
+    for (const go of [() => runSupersede(cli, registry), () => runSupersedeRepair(repairCli(dir, 1), registry)]) {
+      const run = await withMcpStub(board.handlers, () => assert.rejects(go(), /SUPERSEDE_HISTORY_BUSY/));
+      assert.deepEqual(run.calls, [], "no MCP call at all");
+      assert.deepEqual(readdirSync(cli.journalDir), [`${SUPERSEDE_ID}.supersede.lease.11111111-1111-4111-8111-111111111111.json`]);
+    }
+    assert.equal(historyOf(dir).tracker, "# Tracker\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--live-check takes no claim and is not stopped by one", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir, { liveCheck: true });
+    const board = closedGenerationBoard(cli);
+    const token = "22222222-2222-4222-8222-222222222222";
+    plantLease(cli, token, { pid: process.pid, host: hostname(), process_started: ownStart() });
+    const run = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.match(run.printed.join("\n"), /SUPERSEDE_READY/);
+    assert.deepEqual(leaseFiles(cli), [`${SUPERSEDE_ID}.supersede.lease.${token}.json`]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("claim recovery: a dead or recycled owner is recovered; live, other-host and unreadable claims refuse", async () => {
+  const token = "33333333-3333-4333-8333-333333333333";
+  for (const [label, claim, recovered] of [
+    ["dead pid", () => ({ pid: deadPid(), host: hostname(), process_started: "x" }), true],
+    ["recycled pid", () => ({ pid: process.pid, host: hostname(), process_started: "Thu Jan  1 00:00:00 1970" }), true],
+    ["live owner", () => ({ pid: process.pid, host: hostname(), process_started: ownStart() }), false],
+    ["live pid, start unknown", () => ({ pid: process.pid, host: hostname(), process_started: null }), false],
+    ["another host, dead pid", () => ({ pid: deadPid(), host: "some-other-host.invalid", process_started: "x" }), false],
+    ["no pid", () => ({ host: hostname() }), false],
+    ["unreadable", () => "{ torn", false],
+  ]) {
+    for (const entry of ["ordinary", "repair"]) {
+      const dir = supersedeDir();
+      try {
+        const registry = tmpRegistry(dir);
+        const cli = supersedeCli(dir);
+        const board = closedGenerationBoard(cli);
+        plantLease(cli, token, claim());
+        const go = () => (entry === "repair" ? runSupersedeRepair(repairCli(dir, 1), registry) : runSupersede(cli, registry));
+        if (recovered) {
+          const run = await withMcpStub(board.handlers, go);
+          assert.equal(captureCalls(run.calls).length, 1, `${label}/${entry}: it finishes`);
+          assert.deepEqual(leaseFiles(cli), [], `${label}/${entry}: the dead claim is gone`);
+          assert.match(run.printed.join("\n"), /recovered_leases/, `${label}/${entry}: and that is said`);
+        } else {
+          const run = await withMcpStub(board.handlers, () => assert.rejects(go(), /SUPERSEDE_HISTORY_BUSY/));
+          assert.deepEqual(run.calls, [], `${label}/${entry}: no read`);
+          assert.equal(leaseFiles(cli).length, 1, `${label}/${entry}: the claim stays`);
+          assert.equal(historyOf(dir).tracker, "# Tracker\n", `${label}/${entry}: nothing written`);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test("a claim on another card does not block this one", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const board = closedGenerationBoard(cli);
+    mkdirSync(cli.journalDir, { recursive: true });
+    const other = join(cli.journalDir, `${REPLACEMENT_ID}.supersede.lease.44444444-4444-4444-8444-444444444444.json`);
+    writeFileSync(other, JSON.stringify({ pid: process.pid, host: hostname(), process_started: ownStart() }));
+    const run = await withMcpStub(board.handlers, () => runSupersede(cli, registry));
+    assert.equal(captureCalls(run.calls).length, 1);
+    assert.equal(existsSync(other), true, "and is left alone");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a claim removed mid-run stops the command before it writes history or captures", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const board = closedGenerationBoard(cli);
+    const handlers = {
+      ...board.handlers,
+      get_agent_task: (a) => {
+        if (a.task_id === SUPERSEDE_ID) for (const name of leaseFiles(cli)) rmSync(join(cli.journalDir, name));
+        return board.handlers.get_agent_task(a);
+      },
+    };
+    const run = await withMcpStub(handlers, () => assert.rejects(runSupersede(cli, registry), /SUPERSEDE_LEASE_LOST/));
+    assert.equal(captureCalls(run.calls).length, 0);
+    assert.equal(historyOf(dir).tracker, "# Tracker\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("failure: a capture error releases the claim, and the retry resends the pinned bytes whatever the card says now", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const board = closedGenerationBoard(cli);
+    let fail = true;
+    const sent = [];
+    const handlers = {
+      ...board.handlers,
+      capture_thought: (a) => {
+        sent.push(a);
+        if (fail) throw new Error("capture response lost");
+        return "Captured as observation";
+      },
+    };
+    await withMcpStub(handlers, () => assert.rejects(runSupersede(cli, registry), /capture response lost/));
+    assert.deepEqual(leaseFiles(cli), [], "released on the way out");
+    const pinned = JSON.parse(readFileSync(repairFile(dir, 1), "utf8"));
+    assert.equal(pinned.state, "files-written");
+    assert.equal(pinned.capture_content, sent[0].content, "pinned before it went out");
+
+    fail = false;
+    board.state.row = { ...board.state.row, title: "retitled since" };
+    await withMcpStub(handlers, () => runSupersedeRepair(repairCli(dir, 1), registry));
+    assert.equal(sent.length, 2, "at least once: the retry does send");
+    assert.equal(sent[1].content, sent[0].content, "the same bytes, so the content hash collapses them");
+    assert.deepEqual(sent[1].tags, sent[0].tags);
+    assert.equal(createHash("sha256").update(sent[0].content).digest("hex"), createHash("sha256").update(sent[1].content).digest("hex"));
+    assert.equal(JSON.parse(readFileSync(repairFile(dir, 1), "utf8")).state, "complete");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the capture belongs to the event: same bytes from ordinary and repair, different across generations, file prose unchanged", async () => {
+  const [ordinaryDir, repairDir] = [supersedeDir(), supersedeDir()];
+  try {
+    const content = {};
+    const seed = supersedeCli(ordinaryDir);
+    for (const [kind, dir] of [["ordinary", ordinaryDir], ["repair", repairDir]]) {
+      const board = closedGenerationBoard(seed, { capture: ({ content: c }) => { content[kind] = c; return "ok"; } });
+      await withMcpStub(board.handlers, () => (kind === "ordinary"
+        ? runSupersede(supersedeCli(dir), tmpRegistry(dir))
+        : runSupersedeRepair(repairCli(dir, 1), tmpRegistry(dir))));
+    }
+    assert.equal(content.ordinary, content.repair, "the two paths send one body");
+    assert.match(content.ordinary, /Event event-1\./, "and it names the event");
+    assert.ok(!content.repair.includes("--repair-supersede"), "no run-specific prose");
+    assert.ok(trackerText(repairDir).includes("--repair-supersede"), "the file still says it was written later");
+    assert.ok(!trackerText(ordinaryDir).includes("--repair-supersede"));
+
+    // Two generations with identical arguments on one date must not collapse into one capture.
+    const dir = supersedeDir();
+    try {
+      const cli = supersedeCli(dir);
+      const contents = [];
+      const at = "2026-11-06T12:00:01.000Z";
+      const board = bareClosedBoard(cli, { events: [supersededEvent(2, "same", null, at), supersededEvent(1, "same", null, at)] });
+      board.handlers.capture_thought = ({ content: c }) => { contents.push(c); return "ok"; };
+      for (const generation of [1, 2]) await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, generation), tmpRegistry(dir)));
+      assert.equal(new Set(contents).size, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(ordinaryDir, { recursive: true, force: true });
+    rmSync(repairDir, { recursive: true, force: true });
+  }
+});
+
+for (const [label, owner, other] of [
+  ["time zone", { TZ: "Asia/Tokyo" }, { TZ: "America/New_York" }],
+  ["locale", { LC_ALL: "fr_FR.UTF-8" }, { LC_ALL: "C" }],
+]) {
+  test(`a live owner is not judged gone by a command in another time zone or locale: ${label}`, async () => {
+    const dir = supersedeDir();
+    const saved = Object.fromEntries(["TZ", "LC_ALL"].map((key) => [key, process.env[key]]));
+    const restore = () => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    };
+    try {
+      const registry = tmpRegistry(dir);
+      const cli = supersedeCli(dir);
+      const held = holdFirstCapture();
+      const board = closedGenerationBoard(cli, { capture: held.capture });
+      const run = await withMcpStub(board.handlers, async () => {
+        Object.assign(process.env, owner);
+        const a = runSupersede(supersedeCli(dir), registry);
+        await held.seen;
+        Object.assign(process.env, other);
+        await assert.rejects(runSupersedeRepair(repairCli(dir, 1), registry), /SUPERSEDE_HISTORY_BUSY/);
+        assert.equal(leaseFiles(cli).length, 1, "the owner's claim survives");
+        restore();
+        held.release();
+        await a;
+      });
+      assert.equal(captureCalls(run.calls).length, 1, "one capture");
+      assert.deepEqual(leaseFiles(cli), []);
+    } finally {
+      restore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a pinned capture naming another event is refused, not sent", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const board = closedGenerationBoard(cli);
+    mkdirSync(cli.journalDir, { recursive: true });
+    writeFileSync(repairFile(dir, 1), JSON.stringify({
+      version: 3, kind: "supersede", state: "files-written", task_id: SUPERSEDE_ID, generation: 1, project_slug: "tmp-proj",
+      event_id: "event-1", superseded_at: "2026-11-06T12:00:01.000Z", args: { reason: cli.supersedeReason, by: REPLACEMENT_ID },
+      capture_content: "OE closeout for event-9", capture_tags: ["x"],
+    }));
+    const run = await withMcpStub(board.handlers, () => assert.rejects(runSupersede(cli, registry), /does not name generation 1's event/));
+    assert.equal(captureCalls(run.calls).length, 0);
+    assert.deepEqual(leaseFiles(cli), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("documented limit: a separate git dir literally named .git is refused, while other separate-git-dir layouts pass", () => {
+  const base = mkdtempSync(join(realpathSync(tmpdir()), "oe-supersede-gitname-"));
+  try {
+    const reasonsFor = (path) => evaluateSupersede({
+      task: heldCard(),
+      events: [],
+      replacement: { id: REPLACEMENT_ID },
+      args: { reason: "r", by: REPLACEMENT_ID },
+      registry: { "tmp-proj": { tracker_path: path, session_log_path: path } },
+    }).reasons;
+    const seed = (work, metadata) => {
+      mkdirSync(dirname(metadata), { recursive: true });
+      execFileSync("git", ["init", "-q", `--separate-git-dir=${metadata}`, work], { stdio: "ignore" });
+      writeFileSync(join(work, "T.md"), "# T\n");
+      return join(work, "T.md");
+    };
+    assert.deepEqual(reasonsFor(seed(join(base, "named"), join(base, "store", "named-metadata"))), [], "a metadata directory with any other name passes");
+    assert.deepEqual(reasonsFor(seed(join(base, "literal"), join(base, "store", ".git"))), ["APPEND_TARGET_IN_WORKTREE", "APPEND_TARGET_IN_WORKTREE"], "both destinations: an accepted conservative refusal, not a passing layout");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("regression: --repair-supersede writes one generation from its own event and never calls the verb", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const board = bareClosedBoard(supersedeCli(dir));
+    const before = JSON.stringify(board.state);
+
+    // Generation 2 first, out of order, in an array that holds it first.
+    const two = await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 2), registry));
+    assert.equal(supersedeCalls(two.calls).length, 0, "the verb is never reached");
+    assert.equal(JSON.stringify(board.state), before, "the card and its events are untouched");
+    assert.equal(captureCalls(two.calls).length, 1);
+    assert.match(two.printed.join("\n"), /HISTORY_REPAIRED_CARD_CHANGED/, "the reopened card is reported, not closed");
+    let { tracker, log } = historyOf(dir);
+    assert.equal(occurrences(tracker, supersedeMarker(SUPERSEDE_ID, 2)), 1);
+    assert.equal(occurrences(log, supersedeMarker(SUPERSEDE_ID, 2)), 1);
+    assert.equal(occurrences(tracker, supersedeMarker(SUPERSEDE_ID, 1)), 0, "generation 1 is a separate repair");
+    assert.ok(tracker.includes("## Superseded — 2026-11-02"), "dated from generation 2's event");
+    assert.ok(tracker.includes("Reason: second reason"));
+    assert.ok(!tracker.includes("first reason"));
+    assert.ok(tracker.includes("No replacement; the premise no longer holds."));
+    assert.ok(tracker.includes("--repair-supersede"), "the history says it was written later");
+    const journal = JSON.parse(readFileSync(repairFile(dir, 2), "utf8"));
+    assert.equal(journal.state, "complete");
+    assert.equal(journal.event_id, "event-2");
+    assert.equal(journal.version, 3);
+    assert.deepEqual(journal.args, { reason: "second reason", by: null });
+    assert.equal(existsSync(repairFile(dir, 1)), false);
+
+    // Generation 1 names a replacement, and its body says so.
+    const one = await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 1), registry));
+    assert.equal(supersedeCalls(one.calls).length, 0);
+    ({ tracker, log } = historyOf(dir));
+    assert.ok(tracker.includes("## Superseded — 2026-11-01"));
+    assert.ok(tracker.includes(`Replaced by ${REPLACEMENT_ID.slice(0, 8)} (the replacement).`));
+    assert.ok(log.includes("Reason: first reason"));
+    assert.equal(JSON.parse(readFileSync(repairFile(dir, 1), "utf8")).event_id, "event-1");
+
+    // Running it again changes nothing and sends nothing.
+    const snapshot = historyOf(dir);
+    const again = await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 1), registry));
+    assert.match(again.printed.join("\n"), /ALREADY_RECORDED/);
+    assert.equal(captureCalls(again.calls).length, 0);
+    assert.deepEqual(historyOf(dir), snapshot);
+
+    // The audit now reads clean.
+    const audit = await withMcpStub(board.handlers, () => runUnrecordedAudit({ lookbackDays: 7 }, registry));
+    const result = JSON.parse(audit.printed.join("\n"));
+    assert.equal(result.unrecorded_count, 0);
+    assert.equal(result.supersede_scan.recorded_generations, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("regression: --repair-supersede on a card still closed by that generation leaves it closed and says so", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const board = bareClosedBoard(cli, {
+      events: [supersededEvent(1, cli.supersedeReason, cli.supersedeBy, "2026-11-01T12:00:00.000Z")],
+      row: closedRow(cli),
+    });
+    const run = await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 1), registry));
+    assert.equal(supersedeCalls(run.calls).length, 0);
+    assert.match(run.printed.join("\n"), /"status": "HISTORY_REPAIRED"/);
+    assert.equal(board.state.row.status, "Agent Done");
+    assert.equal(occurrences(historyOf(dir).log, supersedeMarker(SUPERSEDE_ID, 1)), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--repair-supersede --live-check says what it would do and writes nothing", async () => {
+  const dir = supersedeDir();
+  try {
+    const board = bareClosedBoard(supersedeCli(dir));
+    const run = await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 1, { liveCheck: true }), tmpRegistry(dir)));
+    const output = JSON.parse(run.printed.join("\n"));
+    assert.equal(output.status, "REPAIR_READY");
+    assert.equal(output.event_id, "event-1");
+    assert.equal(output.reason, "first reason");
+    assert.equal(run.calls.length, 1, "only the read");
+    assert.equal(existsSync(join(dir, "journals")), false);
+    assert.equal(historyOf(dir).tracker, "# Tracker\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--repair-supersede holds on anything it cannot write from the event, before any write", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const cli = supersedeCli(dir);
+    const attempt = async (board, generation, reg = registry) => {
+      const printed = [];
+      let error = null;
+      try {
+        printed.push(...(await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, generation), reg))).printed);
+      } catch (err) {
+        error = err;
+      }
+      assert.equal(existsSync(join(dir, "journals")), false, "no journal");
+      assert.equal(historyOf(dir).tracker, "# Tracker\n", "no history");
+      return String(error?.message);
+    };
+    assert.match(await attempt(bareClosedBoard(cli), 3), /REPAIR_GENERATION_NOT_FOUND/);
+    assert.match(await attempt(bareClosedBoard(cli), 2, {}), /UNKNOWN_PROJECT_ROUTE/);
+    assert.match(await attempt(bareClosedBoard(cli, { row: heldCard({ project_slug: null, status: "Needs Operator" }) }), 2), /MISSING_PROJECT_SLUG/);
+    assert.match(await attempt(bareClosedBoard(cli, { events: [supersededEvent(2, "gap", null, "2026-11-02T00:00:00.000Z")] }), 2), /SUPERSEDE_HISTORY_INVALID/);
+    assert.match(await attempt(bareClosedBoard(cli, { events: [supersededEvent(1, "   ", null, "2026-11-01T00:00:00.000Z")] }), 1), /SUPERSEDE_HISTORY_INVALID/);
+    assert.match(await attempt(bareClosedBoard(cli, { events: [supersededEvent(1, undefined, null, "2026-11-01T00:00:00.000Z")] }), 1), /SUPERSEDE_HISTORY_INVALID/);
+    const noFiles = mkdtempSync(join(tmpdir(), "oe-supersede-nofiles-"));
+    try {
+      assert.match(await attempt(bareClosedBoard(cli), 1, tmpRegistry(noFiles)), /APPEND_TARGET_MISSING/);
+    } finally {
+      rmSync(noFiles, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--repair-supersede finishes partial history without duplicating the half that exists", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const board = bareClosedBoard(supersedeCli(dir));
+    writeFileSync(join(dir, "PROJECT-TRACKER.md"), `# Tracker\n${supersedeMarker(SUPERSEDE_ID, 1)}\n`);
+    const run = await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 1), registry));
+    assert.equal(supersedeCalls(run.calls).length, 0);
+    const { tracker, log } = historyOf(dir);
+    assert.equal(tracker, `# Tracker\n${supersedeMarker(SUPERSEDE_ID, 1)}\n`, "the tracker is not touched");
+    assert.equal(occurrences(log, supersedeMarker(SUPERSEDE_ID, 1)), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--repair-supersede with a journal: resumes an honest one, retires a lost intent, refuses a mismatch", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const board = bareClosedBoard(supersedeCli(dir));
+    const seed = (generation, fields) => {
+      mkdirSync(join(dir, "journals"), { recursive: true });
+      writeFileSync(repairFile(dir, generation), JSON.stringify({ version: 3, kind: "supersede", task_id: SUPERSEDE_ID, generation, project_slug: "tmp-proj", ...fields }), "utf8");
+    };
+    const repair = (generation) => withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, generation), registry));
+
+    // A lost response: the intent matches the event, so it is simply finished.
+    seed(1, { state: "intent-written", args: { reason: "first reason", by: REPLACEMENT_ID } });
+    const adopted = await repair(1);
+    assert.equal(supersedeCalls(adopted.calls).length, 0);
+    assert.equal(JSON.parse(readFileSync(repairFile(dir, 1), "utf8")).state, "complete");
+
+    // An intent another writer beat: retired, and the event is what gets written.
+    seed(2, { state: "intent-written", args: { reason: "lost the race", by: null } });
+    const beaten = await repair(2);
+    assert.equal(supersedeCalls(beaten.calls).length, 0);
+    assert.equal(JSON.parse(readFileSync(repairFile(dir, 2), "utf8")).args.reason, "second reason");
+    assert.ok(readdirSync(join(dir, "journals")).some((name) => name.includes(".g2.json.lost-to-another-")), "the old intent is kept, renamed");
+    const { tracker } = historyOf(dir);
+    assert.ok(tracker.includes("Reason: second reason"));
+    assert.ok(!tracker.includes("lost the race"));
+
+    // A journal past its intent naming another event, or other arguments: both refused.
+    const other = supersedeDir();
+    try {
+      const reg = tmpRegistry(other);
+      const seedOther = (fields) => {
+        mkdirSync(join(other, "journals"), { recursive: true });
+        writeFileSync(repairFile(other, 1), JSON.stringify({ version: 3, kind: "supersede", task_id: SUPERSEDE_ID, generation: 1, args: { reason: "first reason", by: REPLACEMENT_ID }, ...fields }), "utf8");
+      };
+      for (const fields of [
+        { state: "board-superseded", event_id: "event-2" },
+        { state: "complete", event_id: "event-2" },
+        { state: "board-superseded", event_id: "event-1", args: { reason: "other", by: null } },
+        { state: "board-superseded", event_id: "event-1", task_id: "someone-else" },
+      ]) {
+        seedOther(fields);
+        await assert.rejects(withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(other, 1), reg)), /Refusing/, JSON.stringify(fields));
+        assert.equal(historyOf(other).tracker, "# Tracker\n", JSON.stringify(fields));
+      }
+      // A complete journal for another card, with this generation's markers already on
+      // file: the repair would otherwise answer "recorded" without reaching the resume
+      // path's own check, so it reads the journal's body itself.
+      for (const fields of [{ task_id: "someone-else" }, { generation: 7 }]) {
+        seedOther({ state: "complete", event_id: "event-1", ...fields });
+        writeFileSync(join(other, "PROJECT-TRACKER.md"), supersedeMarker(SUPERSEDE_ID, 1));
+        writeFileSync(join(other, "SESSION-LOG.md"), supersedeMarker(SUPERSEDE_ID, 1));
+        await assert.rejects(withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(other, 1), reg)), /does not describe generation 1/, JSON.stringify(fields));
+      }
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--repair-supersede rewrites history a complete journal claims but the files lost, without a second capture", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const board = bareClosedBoard(supersedeCli(dir));
+    await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 1), registry));
+    writeFileSync(join(dir, "SESSION-LOG.md"), "# Log, rewritten by hand\n");
+    const run = await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 1), registry));
+    assert.equal(captureCalls(run.calls).length, 0, "the capture is already journaled");
+    const { tracker, log } = historyOf(dir);
+    assert.equal(occurrences(log, supersedeMarker(SUPERSEDE_ID, 1)), 1);
+    assert.equal(occurrences(tracker, supersedeMarker(SUPERSEDE_ID, 1)), 1, "the file that had it is unchanged");
+    assert.equal(JSON.parse(readFileSync(repairFile(dir, 1), "utf8")).state, "complete");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--repair-supersede finishes only the generation it names: another generation's open journal is left alone", async () => {
+  const dir = supersedeDir();
+  try {
+    const registry = tmpRegistry(dir);
+    const board = bareClosedBoard(supersedeCli(dir));
+    mkdirSync(join(dir, "journals"));
+    writeFileSync(repairFile(dir, 1), JSON.stringify({ version: 3, kind: "supersede", task_id: SUPERSEDE_ID, generation: 1, state: "board-superseded", event_id: "event-1", project_slug: "tmp-proj", args: { reason: "first reason", by: REPLACEMENT_ID } }), "utf8");
+    await withMcpStub(board.handlers, () => runSupersedeRepair(repairCli(dir, 2), registry));
+    assert.equal(JSON.parse(readFileSync(repairFile(dir, 1), "utf8")).state, "board-superseded", "generation 1's journal did not move");
+    assert.equal(JSON.parse(readFileSync(repairFile(dir, 2), "utf8")).state, "complete");
+    assert.equal(occurrences(historyOf(dir).tracker, supersedeMarker(SUPERSEDE_ID, 1)), 0);
+    assert.equal(occurrences(historyOf(dir).tracker, supersedeMarker(SUPERSEDE_ID, 2)), 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--repair-supersede parseArgs: a full uuid and a generation, and nothing the event already says", () => {
+  const ok = parseArgs(["--repair-supersede", SUPERSEDE_ID, "--generation", "2", "--live-check"]);
+  assert.equal(ok.repairSupersedeTaskId, SUPERSEDE_ID);
+  assert.equal(ok.supersedeGeneration, 2);
+  assert.equal(ok.liveCheck, true);
+  assert.throws(() => parseArgs(["--repair-supersede", SUPERSEDE_ID]), /requires --generation/);
+  assert.throws(() => parseArgs(["--repair-supersede", SUPERSEDE_ID, "--generation", "0"]), /requires --generation/);
+  assert.throws(() => parseArgs(["--repair-supersede", SUPERSEDE_ID, "--generation", "x"]), /requires --generation/);
+  assert.throws(() => parseArgs(["--repair-supersede", "aaaaaaaa", "--generation", "1"]), /full task uuid/);
+  for (const extra of [["--reason", "r"], ["--by", REPLACEMENT_ID], ["--premise", "p"], ["--apply"], ["--audit-unrecorded"], ["--supersede", SUPERSEDE_ID]]) {
+    assert.throws(() => parseArgs(["--repair-supersede", SUPERSEDE_ID, "--generation", "1", ...extra]), /combines only|mutually exclusive/, extra.join(" "));
+  }
+  assert.throws(() => parseArgs(["--generation", "1"]), /require --supersede/);
 });

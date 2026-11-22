@@ -79,6 +79,7 @@ import {
   assertPromotionCallerAllowed,
   assertResumeTransitionAllowed,
   assertReviewApplyAllowed,
+  assertSupersedeArgs,
   assertStatusHeartbeatAllowed,
   assertWorkingExitAllowed,
   compactObject,
@@ -702,7 +703,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local, check_spec, close_check, not_before";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local, check_spec, close_check, not_before, superseded_by, superseded_reason, superseded_at, superseded_actor, superseded_closed_generation";
 
 // Internal load for the receipt-guard path only: includes claim_token so
 // assertClaimTokenMatches can pre-check. Never use for list/get responses.
@@ -730,7 +731,7 @@ const AGENT_TASK_LOAD_SELECT = `${AGENT_TASK_SELECT}, claim_token`;
 // gives one projection every scanning lane uses unmodified, instead of a
 // per-status special case in three separate routine prompts.
 const AGENT_TASK_COMPACT_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec, close_check, not_before";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec, close_check, not_before, superseded_by, superseded_reason, superseded_at, superseded_actor, superseded_closed_generation";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -3287,6 +3288,109 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error amending agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "supersede_agent_task",
+  {
+    title: "Supersede Agent Task",
+    description:
+      "Close a card whose premise went stale or whose work another card already covers, without pretending its operator step happened. Legal only from Needs Operator, Agent Needs Input or Agent Review. Moves the card to Agent Done, records the reason and optional replacement on the card, and writes one TASK SUPERSEDED event. The linked action item is NOT touched. This verb writes no project history: use `closeout-run.sh --supersede <uuid> [--by <uuid>] --reason <text>` so the tracker and session log record it. Give a card with no closeout route a routed project_slug first: the audit reports a close with no route until it has one. A repeat call with the same reason and replacement returns the card and writes nothing; a different reason or replacement is refused. A card that was superseded and then reopened can be closed again only with expected_generation set to its next generation: each TASK SUPERSEDED event is one generation, named by payload.generation (never by event time or position), and the number stops an old retry from closing reopened work. superseded_closed_generation on the card says which generation closed it right now, and is null whenever the card has moved off Done since. A card closed by this tool and then reopened gets no history from `--supersede`: `closeout-run.sh --audit-unrecorded` reports the generation and `closeout-run.sh --repair-supersede <uuid> --generation <n>` writes it from the event. That is detection and repair after the fact, not prevention.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      reason: z.string().min(1).describe(
+        "Why this card is being closed as superseded. Recorded on the card and in the event.",
+      ),
+      actor: z.string().min(1).describe(
+        "Who is closing it: 'operator', or an agent_code in the ledger. Recorded as claimed by the caller with actor_source mcp-shared-key, because the shared key does not prove identity.",
+      ),
+      superseded_by: z.string().uuid().optional().describe(
+        "The card that replaces this one. Omit for a premise-stale close with no replacement.",
+      ),
+      expected_generation: z.number().int().positive().optional().describe(
+        "The supersede generation this call authorizes: the next number after the highest payload.generation on the card's TASK SUPERSEDED events, or the highest number itself for a replay of a card closed right now. Optional on a card's first supersede and on a read-only replay of the generation closed right now; required to close a card that was superseded and reopened. A mismatch is refused. It guards the supersede count, not other edits to the card.",
+      ),
+    },
+  },
+  async (
+    { task_id, reason, actor, superseded_by, expected_generation }: {
+      task_id: string;
+      reason: string;
+      actor: string;
+      superseded_by?: string;
+      expected_generation?: number;
+    },
+  ) => {
+    logToolInvocation("supersede_agent_task", {
+      task_id,
+      actor,
+      has_replacement: superseded_by !== undefined,
+      expected_generation: expected_generation ?? null,
+    }, "mcp");
+    try {
+      assertSupersedeArgs({
+        task_id,
+        reason,
+        actor,
+        superseded_by,
+        expected_generation,
+      });
+      const { data, error } = await supabase.rpc(
+        "close_agent_task_superseded",
+        {
+          p_task_id: task_id,
+          p_reason: reason,
+          p_superseded_by: superseded_by ?? null,
+          p_actor: actor,
+          p_expected_generation: expected_generation ?? null,
+        },
+      );
+      if (error) throw error;
+      return textToolResponse({ receipt: "TASK SUPERSEDED", task: data });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error superseding agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "list_supersede_events",
+  {
+    title: "List Supersede Events",
+    description:
+      "Read-only. Every TASK SUPERSEDED event on the board, newest first, whatever the card's status or archive state. The closeout controller's --audit-unrecorded uses it to compare events to project-history markers, because a close through the bare supersede_agent_task tool writes no history. total is the exact number of such events; total above count, or count equal to limit, means the list may be cut short.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).optional().describe(
+        "Rows to return. Default and maximum 500.",
+      ),
+    },
+  },
+  async ({ limit }: { limit?: number }) => {
+    logToolInvocation("list_supersede_events", { limit }, "mcp");
+    try {
+      const cap = Math.max(1, Math.min(500, limit ?? 500));
+      const { data, error, count } = await supabase
+        .from("agent_task_events")
+        .select("id, task_id, created_at", { count: "exact" })
+        .eq("event_type", "TASK SUPERSEDED")
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(cap);
+      if (error) throw error;
+      return textToolResponse({
+        count: data?.length ?? 0,
+        total: count ?? null,
+        limit: cap,
+        events: data ?? [],
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error listing supersede events: ${(err as Error).message}`,
       );
     }
   },

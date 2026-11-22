@@ -141,6 +141,27 @@ a medium/high rating makes the task invisible to every scheduled lane forever.
   `capture_thought` record. Zero task mutations, zero events. Any
   promote/answer/unblock/update the operator chooses happens after the render,
   through existing guarded tools, initiated by the operator.
+- SUPERSEDE IS THE EXIT FOR A CARD THAT SHOULD NOT FINISH. A hold whose
+  `blocked_reason` carries `PACKET_PREMISE_STALE` or
+  `DUPLICATE_OF_EXISTING_DELIVERABLE`, or a desk card whose premise no longer holds,
+  closes with `bash scripts/open-engine/closeout-run.sh --supersede <uuid> --reason
+  "<why>" [--by <replacement uuid>] [--premise "<text quoted from the hold note>"]`
+  once the operator says so; name that command as the next step. Never close such a
+  card by writing a false `complete_operator_action` note. A `TASK SUPERSEDED` event
+  renders under What happened as "Superseded" with its reason and replacement. It
+  does not touch the linked action item, so say so when one is still open. A
+  `--premise` match shows only that the quoted text is still on the card, so read
+  the whole card first. A card superseded and then reopened needs `--generation
+  <n>` to close again; a `HISTORY_REPAIRED_CARD_CHANGED` result means the old close's
+  history was finished and the card was deliberately left open. A
+  `SUPERSEDE_HISTORY_INVALID` hold means the card's events do not form generations 1
+  to n, or disagree with the card: report the printed `problems` to the operator and
+  change nothing. A card closed by the bare `supersede_agent_task` tool has no project
+  history until the controller runs with the same arguments. If it was reopened first,
+  `--audit-unrecorded` reports the generation with severity `SUPERSEDE_NO_HISTORY` or
+  `SUPERSEDE_PARTIAL_HISTORY` and its repair command, `closeout-run.sh
+  --repair-supersede <uuid> --generation <n>`; name that as the next step, and run it
+  only when the operator says so.
 - KEEP THE BOARD CURRENT when the operator settles items in the same chat.
   The briefing's own render is read-only, but the moment the operator settles
   something in the conversation (answers a held question, promotes or archives
