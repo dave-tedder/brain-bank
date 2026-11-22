@@ -38,7 +38,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { pathToFileURL } from "node:url";
+import { isDirectInvocation } from "./entrypoint-guard.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -630,18 +630,16 @@ async function main() {
 // Only run main when invoked directly, so the pure helpers above are importable
 // by the test file without firing a network call.
 //
-// pathToFileURL, NOT `file://${process.argv[1]}`. This repo lives under
-// "Mobile Documents/com~apple~CloudDocs/Projects/Apps/Open Brain", so the path
-// contains spaces: import.meta.url percent-encodes them (%20) while argv[1] does
-// not, the naive comparison is always false, and main() silently never runs. The
-// failure mode is the worst possible one for this script -- empty stdout, exit 0,
-// which a caller could read as "no result" rather than "never ran". Caught by the
-// first live smoke on 2026-07-25.
-// The argv[1] guard is not paranoia: pathToFileURL(undefined) THROWS, so without
-// it any import from a context with no script path (node -e, a REPL, some test
-// harnesses) crashes on load instead of importing cleanly. Hit 2026-07-27 while
-// running a positive control against this module.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// The guard has failed silently twice, and the failure mode is the worst
+// possible one for this script: empty stdout, exit 0, which a caller could read
+// as "no result" rather than "never ran". First (caught by the live smoke on
+// 2026-07-25) a raw `file://${argv[1]}` compare, always false under the spaces in
+// "Mobile Documents". Then (found 2026-11-08) the pathToFileURL(argv[1]) compare
+// that replaced it, false for any launch through a symlink, which reconcile-run.sh
+// produces from its logical `pwd` when called by a symlinked path. The shared
+// guard in entrypoint-guard.mjs compares resolved real paths and treats a missing
+// argv[1] (node -e, a REPL, some test harnesses) as an import, not a crash.
+if (isDirectInvocation(import.meta.url)) {
   main().catch((err) => {
     // Last-resort fail-closed. Nothing reaches here that is not already a bug,
     // but a crash must still print a no-op line rather than an empty stdout the

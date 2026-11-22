@@ -88,9 +88,11 @@ const CONTROLLER_MUTANTS = {
     `    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },\n`,
     ``,
   ],
+  // A controller whose CLI branch never runs: every spawned process exits 0 with no
+  // output. The overlap schedule must fail by name ("exited before its capture"), not hang.
   cli_does_nothing: [
-    `process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href`,
-    `false && import.meta.url === pathToFileURL(process.argv[1]).href`,
+    `if (isDirectInvocation()) {`,
+    `if (false && isDirectInvocation()) {`,
   ],
 };
 
@@ -118,10 +120,11 @@ if (!PORT || !process.env.SUPERSEDE_CONTROLLER) {
 }
 const { runSupersede, runSupersedeRepair, runUnrecordedAudit, supersedeMarker } = await import(pathToFileURL(process.env.SUPERSEDE_CONTROLLER).href);
 
-// The controller's entrypoint guard compares import.meta.url, which is resolved, with
-// argv[1], which is not. Spawned through a symlink (macOS /tmp is one) it exits 0 having
-// run nothing, so the processes below get the resolved path. A reviewer's /tmp worktree
-// and every mutated copy under /tmp/obss.* would otherwise run nothing at all.
+// Before PR 21 the controller's entrypoint guard compared import.meta.url, which is
+// resolved, with argv[1], which is not, so a launch through a symlink (macOS /tmp is one)
+// exited 0 having run nothing. The guard now resolves both sides, and this resolved path
+// is kept as a belt-and-braces measure. It means these recovery schedules do NOT test
+// symlinked startup; closeout-controller.test.mjs and its entrypoint driver do.
 const CONTROLLER_PATH = realpathSync(process.env.SUPERSEDE_CONTROLLER);
 
 // A schedule that waits on a process can wait forever. Exit 3 is neither pass (0) nor a

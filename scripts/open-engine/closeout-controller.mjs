@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REGISTRY_PATH = join(__dirname, "project-closeout-registry.json");
@@ -3786,11 +3786,32 @@ async function main() {
 }
 
 // Main guard: run the CLI only when invoked directly, so the module is
-// importable from tests. process.argv[1] carries literal spaces (this repo
-// path has them); pathToFileURL matches import.meta.url's %20 encoding.
-if (
-  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+// importable from tests.
+//
+// Compare RESOLVED filesystem paths on both sides. Node resolves symlinks before
+// loading the main module, so import.meta.url names the real file while
+// process.argv[1] keeps whatever path the caller typed. Comparing a URL built
+// from argv[1] (the previous guard) was false for any launch through a symlink,
+// including macOS /tmp -> /private/tmp and closeout-run.sh's logical `pwd`, and
+// the process exited 0 with no output having run nothing. Measured 2026-11-07:
+// via /tmp, 0 bytes on --help; via /private/tmp, 12,167 bytes. Going through
+// fileURLToPath also keeps the paths-with-spaces fix ("Mobile Documents").
+//
+// A missing argv[1] (node -e, a REPL) or one naming no file means this module
+// was imported, not launched. Any other resolution error is rethrown, so a
+// launch that cannot be checked fails loudly instead of silently doing nothing.
+function isDirectInvocation() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return false;
+    throw err;
+  }
+}
+
+if (isDirectInvocation()) {
   main().catch((err) => {
     console.error(`closeout-controller: ${err.message}`);
     process.exit(1);

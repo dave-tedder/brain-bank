@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
   copyFileSync,
@@ -20,7 +20,7 @@ import {
 import { createHash } from "node:crypto";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   appendResolutionBlock,
   applyCaptureArgs,
@@ -4247,4 +4247,128 @@ test("--repair-supersede parseArgs: a full uuid and a generation, and nothing th
     assert.throws(() => parseArgs(["--repair-supersede", SUPERSEDE_ID, "--generation", "1", ...extra]), /combines only|mutually exclusive/, extra.join(" "));
   }
   assert.throws(() => parseArgs(["--generation", "1"]), /require --supersede/);
+});
+
+// --- entrypoint guard (2026-11-08) ------------------------------------------
+// The guard once compared import.meta.url (symlinks resolved by Node) with a URL
+// built from the unresolved argv[1]. Launched through any symlink, the CLI exited
+// 0 with no output having run nothing, so a closeout lane could report nothing
+// wrong while doing nothing. These launch the REAL controller file through real
+// symlinks and require the real path's exact output: exit 0 alone proves nothing,
+// because the bug also exits 0. Every spawn is time-boxed so a regression fails
+// instead of hanging a sweep.
+
+const CONTROLLER_PATH = join(HERE, "closeout-controller.mjs");
+
+function runNodeBounded(args, opts = {}) {
+  const r = spawnSync(process.execPath, args, { encoding: "utf8", timeout: 30_000, ...opts });
+  assert.equal(r.error, undefined, `spawn failed or timed out: ${r.error?.message}`);
+  return r;
+}
+
+test("entrypoint: the CLI runs when launched through a symlink, not only by its real path", () => {
+  const base = mkdtempSync(join(realpathSync(tmpdir()), "oe-entry-symlink-"));
+  try {
+    const real = runNodeBounded([CONTROLLER_PATH, "--help"]);
+    assert.equal(real.status, 0, real.stderr);
+    assert.match(real.stdout, /^Usage:\n/, "baseline: the real path prints the usage text");
+
+    symlinkSync(dirname(CONTROLLER_PATH), join(base, "dir-link"), "dir");
+    symlinkSync(CONTROLLER_PATH, join(base, "file-link.mjs"));
+    symlinkSync(join(base, "file-link.mjs"), join(base, "chain-link.mjs"));
+
+    const launches = [
+      ["directory symlink", [join(base, "dir-link", "closeout-controller.mjs"), "--help"]],
+      ["file symlink", [join(base, "file-link.mjs"), "--help"]],
+      ["chained symlink", [join(base, "chain-link.mjs"), "--help"]],
+      ["--preserve-symlinks-main", ["--preserve-symlinks-main", join(base, "file-link.mjs"), "--help"]],
+    ];
+    for (const [label, args] of launches) {
+      const r = runNodeBounded(args);
+      assert.equal(r.status, 0, `${label}: ${r.stderr}`);
+      assert.equal(
+        r.stdout,
+        real.stdout,
+        `${label}: printed ${r.stdout.length} bytes where the real path prints ${real.stdout.length}`,
+      );
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("entrypoint: importing the controller never runs the CLI, whatever argv[1] holds", () => {
+  const base = mkdtempSync(join(realpathSync(tmpdir()), "oe-entry-import-"));
+  try {
+    const load = `await import(${JSON.stringify(pathToFileURL(CONTROLLER_PATH).href)});`;
+    const importer = join(base, "importer.mjs");
+    writeFileSync(importer, `${load}\n`);
+    // Node 25 resolves realpathSync(undefined) as the RELATIVE path "undefined",
+    // so without the guard's explicit missing-argv check, an import from a cwd
+    // holding an entry named "undefined" that resolves to the controller would
+    // launch the CLI. This cwd makes that check load-bearing, not decorative.
+    const trapCwd = join(base, "trap");
+    mkdirSync(trapCwd);
+    symlinkSync(CONTROLLER_PATH, join(trapCwd, "undefined"));
+
+    const cases = [
+      ["no argv[1] (node -e)", ["--input-type=module", "-e", load]],
+      ["no argv[1], cwd holds an entry named undefined", ["--input-type=module", "-e", load], { cwd: trapCwd }],
+      ["argv[1] names no file", ["--input-type=module", "-e", load, join(base, "missing.mjs"), "--help"]],
+      // A path that runs THROUGH a regular file: realpathSync throws ENOTDIR, not ENOENT.
+      ["argv[1] runs through a regular file (ENOTDIR)", ["--input-type=module", "-e", load, join(importer, "child.mjs"), "--help"]],
+      ["argv[1] is the importing script", [importer, "--help"]],
+    ];
+    for (const [label, args, opts] of cases) {
+      const r = runNodeBounded(args, opts);
+      assert.equal(r.status, 0, `${label}: ${r.stderr}`);
+      assert.equal(r.stdout, "", `${label}: the CLI ran on import (${r.stdout.length} bytes)`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// A resolution error that is neither ENOENT nor ENOTDIR must not be read as
+// "imported": it is rethrown, so the launch dies loudly instead of exiting 0 having
+// done nothing. The preload injects EIO only when realpathSync is called from inside
+// isDirectInvocation, so Node's own loader is never disturbed. Both shapes are covered:
+// a direct launch (argv[1] is the controller) and an import whose argv[1] names a file.
+test("entrypoint: an unexpected realpath error is rethrown and the process exits nonzero", () => {
+  const base = mkdtempSync(join(realpathSync(tmpdir()), "oe-entry-eio-"));
+  try {
+    const preload = join(base, "inject-eio.cjs");
+    writeFileSync(preload, [
+      `const fs = require("node:fs");`,
+      `const real = fs.realpathSync;`,
+      `const injected = function realpathSync(...args) {`,
+      `  if (/\\bisDirectInvocation\\b/.test(new Error().stack)) {`,
+      `    const err = new Error("EIO: i/o error, injected by the entrypoint test");`,
+      `    err.code = "EIO";`,
+      `    throw err;`,
+      `  }`,
+      `  return real.apply(this, args);`,
+      `};`,
+      `injected.native = real.native;`,
+      `fs.realpathSync = injected;`,
+      `require("node:module").syncBuiltinESMExports();`,
+      ``,
+    ].join("\n"));
+    const other = join(base, "other.mjs");
+    writeFileSync(other, "\n");
+    const load = `await import(${JSON.stringify(pathToFileURL(CONTROLLER_PATH).href)});`;
+    const cases = [
+      ["direct launch", ["-r", preload, CONTROLLER_PATH, "--help"]],
+      ["import with argv[1] naming a file", ["-r", preload, "--input-type=module", "-e", load, other, "--help"]],
+    ];
+    for (const [label, args] of cases) {
+      const r = runNodeBounded(args);
+      assert.notEqual(r.status, 0, `${label}: an EIO in the guard must fail the process, got exit ${r.status}`);
+      assert.equal(r.stdout, "", `${label}: nothing may run after the guard throws (${r.stdout.length} bytes)`);
+      assert.match(r.stderr, /EIO: i\/o error, injected/, `${label}: the injected error is what surfaced: ${r.stderr.slice(0, 300)}`);
+      assert.match(r.stderr, /isDirectInvocation/, `${label}: thrown from the guard: ${r.stderr.slice(0, 300)}`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
