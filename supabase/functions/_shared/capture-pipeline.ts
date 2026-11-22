@@ -23,10 +23,14 @@ import {
 } from "./capture-timeouts.ts";
 import { loadProfile } from "./profile.ts";
 import {
+  extractOperatorLines,
+  isDescriptiveType,
+  isExcludedSource,
   isOperationCommandCapture,
-  shouldExtractActionItems,
+  isWorkReportCapture,
 } from "./metadata-validation.ts";
 import { isUnanchoredAppointmentItem } from "./appointment-guard.ts";
+import { recordDecision } from "./decisions.ts";
 
 const ACTION_ITEM_LOG_TRUNC = 200;
 
@@ -130,13 +134,10 @@ export async function extractAndStoreActionItems(
   content: string,
   isMechanical: (content: string) => boolean,
 ): Promise<void> {
-  // Observations, references, and email-sourced captures are descriptive,
-  // not commitment-shaped, so they must not create open action items.
-  if (!shouldExtractActionItems(metadata)) return;
-
-  if (isOperationCommandCapture(content, String(metadata?.source ?? ""))) {
-    return;
-  }
+  // Precedence (loop-closing Task 1.2, amended round 4): mechanical prefix,
+  // operation command, excluded source, then the operator marker (profile work_report_marker), then the
+  // descriptive-type gate for everything else. The marker overrides the type
+  // gate and nothing else.
 
   // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
   // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
@@ -145,8 +146,47 @@ export async function extractAndStoreActionItems(
   // action items so they don't pollute the digest's open-items section.
   if (isMechanical(content)) return;
 
-  const items = metadata.action_items;
-  if (!Array.isArray(items) || items.length === 0) return;
+  if (isOperationCommandCapture(content, String(metadata?.source ?? ""))) {
+    return;
+  }
+
+  // B2 part 1: task-intake captures already become board drafts; gmail/email
+  // captures are advisory marketing copy. Neither stores items, marker or not.
+  if (isExcludedSource(metadata)) return;
+
+  let items: unknown[];
+  if (isWorkReportCapture(content)) {
+    // Work-report gate: a session close-out stores ONLY its explicit
+    // operator-marker lines (`FOR OPERATOR:` by default); the LLM's extracted imperatives are discarded even
+    // when the report is typed task/idea, and the lines are kept even when it
+    // is typed observation.
+    const extracted = Array.isArray(metadata.action_items)
+      ? (metadata.action_items as unknown[])
+      : [];
+    items = extractOperatorLines(content);
+    console.log(
+      `work-report gate: replaced ${extracted.length} extracted items with ${items.length} operator-marker lines`,
+    );
+    // One decision row per replaced item, so the suppressed text is auditable
+    // (loop-closing Task 1.4; layer gate, outcome dropped, reason work_report).
+    for (const desc of extracted) {
+      await recordDecision(db, {
+        layer: "gate",
+        outcome: "dropped",
+        reason: "work_report",
+        candidate_description: String(desc),
+        thought_id: thoughtId,
+      });
+    }
+  } else {
+    // B2 part 2: observations and references are descriptive, not
+    // commitment-shaped.
+    if (isDescriptiveType(metadata)) return;
+    items = Array.isArray(metadata.action_items)
+      ? (metadata.action_items as unknown[])
+      : [];
+  }
+  if (items.length === 0) return;
 
   // Fetch existing open items to dedup against
   const { data: existingItems } = await db

@@ -22,6 +22,10 @@ export interface Profile {
   // site is refused rather than silently attempted, so a typo cannot become a
   // network call.
   wordpress_sites?: string[];
+  // Work-report marker: in a session close-out or handoff capture, only lines
+  // opening with `<marker>:` become action items. Optional; defaults to
+  // "FOR OPERATOR". Use something you would never type by accident.
+  work_report_marker?: string;
 }
 
 let cached: Profile | null = null;

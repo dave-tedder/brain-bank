@@ -1,0 +1,740 @@
+[
+  {
+    "layer": "L0",
+    "outcome": "blocked",
+    "reason": "mechanical_prefix",
+    "payload": {
+      "layer": "L0",
+      "outcome": "blocked",
+      "reason": "mechanical_prefix",
+      "candidate_description": "fixture 1: L0/blocked/mechanical_prefix",
+      "item_id": null,
+      "thought_id": "22222222-0000-4000-8000-000000000001",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "L0",
+    "outcome": "blocked",
+    "reason": "operation_command",
+    "payload": {
+      "layer": "L0",
+      "outcome": "blocked",
+      "reason": "operation_command",
+      "candidate_description": "fixture 2: L0/blocked/operation_command",
+      "item_id": null,
+      "thought_id": "22222222-0000-4000-8000-000000000002",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "L1.5",
+    "outcome": "dropped",
+    "reason": "restatement",
+    "payload": {
+      "layer": "L1.5",
+      "outcome": "dropped",
+      "reason": "restatement",
+      "candidate_description": "fixture 3: L1.5/dropped/restatement",
+      "item_id": "11111111-0000-4000-8000-000000000003",
+      "thought_id": "22222222-0000-4000-8000-000000000003",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "L2",
+    "outcome": "dropped",
+    "reason": "not_claimed",
+    "payload": {
+      "layer": "L2",
+      "outcome": "dropped",
+      "reason": "not_claimed",
+      "candidate_description": "fixture 4: L2/dropped/not_claimed",
+      "item_id": "11111111-0000-4000-8000-000000000004",
+      "thought_id": "22222222-0000-4000-8000-000000000004",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "L2",
+    "outcome": "dropped",
+    "reason": "llm_failed",
+    "payload": {
+      "layer": "L2",
+      "outcome": "dropped",
+      "reason": "llm_failed",
+      "candidate_description": "fixture 5: L2/dropped/llm_failed",
+      "item_id": "11111111-0000-4000-8000-000000000005",
+      "thought_id": "22222222-0000-4000-8000-000000000005",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "L2",
+    "outcome": "dropped",
+    "reason": "parse_failed",
+    "payload": {
+      "layer": "L2",
+      "outcome": "dropped",
+      "reason": "parse_failed",
+      "candidate_description": "fixture 6: L2/dropped/parse_failed",
+      "item_id": "11111111-0000-4000-8000-000000000006",
+      "thought_id": "22222222-0000-4000-8000-000000000006",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "L3",
+    "outcome": "dropped",
+    "reason": "no_quote",
+    "payload": {
+      "layer": "L3",
+      "outcome": "dropped",
+      "reason": "no_quote",
+      "candidate_description": "fixture 7: L3/dropped/no_quote",
+      "item_id": "11111111-0000-4000-8000-000000000007",
+      "thought_id": "22222222-0000-4000-8000-000000000007",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "L3",
+    "outcome": "dropped",
+    "reason": "coverage_below_threshold",
+    "payload": {
+      "layer": "L3",
+      "outcome": "dropped",
+      "reason": "coverage_below_threshold",
+      "candidate_description": "fixture 8: L3/dropped/coverage_below_threshold",
+      "item_id": "11111111-0000-4000-8000-000000000008",
+      "thought_id": "22222222-0000-4000-8000-000000000008",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": "fixture 8 quote",
+      "score": 0.5
+    }
+  },
+  {
+    "layer": "L3.5",
+    "outcome": "vetoed",
+    "reason": "still_owed",
+    "payload": {
+      "layer": "L3.5",
+      "outcome": "vetoed",
+      "reason": "still_owed",
+      "candidate_description": "fixture 9: L3.5/vetoed/still_owed",
+      "item_id": "11111111-0000-4000-8000-000000000009",
+      "thought_id": "22222222-0000-4000-8000-000000000009",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": "fixture 9 quote",
+      "score": null
+    }
+  },
+  {
+    "layer": "resolved",
+    "outcome": "resolved",
+    "reason": null,
+    "payload": {
+      "layer": "resolved",
+      "outcome": "resolved",
+      "reason": null,
+      "candidate_description": "fixture 10: resolved/resolved/null",
+      "item_id": "11111111-0000-4000-8000-000000000010",
+      "thought_id": "22222222-0000-4000-8000-000000000010",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": "fixture 10 quote",
+      "score": null
+    }
+  },
+  {
+    "layer": "gate",
+    "outcome": "dropped",
+    "reason": "work_report",
+    "payload": {
+      "layer": "gate",
+      "outcome": "dropped",
+      "reason": "work_report",
+      "candidate_description": "fixture 11: gate/dropped/work_report",
+      "item_id": null,
+      "thought_id": "22222222-0000-4000-8000-000000000011",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "proposed",
+    "reason": "age_work_report",
+    "payload": {
+      "layer": "archive",
+      "outcome": "proposed",
+      "reason": "age_work_report",
+      "candidate_description": "fixture 12: archive/proposed/age_work_report",
+      "item_id": "11111111-0000-4000-8000-000000000012",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "proposed",
+    "reason": "age_standard",
+    "payload": {
+      "layer": "archive",
+      "outcome": "proposed",
+      "reason": "age_standard",
+      "candidate_description": "fixture 13: archive/proposed/age_standard",
+      "item_id": "11111111-0000-4000-8000-000000000013",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "proposed",
+    "reason": "deadline_passed",
+    "payload": {
+      "layer": "archive",
+      "outcome": "proposed",
+      "reason": "deadline_passed",
+      "candidate_description": "fixture 14: archive/proposed/deadline_passed",
+      "item_id": "11111111-0000-4000-8000-000000000014",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "kept",
+    "reason": "age_work_report",
+    "payload": {
+      "layer": "archive",
+      "outcome": "kept",
+      "reason": "age_work_report",
+      "candidate_description": "fixture 15: archive/kept/age_work_report",
+      "item_id": "11111111-0000-4000-8000-000000000015",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "kept",
+    "reason": "age_standard",
+    "payload": {
+      "layer": "archive",
+      "outcome": "kept",
+      "reason": "age_standard",
+      "candidate_description": "fixture 16: archive/kept/age_standard",
+      "item_id": "11111111-0000-4000-8000-000000000016",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "kept",
+    "reason": "deadline_passed",
+    "payload": {
+      "layer": "archive",
+      "outcome": "kept",
+      "reason": "deadline_passed",
+      "candidate_description": "fixture 17: archive/kept/deadline_passed",
+      "item_id": "11111111-0000-4000-8000-000000000017",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "accepted",
+    "reason": "age_work_report",
+    "payload": {
+      "layer": "archive",
+      "outcome": "accepted",
+      "reason": "age_work_report",
+      "candidate_description": "fixture 18: archive/accepted/age_work_report",
+      "item_id": "11111111-0000-4000-8000-000000000018",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "accepted",
+    "reason": "age_standard",
+    "payload": {
+      "layer": "archive",
+      "outcome": "accepted",
+      "reason": "age_standard",
+      "candidate_description": "fixture 19: archive/accepted/age_standard",
+      "item_id": "11111111-0000-4000-8000-000000000019",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "archive",
+    "outcome": "accepted",
+    "reason": "deadline_passed",
+    "payload": {
+      "layer": "archive",
+      "outcome": "accepted",
+      "reason": "deadline_passed",
+      "candidate_description": "fixture 20: archive/accepted/deadline_passed",
+      "item_id": "11111111-0000-4000-8000-000000000020",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "proposed",
+    "reason": null,
+    "payload": {
+      "layer": "recheck",
+      "outcome": "proposed",
+      "reason": null,
+      "candidate_description": "fixture 21: recheck/proposed/null",
+      "item_id": "11111111-0000-4000-8000-000000000021",
+      "thought_id": null,
+      "evidence_thought_id": "33333333-0000-4000-8000-000000000021",
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": "fixture 21 quote",
+      "score": 0.5
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "kept",
+    "reason": null,
+    "payload": {
+      "layer": "recheck",
+      "outcome": "kept",
+      "reason": null,
+      "candidate_description": "fixture 22: recheck/kept/null",
+      "item_id": "11111111-0000-4000-8000-000000000022",
+      "thought_id": null,
+      "evidence_thought_id": "33333333-0000-4000-8000-000000000022",
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": "fixture 22 quote",
+      "score": 0.5
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "accepted",
+    "reason": null,
+    "payload": {
+      "layer": "recheck",
+      "outcome": "accepted",
+      "reason": null,
+      "candidate_description": "fixture 23: recheck/accepted/null",
+      "item_id": "11111111-0000-4000-8000-000000000023",
+      "thought_id": null,
+      "evidence_thought_id": "33333333-0000-4000-8000-000000000023",
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": "fixture 23 quote",
+      "score": 0.5
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "no_evidence",
+    "reason": "none_found",
+    "payload": {
+      "layer": "recheck",
+      "outcome": "no_evidence",
+      "reason": "none_found",
+      "candidate_description": "fixture 24: recheck/no_evidence/none_found",
+      "item_id": "11111111-0000-4000-8000-000000000024",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "no_evidence",
+    "reason": "thought_not_in_page",
+    "payload": {
+      "layer": "recheck",
+      "outcome": "no_evidence",
+      "reason": "thought_not_in_page",
+      "candidate_description": "fixture 25: recheck/no_evidence/thought_not_in_page",
+      "item_id": "11111111-0000-4000-8000-000000000025",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "no_evidence",
+    "reason": "quote_not_verbatim",
+    "payload": {
+      "layer": "recheck",
+      "outcome": "no_evidence",
+      "reason": "quote_not_verbatim",
+      "candidate_description": "fixture 26: recheck/no_evidence/quote_not_verbatim",
+      "item_id": "11111111-0000-4000-8000-000000000026",
+      "thought_id": null,
+      "evidence_thought_id": "33333333-0000-4000-8000-000000000026",
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "no_evidence",
+    "reason": "veto",
+    "payload": {
+      "layer": "recheck",
+      "outcome": "no_evidence",
+      "reason": "veto",
+      "candidate_description": "fixture 27: recheck/no_evidence/veto",
+      "item_id": "11111111-0000-4000-8000-000000000027",
+      "thought_id": null,
+      "evidence_thought_id": "33333333-0000-4000-8000-000000000027",
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "no_evidence",
+    "reason": "coverage",
+    "payload": {
+      "layer": "recheck",
+      "outcome": "no_evidence",
+      "reason": "coverage",
+      "candidate_description": "fixture 28: recheck/no_evidence/coverage",
+      "item_id": "11111111-0000-4000-8000-000000000028",
+      "thought_id": null,
+      "evidence_thought_id": "33333333-0000-4000-8000-000000000028",
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "recheck",
+    "outcome": "no_evidence",
+    "reason": "scope_mismatch",
+    "payload": {
+      "layer": "recheck",
+      "outcome": "no_evidence",
+      "reason": "scope_mismatch",
+      "candidate_description": "fixture 29: recheck/no_evidence/scope_mismatch",
+      "item_id": "11111111-0000-4000-8000-000000000029",
+      "thought_id": null,
+      "evidence_thought_id": "33333333-0000-4000-8000-000000000029",
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "fragment",
+    "outcome": "dropped",
+    "reason": "one_token",
+    "payload": {
+      "layer": "fragment",
+      "outcome": "dropped",
+      "reason": "one_token",
+      "candidate_description": "fixture 30: fragment/dropped/one_token",
+      "item_id": null,
+      "thought_id": "22222222-0000-4000-8000-000000000030",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "fragment",
+    "outcome": "dropped",
+    "reason": "dangling_clause",
+    "payload": {
+      "layer": "fragment",
+      "outcome": "dropped",
+      "reason": "dangling_clause",
+      "candidate_description": "fixture 31: fragment/dropped/dangling_clause",
+      "item_id": null,
+      "thought_id": "22222222-0000-4000-8000-000000000031",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "fragment",
+    "outcome": "proposed",
+    "reason": "pronoun_object",
+    "payload": {
+      "layer": "fragment",
+      "outcome": "proposed",
+      "reason": "pronoun_object",
+      "candidate_description": "fixture 32: fragment/proposed/pronoun_object",
+      "item_id": "11111111-0000-4000-8000-000000000032",
+      "thought_id": "22222222-0000-4000-8000-000000000032",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "fragment",
+    "outcome": "kept",
+    "reason": "pronoun_object",
+    "payload": {
+      "layer": "fragment",
+      "outcome": "kept",
+      "reason": "pronoun_object",
+      "candidate_description": "fixture 33: fragment/kept/pronoun_object",
+      "item_id": "11111111-0000-4000-8000-000000000033",
+      "thought_id": "22222222-0000-4000-8000-000000000033",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "fragment",
+    "outcome": "accepted",
+    "reason": "pronoun_object",
+    "payload": {
+      "layer": "fragment",
+      "outcome": "accepted",
+      "reason": "pronoun_object",
+      "candidate_description": "fixture 34: fragment/accepted/pronoun_object",
+      "item_id": "11111111-0000-4000-8000-000000000034",
+      "thought_id": "22222222-0000-4000-8000-000000000034",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": null,
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "dedup",
+    "outcome": "dropped",
+    "reason": "exact_batch",
+    "payload": {
+      "layer": "dedup",
+      "outcome": "dropped",
+      "reason": "exact_batch",
+      "candidate_description": "fixture 35: dedup/dropped/exact_batch",
+      "item_id": null,
+      "thought_id": "22222222-0000-4000-8000-000000000035",
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": "55555555-0000-4000-8000-000000000035",
+      "quote": null,
+      "score": null
+    }
+  },
+  {
+    "layer": "dedup",
+    "outcome": "proposed",
+    "reason": "semantic_overlap",
+    "payload": {
+      "layer": "dedup",
+      "outcome": "proposed",
+      "reason": "semantic_overlap",
+      "candidate_description": "fixture 36: dedup/proposed/semantic_overlap",
+      "item_id": "11111111-0000-4000-8000-000000000036",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": "55555555-0000-4000-8000-000000000036",
+      "quote": null,
+      "score": 0.5
+    }
+  },
+  {
+    "layer": "dedup",
+    "outcome": "kept",
+    "reason": "semantic_overlap",
+    "payload": {
+      "layer": "dedup",
+      "outcome": "kept",
+      "reason": "semantic_overlap",
+      "candidate_description": "fixture 37: dedup/kept/semantic_overlap",
+      "item_id": "11111111-0000-4000-8000-000000000037",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": "55555555-0000-4000-8000-000000000037",
+      "quote": null,
+      "score": 0.5
+    }
+  },
+  {
+    "layer": "dedup",
+    "outcome": "accepted",
+    "reason": "semantic_overlap",
+    "payload": {
+      "layer": "dedup",
+      "outcome": "accepted",
+      "reason": "semantic_overlap",
+      "candidate_description": "fixture 38: dedup/accepted/semantic_overlap",
+      "item_id": "11111111-0000-4000-8000-000000000038",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": null,
+      "related_item_id": "55555555-0000-4000-8000-000000000038",
+      "quote": null,
+      "score": 0.5
+    }
+  },
+  {
+    "layer": "calendar",
+    "outcome": "proposed",
+    "reason": "booking_match",
+    "payload": {
+      "layer": "calendar",
+      "outcome": "proposed",
+      "reason": "booking_match",
+      "candidate_description": "fixture 39: calendar/proposed/booking_match",
+      "item_id": "11111111-0000-4000-8000-000000000039",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": "44444444-0000-4000-8000-000000000039",
+      "related_item_id": null,
+      "quote": "fixture 39 quote",
+      "score": null
+    }
+  },
+  {
+    "layer": "calendar",
+    "outcome": "kept",
+    "reason": "booking_match",
+    "payload": {
+      "layer": "calendar",
+      "outcome": "kept",
+      "reason": "booking_match",
+      "candidate_description": "fixture 40: calendar/kept/booking_match",
+      "item_id": "11111111-0000-4000-8000-000000000040",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": "44444444-0000-4000-8000-000000000040",
+      "related_item_id": null,
+      "quote": "fixture 40 quote",
+      "score": null
+    }
+  },
+  {
+    "layer": "calendar",
+    "outcome": "accepted",
+    "reason": "booking_match",
+    "payload": {
+      "layer": "calendar",
+      "outcome": "accepted",
+      "reason": "booking_match",
+      "candidate_description": "fixture 41: calendar/accepted/booking_match",
+      "item_id": "11111111-0000-4000-8000-000000000041",
+      "thought_id": null,
+      "evidence_thought_id": null,
+      "evidence_event_id": "44444444-0000-4000-8000-000000000041",
+      "related_item_id": null,
+      "quote": "fixture 41 quote",
+      "score": null
+    }
+  }
+]
