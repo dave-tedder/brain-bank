@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   appendResolutionBlock,
+  applyOperatorFields,
+  applyReviewArgs,
   applyDocFlip,
   evaluate,
   evaluateResolutionSweep,
@@ -458,6 +460,148 @@ test("receiptNamesDeliverable ignores a bare deliverables/ mention with no file"
   assert.equal(receiptNamesDeliverable(null), false);
 });
 
+function referenceCase(path, followUp = "OPERATOR-ACTION: none (reference only)", outcome = "A verification report") {
+  return withTempCopy((dir) => {
+    const input = deliverableTask(receiptWith(path, followUp));
+    input.tasks[0].desired_outcome = outcome;
+    return evaluate(input, tmpRegistry(dir), { taskId: input.tasks[0].id });
+  });
+}
+
+test("reference-only report applies with no operator action and a tracker reading note", () => {
+  const result = referenceCase("deliverables/x/report.md");
+  assert.equal(result.status, "APPLYABLE");
+  assert.deepEqual(applyOperatorFields(result.apply[0].operator), {});
+  assert.equal(result.apply[0].operator.reference_only, true);
+  assert.match(result.projects[0].tracker_draft, /Reference deliverable, nothing to install: deliverables\/x\/report.md/);
+});
+
+test("reference-only marker refuses a non-reference scope", () => {
+  const result = referenceCase("deliverables/x/report.md", undefined, "A revised title tag ready to paste");
+  assert.ok(result.hold[0]?.reasons.includes("REFERENCE_ONLY_SCOPE_MISMATCH"));
+});
+
+test("reference-only marker refuses installable deliverables", () => {
+  // "PHP" pins the /i flag: an uppercase extension must hold too.
+  for (const ext of ["php", "PHP", "js", "mjs", "ts", "sql", "html", "css", "json"]) {
+    const result = referenceCase(`deliverables/x/patch.${ext}`);
+    assert.equal(result.status, "HELD", ext);
+    assert.ok(result.hold[0]?.reasons.includes("REFERENCE_ONLY_ON_INSTALLABLE"), ext);
+  }
+});
+
+test("reference-only marker still must be line anchored", () => {
+  const result = referenceCase("deliverables/x/report.md", "Read this. OPERATOR-ACTION: none (reference only)");
+  assert.ok(result.hold[0]?.reasons.includes("OPERATOR_MARKER_NOT_LINE_ANCHORED"));
+});
+
+test("reference-only close cannot swallow a mid-line install marker beside it", () => {
+  // Session 422 review: with the reference form anchored, operator.operator is
+  // truthy, so the mid-line scan used to be skipped and this receipt closed to
+  // Agent Done with the install step gone. The install-only variant of the
+  // same prose already held; the reference form must hold the same way.
+  const result = referenceCase(
+    "deliverables/x/report.md",
+    "Read the report. Then OPERATOR-ACTION: install deliverables/x/report.md || OPERATOR-TARGET: https://example.com/admin\n" +
+      "OPERATOR-ACTION: none (reference only)",
+  );
+  assert.equal(result.status, "HELD");
+  assert.ok(result.hold[0]?.reasons.includes("OPERATOR_MARKER_NOT_LINE_ANCHORED"), JSON.stringify(result.hold));
+});
+
+test("near-miss reference-only spellings hold as a format error instead of routing a literal step", () => {
+  for (const followUp of [
+    "OPERATOR-ACTION: none (reference only).",
+    "OPERATOR-ACTION: none(reference only)",
+    "OPERATOR-ACTION: none (reference-only)",
+    "OPERATOR-ACTION: None  (Reference Only)",
+    "OPERATOR-ACTION: none (reference only) || OPERATOR-TARGET: deliverables/x/report.md",
+  ]) {
+    const result = referenceCase("deliverables/x/report.md", followUp);
+    assert.equal(result.status, "HELD", followUp);
+    // The format hold yields no operator, so the deliverable gate fires too;
+    // that is the same pairing every other marker format error produces.
+    assert.ok(result.hold[0]?.reasons.includes("REFERENCE_ONLY_MARKER_FORMAT"), followUp);
+    assert.ok(!result.hold[0].reasons.includes("REFERENCE_ONLY_SCOPE_MISMATCH"), followUp);
+    assert.ok(result.apply.length === 0, followUp);
+  }
+  // The exact form, with surrounding whitespace and any letter case, still applies.
+  for (const followUp of ["  OPERATOR-ACTION: None (Reference Only)  ", "OPERATOR-ACTION: none (reference only)"]) {
+    const result = referenceCase("deliverables/x/report.md", followUp);
+    assert.equal(result.status, "APPLYABLE", followUp);
+    assert.equal(result.apply[0].operator.reference_only, true, followUp);
+  }
+});
+
+test("reference-only scope match is case-insensitive and falls back to the title", () => {
+  assert.equal(referenceCase("deliverables/x/report.md", undefined, "a report on the release form").status, "APPLYABLE");
+  withTempCopy((dir) => {
+    const input = deliverableTask(receiptWith("deliverables/x/report.md", "OPERATOR-ACTION: none (reference only)"));
+    input.tasks[0].desired_outcome = "";
+    input.tasks[0].title = "A verification report on /releaseform";
+    const result = evaluate(input, tmpRegistry(dir), { taskId: input.tasks[0].id });
+    assert.equal(result.status, "APPLYABLE", JSON.stringify(result.hold));
+  });
+});
+
+test("applyReviewArgs omits the operator fields for a reference-only close and sends them for an install step", () => {
+  // This is the exact apply_agent_task_review payload runLive sends, so it is
+  // the line that decides Agent Done vs Needs Operator in production.
+  const reference = referenceCase("deliverables/x/report.md").apply[0];
+  const refArgs = applyReviewArgs(reference);
+  assert.equal(refArgs.task_id, reference.task_id);
+  assert.equal(refArgs.applied_by, "closeout-controller");
+  assert.equal(refArgs.resolve_linked_action_item, false);
+  assert.ok(!("operator_action" in refArgs), JSON.stringify(refArgs));
+  assert.ok(!("operator_target" in refArgs), JSON.stringify(refArgs));
+  assert.equal(refArgs.closeout_evidence.reference_only, true);
+
+  const install = withTempCopy((dir) => {
+    const input = deliverableTask(receiptWith(
+      "deliverables/x/patch.php",
+      "OPERATOR-ACTION: install deliverables/x/patch.php || OPERATOR-TARGET: https://example.com/admin",
+    ));
+    return evaluate(input, tmpRegistry(dir), { taskId: input.tasks[0].id });
+  });
+  assert.equal(install.status, "APPLYABLE", JSON.stringify(install.hold));
+  const installArgs = applyReviewArgs(install.apply[0]);
+  assert.equal(installArgs.operator_action, "install deliverables/x/patch.php");
+  assert.equal(installArgs.operator_target, "https://example.com/admin");
+  assert.equal(installArgs.closeout_evidence.reference_only, undefined);
+});
+
+test("reference-only hold reasons carry a remedy, never the bare reason code", () => {
+  const cases = [
+    [referenceCase("deliverables/x/report.md", undefined, "A revised title tag ready to paste"), "REFERENCE_ONLY_SCOPE_MISMATCH", /admin_amend_agent_task|OPERATOR-ACTION: install/],
+    [referenceCase("deliverables/x/patch.php"), "REFERENCE_ONLY_ON_INSTALLABLE", /OPERATOR-ACTION: install/],
+    [referenceCase("deliverables/x/report.md", "OPERATOR-ACTION: none (reference only)."), "REFERENCE_ONLY_MARKER_FORMAT", /exactly 'OPERATOR-ACTION: none \(reference only\)'/],
+  ];
+  for (const [result, reason, remedy] of cases) {
+    const hold = result.hold[0];
+    assert.ok(hold?.reasons.includes(reason), reason);
+    assert.ok(!hold.message.startsWith("Task held by dry-run safety gates"), `${reason}: ${hold.message}`);
+    assert.match(hold.message, remedy, reason);
+  }
+});
+
+test("reference-only tracker note lists each named path once and is omitted when none is named", () => {
+  const multi = withTempCopy((dir) => {
+    const lines = receiptWith("deliverables/x/report.md and deliverables/x/appendix.md", "OPERATOR-ACTION: none (reference only)");
+    lines[3] = "Limitations: see deliverables/x/report.md";
+    const input = deliverableTask(lines);
+    input.tasks[0].desired_outcome = "A verification report";
+    return evaluate(input, tmpRegistry(dir), { taskId: input.tasks[0].id });
+  });
+  assert.equal(multi.status, "APPLYABLE", JSON.stringify(multi.hold));
+  const notes = multi.projects[0].tracker_draft.split("\n").filter((l) => l.startsWith("Reference deliverable, nothing to install:"));
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0], "Reference deliverable, nothing to install: deliverables/x/report.md, deliverables/x/appendix.md");
+
+  const none = referenceCase("none");
+  assert.equal(none.status, "APPLYABLE", JSON.stringify(none.hold));
+  assert.ok(!none.projects[0].tracker_draft.includes("nothing to install"), none.projects[0].tracker_draft);
+});
+
 test("evaluate HOLDs a deliverable receipt with no operator marker", () => {
   withTempCopy((dir) => {
     const input = deliverableTask(receiptWith(
@@ -652,8 +796,23 @@ test("resolution sweep: qualifying OPERATOR DONE task is appendable with event-d
     item.marker,
     "<!-- open-engine operator-resolution task: 1a2b3c4d-0000-4000-8000-000000000001 -->",
   );
-  assert.ok(item.body.startsWith("Resolved by Sam Operator on 2026-07-18: "));
+  assert.ok(item.body.startsWith("Resolved by Sam Operator on 2026-07-18 (task 1a2b3c4d, "));
   assert.ok(item.body.includes("DEFERRED by operator decision"));
+});
+
+test("resolution sweep: capture body names the card so identical notes do not dedup into one record", () => {
+  // Byte-identical operator notes on several cards collapse to ONE stored
+  // thought under SHA-256 content dedup, and that thought names none of them.
+  const packet = operatorDonePacket();
+  packet.task.title = "Local content research";
+  const item = evaluateResolutionSweep([packet], sweepRegistry(), { now: SWEEP_NOW }).appendable[0];
+  assert.ok(item.body.startsWith(
+    "Resolved by Sam Operator on 2026-07-18 (task 1a2b3c4d, Local content research): DEFERRED",
+  ), item.body);
+  const other = operatorDonePacket({ task_id: "5e6f7a8b-0000-4000-8000-000000000002" });
+  other.task.title = "Competitor listing research";
+  const otherItem = evaluateResolutionSweep([other], sweepRegistry(), { now: SWEEP_NOW }).appendable[0];
+  assert.notEqual(item.body, otherItem.body);
 });
 
 test("resolution sweep: task whose final status event is not OPERATOR DONE is skipped", () => {

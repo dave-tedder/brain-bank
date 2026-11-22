@@ -593,14 +593,30 @@ function evaluateTask(task, registry, actionItems, options = {}) {
   if (stagedDeliverable && !operator.operator) {
     reasons.push("DELIVERABLE_WITHOUT_OPERATOR_ACTION");
   }
+  if (operator.operator?.reference_only) {
+    const scope = String(task.desired_outcome || task.title || "").trim();
+    if (!/^(A|An) (report|research|verification|recommendation|specification|brief|reference|summary|audit|plan)\b/i.test(scope)) {
+      reasons.push("REFERENCE_ONLY_SCOPE_MISMATCH");
+    }
+    if (markerSources.some((text) => referenceDeliverables(text).some(
+      (path) => /\.(php|js|mjs|ts|sql|html|css|json)$/i.test(path),
+    ))) {
+      reasons.push("REFERENCE_ONLY_ON_INSTALLABLE");
+    }
+  }
 
   // A marker appended mid-line to a prose sentence ("...decide first.
   // OPERATOR-ACTION: call the vendor ...") is invisible to the line-anchored
   // parser, so the task applies with its operator step silently dropped. The
   // parser stays strict (the anchor is what makes marker injection detectable);
   // the malformed marker becomes a visible HOLD instead of a silent loss.
+  //
+  // The scan also runs when the anchored marker is the reference-only form:
+  // that marker closes the card to Agent Done, so a mid-line install marker
+  // beside it would be the one receipt shape where the install step is lost
+  // with zero human contact.
   if (
-    !operator.operator &&
+    (!operator.operator || operator.operator.reference_only) &&
     String(augmentation.sections[followUpHeading] || "").split(/\r?\n/).some(
       (line) => /OPERATOR-ACTION:\s*\S/i.test(line) &&
         !/^\s*OPERATOR-ACTION:/i.test(line),
@@ -973,6 +989,65 @@ export function wasAutoPromoted(events) {
   );
 }
 
+export function applyOperatorFields(operator) {
+  return operator?.reference_only ? {} : {
+    operator_action: operator?.operator_action ?? undefined,
+    operator_target: operator?.operator_target ?? undefined,
+  };
+}
+
+// The exact apply_agent_task_review payload the live runner sends for one
+// APPLYABLE item. Exported so a test can pin the production routing decision
+// (Agent Done vs Needs Operator is decided by whether operator_action is
+// present here); before this was lifted out of runLive, reverting the
+// operator-field spread left every test green.
+export function applyReviewArgs(item) {
+  return {
+    task_id: item.task_id,
+    applied_by: "closeout-controller",
+    resolution: "accepted",
+    resolve_linked_action_item: false,
+    // When the receipt carried an OPERATOR-ACTION marker, route to Needs Operator
+    // (operator step preserved) instead of closing to Agent Done.
+    ...applyOperatorFields(item.operator),
+    // No note: apply_agent_task_review would overwrite review_reason with
+    // it. The augmentation is made durable on the immutable AGENT APPLIED
+    // event via closeout_evidence instead.
+    closeout_evidence: {
+      source: "oe8-closeout-controller",
+      mode: "oe8c-single-task",
+      // Stamped on the immutable AGENT APPLIED event so the board can
+      // always answer "did a human widen the risk gate for this card, and
+      // to what?" without re-deriving it from shell history.
+      operator_apply: item.operator_apply
+        ? { risk: item.risk, widened_by: "--operator-apply" }
+        : undefined,
+      // Durable record that this close was reference-only (nothing to
+      // install), so a reader of the AGENT APPLIED event does not have to
+      // re-parse the receipt text to learn why no operator step was set.
+      reference_only: item.operator?.reference_only ? true : undefined,
+      required_sections_present: REQUIRED_RECEIPT_SECTIONS,
+      augmented_sections: item.augmented_sections,
+      review_note_augmentation: item.augmentation_text || undefined,
+      // OE-13: the controller's own executed-check verdict (spec §10 watch
+      // surface — the briefing reads it off this immutable event).
+      executed_check: item.executed_check
+        ? {
+          runner: item.executed_check.runner,
+          args: item.executed_check.args,
+          ref: item.executed_check.ref,
+          exit_code: item.executed_check.exit_code,
+          output_tail: item.executed_check.output_tail,
+        }
+        : undefined,
+    },
+  };
+}
+
+function referenceDeliverables(text) {
+  return [...String(text || "").matchAll(/deliverables\/[A-Za-z0-9._/-]+\.[A-Za-z0-9]{1,8}\b/g)].map((m) => m[0]);
+}
+
 function parseOperatorAction(followUpText) {
   // Explicit marker only — never fuzzy NLP. Line form:
   //   OPERATOR-ACTION: <step> || OPERATOR-TARGET: <url-or-path>
@@ -988,6 +1063,17 @@ function parseOperatorAction(followUpText) {
   const line = lines[0];
   if (!line) return { operator: null, reasons: [] };
   const body = line.replace(/^OPERATOR-ACTION:/i, "").trim();
+  if (/^none \(reference only\)$/i.test(body)) {
+    return { operator: { operator_action: "none", reference_only: true }, reasons: [] };
+  }
+  // A near miss of the reference-only form ("none (reference only).",
+  // "none(reference only)", "none (reference-only)", or the exact form with a
+  // "|| OPERATOR-TARGET:" suffix) must not fall through to the ordinary parser:
+  // it would route to Needs Operator with the literal step "none (reference
+  // only)." and skip both reference-only guards. Hold it as a format error.
+  if (/^none\b/i.test(body) && /reference/i.test(body)) {
+    return { operator: null, reasons: ["REFERENCE_ONLY_MARKER_FORMAT"] };
+  }
   const parts = body.split(/\s*\|\|\s*/);
   if (parts.length > 2) {
     return { operator: null, reasons: ["OPERATOR_MARKER_FORMAT"] };
@@ -1118,6 +1204,15 @@ function holdMessage(reasons, receipt) {
   if (reasons.includes("OPERATOR_TARGET_UNSAFE_SCHEME")) {
     return "OPERATOR-TARGET must be a plain http(s) URL or filesystem path, not a description. Put descriptive text in OPERATOR-ACTION and re-run; the task remains held.";
   }
+  if (reasons.includes("REFERENCE_ONLY_MARKER_FORMAT")) {
+    return "Receipt's OPERATOR-ACTION marker is a near miss of the reference-only form; held so it is not applied as a literal operator step. The only accepted spelling is exactly 'OPERATOR-ACTION: none (reference only)' on its own line with nothing after it (no period, no || OPERATOR-TARGET). Fix the marker, or replace it with a real install step, and re-run.";
+  }
+  if (reasons.includes("REFERENCE_ONLY_SCOPE_MISMATCH")) {
+    return "Receipt says 'none (reference only)' but the packet's accepted scope (desired_outcome, or title when that is empty) does not begin 'A' or 'An' followed by report, research, verification, recommendation, specification, brief, reference, summary, audit or plan; held. Either the output is really a report and the packet scope needs correcting through admin_amend_agent_task, or it is not and the receipt needs a real 'OPERATOR-ACTION: install <path> || OPERATOR-TARGET: <where>' step. Do NOT apply this by hand with apply_agent_task_review.";
+  }
+  if (reasons.includes("REFERENCE_ONLY_ON_INSTALLABLE")) {
+    return "Receipt says 'none (reference only)' but names a staged php/js/mjs/ts/sql/html/css/json file under deliverables/; a file with an installable extension is never reference-only. Held. Replace the marker with 'OPERATOR-ACTION: install <path> || OPERATOR-TARGET: <where>' and re-run. Do NOT apply this by hand with apply_agent_task_review.";
+  }
   if (reasons.includes("DELIVERABLE_WITHOUT_OPERATOR_ACTION")) {
     return "Receipt shows the run staged a deliverable under deliverables/ but carries no OPERATOR-ACTION marker; held so the install step is not lost. Add 'OPERATOR-ACTION: install <deliverable-path> || OPERATOR-TARGET: <install target>' to Follow-up recommendation and re-run.";
   }
@@ -1185,9 +1280,15 @@ function buildProjectBatches(apply, registry, draftDate, generatedAt) {
 
   return [...grouped.entries()].map(([projectSlug, items]) => {
     const route = registry[projectSlug];
-    const trackerDraft = items.map((item) =>
-      item.receipt_sections.tracker_draft
-    ).join("\n\n");
+    const trackerDraft = items.map((item) => {
+      const draft = item.receipt_sections.tracker_draft;
+      if (!item.operator?.reference_only) return draft;
+      const paths = [...new Set(referenceDeliverables(Object.values(item.receipt_sections).join("\n")))];
+      // A reference-only receipt that names no deliverables/ path gets no
+      // note: "nothing to install: " with an empty list is noise in the tracker.
+      if (paths.length === 0) return draft;
+      return `${draft}\nReference deliverable, nothing to install: ${paths.join(", ")}`;
+    }).join("\n\n");
     const sessionLogDraft = items.map((item) =>
       item.receipt_sections.session_log_draft
     ).join("\n\n");
@@ -1642,7 +1743,10 @@ export function evaluateResolutionSweep(packets, registry, options = {}) {
       event_date: eventDate,
       heading: `## Operator resolution — ${eventDate} (Open Engine OE-8E)`,
       marker: resolutionMarker(task.id),
-      body: `Resolved by ${completedBy} on ${eventDate}: ${note}`,
+      // The capture body names the card: three byte-identical operator notes
+      // on 2026-11-05 collapsed to ONE stored thought under SHA-256 dedup, and
+      // that thought named none of the three cards.
+      body: `Resolved by ${completedBy} on ${eventDate} (task ${String(task.id).slice(0, 8)}, ${task.title || "untitled"}): ${note}`,
     });
   }
 
@@ -2085,43 +2189,11 @@ async function runLive(args, registry) {
   try {
     result.applied = [];
     for (const item of result.apply) {
-      const applyResult = await mcpCall(config, "apply_agent_task_review", {
-        task_id: item.task_id,
-        applied_by: "closeout-controller",
-        resolution: "accepted",
-        resolve_linked_action_item: false,
-        // When the receipt carried an OPERATOR-ACTION marker, route to Needs Operator
-        // (operator step preserved) instead of closing to Agent Done.
-        operator_action: item.operator?.operator_action ?? undefined,
-        operator_target: item.operator?.operator_target ?? undefined,
-        // No note: apply_agent_task_review would overwrite review_reason with
-        // it. The augmentation is made durable on the immutable AGENT APPLIED
-        // event via closeout_evidence instead.
-        closeout_evidence: {
-          source: "oe8-closeout-controller",
-          mode: "oe8c-single-task",
-          // Stamped on the immutable AGENT APPLIED event so the board can
-          // always answer "did a human widen the risk gate for this card, and
-          // to what?" without re-deriving it from shell history.
-          operator_apply: item.operator_apply
-            ? { risk: item.risk, widened_by: "--operator-apply" }
-            : undefined,
-          required_sections_present: REQUIRED_RECEIPT_SECTIONS,
-          augmented_sections: item.augmented_sections,
-          review_note_augmentation: item.augmentation_text || undefined,
-          // OE-13: the controller's own executed-check verdict (spec §10 watch
-          // surface — the briefing reads it off this immutable event).
-          executed_check: item.executed_check
-            ? {
-              runner: item.executed_check.runner,
-              args: item.executed_check.args,
-              ref: item.executed_check.ref,
-              exit_code: item.executed_check.exit_code,
-              output_tail: item.executed_check.output_tail,
-            }
-            : undefined,
-        },
-      });
+      const applyResult = await mcpCall(
+        config,
+        "apply_agent_task_review",
+        applyReviewArgs(item),
+      );
       result.applied.push({ task_id: item.task_id, apply_result: applyResult });
       updateApplyJournal(journal.path, {
         state: "board-applied",

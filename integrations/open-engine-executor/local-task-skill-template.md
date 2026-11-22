@@ -94,7 +94,9 @@ OPERATOR STEP MARKER: when accepting the work leaves the operator a step outside
   OPERATOR-ACTION: <one-line step> || OPERATOR-TARGET: <url-or-path>
 (OPERATOR-TARGET and the || are optional.) THE MARKER MUST STAND ALONE ON ITS OWN LINE. The controller only reads a marker at the START of a line, so a marker tacked onto the end of a prose sentence is invisible to it and the operator step is silently lost on apply. Write your prose, end the line, then put the marker on a line by itself. The marker is valid ONLY inside "Follow-up recommendation:".
 
-MANDATORY WHENEVER YOU STAGE A DELIVERABLE: if you wrote any file under deliverables/, the task is NOT terminal — the staged file does nothing until a human installs it. Emit exactly:
+REFERENCE-ONLY DELIVERABLES: for a report with nothing to install, put OPERATOR-ACTION: none (reference only) on its own line in Follow-up recommendation. The accepted desired_outcome (or title only when desired_outcome is empty) must begin with A or An followed by report, research, verification, recommendation, specification, brief, reference, summary, audit, or plan. Any staged php/js/mjs/ts/sql/html/css/json file blocks this exception (REFERENCE_ONLY_ON_INSTALLABLE); other scope holds REFERENCE_ONLY_SCOPE_MISMATCH. This does not waive risk or approval gates. Agent Done means nothing to install, not nothing to read; the briefing still lists the report for a glance. Paste-ready content that must be published keeps its real operator step.
+
+MANDATORY WHENEVER YOU STAGE A DELIVERABLE THAT NEEDS INSTALLATION: if you wrote any file under deliverables/, the task is NOT terminal — the staged file does nothing until a human installs it. Emit exactly:
   OPERATOR-ACTION: install <the deliverables/ path you wrote> || OPERATOR-TARGET: <absolute path or URL the file must be installed to>
 Stamp the install target at completion time; you already know it (it is the file you were asked to modify, or the page/post/repo the draft is for). If the target is genuinely unknowable, say what you do know in the target slot rather than dropping the marker.
 

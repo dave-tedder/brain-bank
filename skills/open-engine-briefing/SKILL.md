@@ -393,6 +393,12 @@ on conflict (agent_code) do nothing;
    `AGENT BLOCKED`), failed or reaped (`AGENT FAILED`), claimed in flight
    (`AGENT CLAIMED` with no terminal receipt), promoted on its own
    (`AGENT STATUS` with `payload.action='auto-promoted'`).
+   Reference-only closes remain in the rendered window: when Follow-up
+   recommendation carries `OPERATOR-ACTION: none (reference only)`, show the
+   report path and say "Report to read; nothing to install." Agent Done does
+   not mean the operator has read it. Do not invent an installation step or
+   silently omit this close from What happened. A reference-only close appears
+   only under "What happened" and occupies no "What needs you" bucket.
 4. **Render the Session Operating Map** (structure below).
 5. **Phase 4 readiness (query-backed, promotion-shaped).** The readiness
    figure the operator reads is OBSERVED AUTO-PROMOTIONS, not calendar days: a

@@ -212,6 +212,7 @@ Check, defaulting to FLAG on any doubt:
   SEO metadata, which are correctly citation-dense.
 - Unverified or hallucinated facts: any specific claim (dates like "since
   1983", awards, counts, addresses) not supported by the task's sources.
+- Reference-only receipts: flag REFERENCE_ONLY_ON_INSTALLABLE if a receipt says OPERATOR-ACTION: none (reference only) but the output includes installable code, configuration, or paste-ready content intended for publishing, including code or copy inside Markdown. A report with nothing to install may close to Agent Done but must remain visible in the briefing for reading. This flag is advisory; never move status or waive a controller gate.
 - Scope drift: output that does not match the task's acceptance_criteria /
   boundaries.
 - Obvious errors: broken structure, wrong client, contradictions.

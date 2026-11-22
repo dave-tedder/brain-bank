@@ -231,7 +231,9 @@ OPERATOR-ACTION: <one-line step> || OPERATOR-TARGET: <url-or-path>
 
 (OPERATOR-TARGET and the `||` are optional.) **The marker must stand alone on its own line.** The controller only reads a marker at the START of a line, so a marker tacked onto the end of a prose sentence is invisible to it and the operator step is silently lost on apply. Write the prose, end the line, then put the marker on a line by itself.
 
-**Mandatory whenever the run stages a deliverable:** if the run wrote any file under `deliverables/` (see DELIVERABLES-TO-FILE), the task is NOT terminal — the staged file does nothing until a human installs it. Emit exactly:
+REFERENCE-ONLY DELIVERABLES: for a report with nothing to install, put OPERATOR-ACTION: none (reference only) on its own line in Follow-up recommendation. The accepted desired_outcome (or title only when desired_outcome is empty) must begin with A or An followed by report, research, verification, recommendation, specification, brief, reference, summary, audit, or plan. Any staged php/js/mjs/ts/sql/html/css/json file blocks this exception (REFERENCE_ONLY_ON_INSTALLABLE); other scope holds REFERENCE_ONLY_SCOPE_MISMATCH. This does not waive risk or approval gates. Agent Done means nothing to install, not nothing to read; the briefing still lists the report for a glance. Paste-ready content that must be published keeps its real operator step.
+
+**Mandatory whenever the run stages a deliverable that needs installation:** if the run wrote any file under `deliverables/` (see DELIVERABLES-TO-FILE), the task is NOT terminal — the staged file does nothing until a human installs it. Emit exactly:
 
 ```text
 OPERATOR-ACTION: install <the deliverables/ path written> || OPERATOR-TARGET: <absolute path or URL the file must be installed to>
