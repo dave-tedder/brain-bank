@@ -29,6 +29,11 @@ import {
 } from "../_shared/decisions.ts";
 import { resolveOpenItemAndRecord } from "../_shared/resolve-open-item.ts";
 import { transitionActionItem } from "../_shared/action-item-transition.ts";
+import {
+  parseReviewCommand,
+  type ReviewCommand,
+  reviewProposal,
+} from "../_shared/proposal-review.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import {
   buildSlackTaskIntakeRecord,
@@ -824,6 +829,35 @@ async function postCaptureHook(
   }
 }
 
+// --- Proposal review replies (loop-closing Task 3.6) ---
+// `keep <id>`, `archive <id>`, `done <id>`, `done <id> <decision-id>`. The Slack
+// signature check has already run, and the router has already dropped every
+// subtype and every bot post, so event.user here is the top-level user of an
+// ordinary user message: a bound identity. A missing or empty user writes nothing
+// and replies nothing.
+async function handleReviewCommand(
+  command: ReviewCommand,
+  user: unknown,
+  channel: string,
+  replyTs: string,
+): Promise<void> {
+  if (typeof user !== "string" || user.trim() === "") {
+    console.error("handleReviewCommand: event has no user; nothing written, no reply");
+    return;
+  }
+  const result = await reviewProposal(supabase, {
+    verb: command.verb,
+    itemRef: command.itemRef,
+    decisionRef: command.decisionRef,
+    actor: `slack:${user.trim()}`,
+    source: "slack-signature",
+  });
+  if (result.status === "error") {
+    console.error(`handleReviewCommand: ${result.message}`);
+  }
+  await replyInSlack(channel, replyTs, result.text);
+}
+
 // --- "done:" Command ---
 
 async function handleDoneCommand(
@@ -1314,9 +1348,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Route based on channel and thread context
     if (channel === SLACK_CAPTURE_CHANNEL) {
       const queryText = parseQuery(messageText);
+      // Exact-form review replies are checked BEFORE the free-text done: command,
+      // which is unchanged. Usually a reply in the digest's thread.
+      const reviewCommand = parseReviewCommand(messageText);
       const isDoneCommand = /^done:\s*/i.test(messageText);
-      if (isDoneCommand) {
-        EdgeRuntime.waitUntil(handleDoneCommand(messageText, channel, messageTs));
+      if (reviewCommand) {
+        EdgeRuntime.waitUntil(
+          handleReviewCommand(reviewCommand, event.user, channel, threadTs ?? messageTs),
+        );
+      } else if (isDoneCommand) {
+        EdgeRuntime.waitUntil(
+          handleDoneCommand(messageText, channel, messageTs),
+        );
       } else if (queryText) {
         EdgeRuntime.waitUntil(handleQuery(queryText, channel, messageTs, 0.4));
       } else if (threadTs) {

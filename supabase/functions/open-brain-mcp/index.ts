@@ -56,6 +56,7 @@ import {
   transitionActionItem,
   type TransitionArgs,
 } from "../_shared/action-item-transition.ts";
+import { REVIEW_VERBS, reviewProposal } from "../_shared/proposal-review.ts";
 import {
   ACTIVE_ACTION_ITEM_DRAFT_STATUSES,
   ACTIVE_THOUGHT_DRAFT_STATUSES,
@@ -2277,6 +2278,51 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error archiving action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "review_proposal",
+  {
+    title: "Review Proposal",
+    description:
+      "Record a review of a pending proposal on an action item (loop-closing Task 3.6; the same handler as the Slack replies `keep <id>`, `archive <id>`, `done <id>`, `done <id> <decision-id>`). item_ref: the item's full id or its first 8 characters. verb: keep (every pending proposal on the item is kept; the item stays as it is), archive (accepts the pending archive/fragment proposal and archives the item), done (accepts the one pending recheck/calendar/dedup proposal and closes the item; with two or more pending, the reply lists them and decision_ref picks one). decision_ref is accepted with done only. actor: 'operator' or a registered agent_code, recorded as reviewed_by with actor_source mcp-shared-key (claimed by the caller, not proven). Always answers with a status and a message: recorded, already_recorded, refused, ambiguous, not_found, nothing_pending, needs_decision. restore_action_item is the undo for archive and done.",
+    inputSchema: {
+      item_ref: z.string().min(1).max(64),
+      verb: z.enum(REVIEW_VERBS),
+      actor: z.string().min(1).max(64),
+      // No min(1): a supplied value, even "" or whitespace, must reach the
+      // handler's refusal ("keep and archive take no decision id", or the empty
+      // decision id refusal on done) rather than be mistaken for an absent one.
+      decision_ref: z.string().max(64).optional().describe(
+        "With done only: the decision's full id or first 8 characters. Omit it otherwise; any supplied value (even empty) is refused with keep or archive, and an empty one is refused with done.",
+      ),
+    },
+  },
+  async (
+    { item_ref, verb, actor, decision_ref }: {
+      item_ref: string;
+      verb: (typeof REVIEW_VERBS)[number];
+      actor: string;
+      decision_ref?: string;
+    },
+  ) => {
+    logToolInvocation("review_proposal", { item_ref, verb, actor, decision_ref }, "mcp");
+    try {
+      const result = await reviewProposal(supabase, {
+        verb,
+        itemRef: item_ref,
+        decisionRef: decision_ref ?? null,
+        actor,
+        source: "mcp-shared-key",
+      });
+      if (result.status === "error") return errorToolResponse(result.text);
+      return textToolResponse({ review: result });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error reviewing proposal: ${(err as Error).message}`,
       );
     }
   },

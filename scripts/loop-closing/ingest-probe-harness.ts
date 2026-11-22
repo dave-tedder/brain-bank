@@ -38,7 +38,10 @@ const scenario = {
   openItems: null as Array<{ id: string; description: string }> | null,
   doneMatched: [] as number[],
   transitionAnswers: [] as Array<number | "error">,
+  proposalItems: [] as Array<{ item_id: string; description: string }>,
+  reviewAnswers: [] as Array<Array<{ status: string; message: string; decision_id: string | null }>>,
 };
+const slackThreads: Array<string | undefined> = [];
 const slackReplies: string[] = [];
 
 const origLog = console.log, origErr = console.error;
@@ -77,6 +80,7 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
   }
   if (url.startsWith("https://slack.com/")) {
     slackReplies.push(String((body as { text?: string })?.text ?? ""));
+    slackThreads.push((body as { thread_ts?: string })?.thread_ts);
     return json({ ok: true });
   }
   if (url.startsWith("http://supabase.mock/")) {
@@ -89,6 +93,8 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
     const single = accept.includes("vnd.pgrst.object");
     if (table.startsWith("rpc/")) {
       if (table === "rpc/find_candidate_action_items") return json(scenario.candidates);
+      if (table === "rpc/resolve_proposal_item") return json(scenario.proposalItems);
+      if (table === "rpc/review_proposal") return json(scenario.reviewAnswers.shift() ?? []);
       if (table === "rpc/transition_action_item") {
         if (scenario.transitionAnswers.length) {
           const answer = scenario.transitionAnswers.shift()!;
@@ -120,8 +126,8 @@ async function sign(body: string, ts: string): Promise<string> {
   return "v0=" + Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function postSlackMessage(text: string): Promise<number> {
-  const body = JSON.stringify({ type: "event_callback", event: { type: "message", text, channel: CAPTURE_CHANNEL, ts: `${Date.now() / 1000}` } });
+async function postSlackMessage(text: string, extra: Record<string, unknown> = {}): Promise<number> {
+  const body = JSON.stringify({ type: "event_callback", event: { type: "message", text, channel: CAPTURE_CHANNEL, ts: `${Date.now() / 1000}`, ...extra } });
   const ts = String(Math.floor(Date.now() / 1000));
   const res = await realFetch(`http://127.0.0.1:${PORT}/`, {
     method: "POST",
@@ -244,6 +250,61 @@ expect(!reply6.includes("send Sam the contract"), `probe 6 reply must not claim 
 expect(reply6.includes("Failed to mark 1 item") && reply6.includes("send Sam the deposit link"), `probe 6 reply reports the failure: ${reply6}`);
 scenario.openItems = null;
 origLog("probe 6 ok: done: goes through the guarded transition; a no-longer-open item is not reported as done; an error is reported as an error");
+
+// --- Probe 7 (Task 3.6): the exact-form review replies, in the digest's thread. ---
+const PITEM = "c0140001-0000-4000-8000-000000000000";
+const reviewCalls = () => recorded.filter((r) => r.table === "rpc/review_proposal").map((r) => r.body as Record<string, unknown>);
+const nothingCaptured = () =>
+  inserts("thoughts").length === 0 && recorded.filter((r) => r.table === "rpc/transition_action_item").length === 0 &&
+  !recorded.some((r) => r.url.startsWith("https://openrouter.ai/"));
+const forms: Array<[string, string, string | null]> = [
+  ["keep c0140001", "keep", null],
+  ["archive C0140001", "archive", null],
+  ["done c0140001", "done", null],
+  ["DONE c0140001 d0140002", "done", "d0140002"],
+];
+for (const [text, verb, decisionRef] of forms) {
+  recorded.length = 0; logs.length = 0; slackReplies.length = 0; slackThreads.length = 0;
+  scenario.proposalItems = [{ item_id: PITEM, description: "send her the explainer PDF" }];
+  scenario.reviewAnswers = [[{ status: "recorded", message: `${verb} recorded`, decision_id: null }]];
+  expect(await postSlackMessage(text, { user: "U0AB12CD", thread_ts: "1731900000.000100" }) === 200, `probe 7 HTTP for ${text}`);
+  const calls = reviewCalls();
+  expect(
+    calls.length === 1 && calls[0].p_item_id === PITEM && calls[0].p_verb === verb && calls[0].p_actor === "slack:U0AB12CD" &&
+      calls[0].p_actor_source === "slack-signature" && calls[0].p_decision_ref === decisionRef,
+    `probe 7 review_proposal args for "${text}": ${JSON.stringify(calls)}`,
+  );
+  expect(nothingCaptured(), `probe 7 "${text}" must not be captured as a thought or touch the done: path`);
+  expect(slackReplies.length === 1 && slackReplies[0] === `c0140001 "send her the explainer PDF": ${verb} recorded`, `probe 7 reply: ${JSON.stringify(slackReplies)}`);
+  expect(slackThreads[0] === "1731900000.000100", `probe 7 reply must go to the digest thread: ${JSON.stringify(slackThreads)}`);
+}
+origLog("probe 7 ok: keep, archive, done and done-with-decision route to review_proposal with the signed Slack user, reply in the thread, capture nothing");
+
+// --- Probe 8: no user writes nothing and replies nothing; subtype and bot posts never reach the handler. ---
+for (const [label, extra] of [
+  ["no user", {}],
+  ["empty user", { user: "" }],
+  ["edited message", { subtype: "message_changed", message: { user: "U0AB12CD", text: "keep c0140001" } }],
+  ["bot post", { user: "U0AB12CD", bot_id: "B0001" }],
+] as Array<[string, Record<string, unknown>]>) {
+  recorded.length = 0; logs.length = 0; slackReplies.length = 0;
+  scenario.proposalItems = [{ item_id: PITEM, description: "send her the explainer PDF" }];
+  scenario.reviewAnswers = [[{ status: "recorded", message: "should not happen", decision_id: null }]];
+  expect(await postSlackMessage("keep c0140001", extra) === 200, `probe 8 HTTP (${label})`);
+  expect(recorded.filter((r) => r.table.startsWith("rpc/")).length === 0, `probe 8 (${label}) must call no RPC: ${JSON.stringify(recorded.map((r) => r.table))}`);
+  expect(slackReplies.length === 0, `probe 8 (${label}) must not reply: ${JSON.stringify(slackReplies)}`);
+  expect(inserts("thoughts").length === 0, `probe 8 (${label}) must not capture`);
+}
+origLog("probe 8 ok: a review form with no user, an edited message and a bot post write nothing and reply nothing");
+
+// --- Probe 9: a near-miss is NOT a review command and is captured as before. ---
+recorded.length = 0; logs.length = 0; slackReplies.length = 0;
+scenario.metadata = { people: [], action_items: [], dates_mentioned: [], topics: ["koi"], type: "observation", project: null, priority: "normal" };
+scenario.candidates = [];
+expect(await postSlackMessage("keep c0140001 d0140002", { user: "U0AB12CD" }) === 200, "probe 9 HTTP");
+expect(reviewCalls().length === 0, "probe 9 keep with a decision id is not a review form");
+expect(inserts("thoughts").length === 1, "probe 9 the near-miss is captured as a thought, as before");
+origLog("probe 9 ok: keep with a second id is not an exact form and is captured unchanged");
 
 console.log = origLog; console.error = origErr;
 console.log("INGEST PROBE PASSED");
