@@ -14,6 +14,11 @@ import {
   formatSentinelReport,
 } from "./sentinel-report.ts";
 import { DESK_STATUSES, type DeskRow, renderDeskLine } from "./desk-line.ts";
+import {
+  type ArchiveJobRun,
+  type ArchiveProposalRow,
+  renderArchiveProposals,
+} from "./archive-proposals.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
@@ -189,6 +194,11 @@ async function synthesizeDigest(
   // Reads not_before, so 20261105_agent_tasks_not_before.sql must be applied
   // before this deploys; until then the line reads unavailable.
   const deskLine = await loadDeskLine();
+  // Loop-closing Task 3.2: pending archive proposals from the 05:30 UTC job,
+  // rendered deterministically after the desk line. Reads the columns from
+  // 20261107 and the RPC from 20261119; until 20261119 is applied the job line
+  // reads unavailable and the list reads none pending.
+  const archiveSection = await loadArchiveProposals();
 
   const structuredLines = [
     `Open action item count: ${openActionTotal}`,
@@ -335,7 +345,32 @@ Neither of those is today. Today is the one appointment, then clear.
 
   const synthesized = (data.choices?.[0]?.message?.content ?? "").trim();
   const checklist = renderOpenActionChecklist(openActionRows, openActionTotal);
-  return [synthesized, checklist, deskLine].filter(Boolean).join("\n\n");
+  return [synthesized, checklist, deskLine, archiveSection].filter(Boolean).join("\n\n");
+}
+
+async function loadArchiveProposals(): Promise<string> {
+  let rows: ArchiveProposalRow[] | null = null;
+  let run: ArchiveJobRun | null = null;
+  try {
+    const { data, error } = await supabase
+      .from("action_items")
+      .select("id, description, created_at, archive_proposed_at")
+      .eq("status", "open")
+      .not("archive_proposed_at", "is", null)
+      .is("archive_review_outcome", null);
+    if (error) console.error("archive proposals query failed (non-fatal):", error);
+    else rows = (data ?? []) as ArchiveProposalRow[];
+  } catch (err) {
+    console.error("archive proposals read failed (non-fatal):", err);
+  }
+  try {
+    const { data, error } = await supabase.rpc("archive_proposals_last_run");
+    if (error) console.error("archive job last-run read failed (non-fatal):", error);
+    else run = (Array.isArray(data) && data[0]) ? data[0] as ArchiveJobRun : { status: null, start_time: null };
+  } catch (err) {
+    console.error("archive job last-run read failed (non-fatal):", err);
+  }
+  return renderArchiveProposals(rows, run, new Date().toISOString());
 }
 
 async function loadDeskLine(): Promise<string> {
