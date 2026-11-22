@@ -702,7 +702,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local, check_spec, close_check";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local, check_spec, close_check, not_before";
 
 // Internal load for the receipt-guard path only: includes claim_token so
 // assertClaimTokenMatches can pre-check. Never use for list/get responses.
@@ -730,7 +730,7 @@ const AGENT_TASK_LOAD_SELECT = `${AGENT_TASK_SELECT}, claim_token`;
 // gives one projection every scanning lane uses unmodified, instead of a
 // per-status special case in three separate routine prompts.
 const AGENT_TASK_COMPACT_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec, close_check";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec, close_check, not_before";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -769,6 +769,9 @@ async function moveAgentTaskViaTool(args: {
   action: AgentTaskToolAction;
   reason?: string;
   claimToken?: string;
+  // Task 2.3: only the hold tool sets this; the RPC refuses it on any other
+  // transition, so a stray value never lands silently.
+  notBefore?: string;
 }) {
   const task = await loadAgentTaskForTool(args.taskId);
   if (!task) throw new Error(`Task not found: ${args.taskId}`);
@@ -797,6 +800,7 @@ async function moveAgentTaskViaTool(args: {
     p_agent_code: args.agentCode,
     p_reason: args.reason ?? null,
     p_claim_token: args.claimToken ?? null,
+    p_not_before: args.notBefore ?? null,
   });
   if (error) throw error;
   return { receipt, task: data };
@@ -3176,7 +3180,7 @@ server.registerTool(
   {
     title: "Admin Amend Agent Task",
     description:
-      "Ops-correction escape hatch (C3). One honest verb for board fixes that otherwise need raw SQL: set project_slug, append sources, set operator_action/operator_target, set requires_local, move a held or terminal task onto the Needs Operator desk, author or clear a close_check, and/or release a stuck claim (the folded handoff). Never touches attempt_count, never writes a false AGENT FAILED, never edits an existing event. Writes exactly one honest audit event (AGENT NEEDS OPERATOR when moving to the desk, else AGENT STATUS). Human/ops use only — not for executor lanes.",
+      "Ops-correction escape hatch (C3). One honest verb for board fixes that otherwise need raw SQL: set project_slug, append sources, set operator_action/operator_target, set requires_local, move a held or terminal task onto the Needs Operator desk, author or clear a close_check, set the not-before date on a card already in Agent Needs Input, and/or release a stuck claim (the folded handoff). Never touches attempt_count, never writes a false AGENT FAILED, never edits an existing event. Writes exactly one honest audit event (AGENT NEEDS OPERATOR when moving to the desk, else AGENT STATUS). Human/ops use only — not for executor lanes.",
     inputSchema: {
       task_id: z.string().uuid(),
       reason: z.string().min(1).describe(
@@ -3206,6 +3210,9 @@ server.registerTool(
       clear_close_check: z.boolean().optional().describe(
         "Clear this card's close_check, returning it to the human-read desk. The first-line rollback lever for a bad probe. Cannot be combined with set_close_check.",
       ),
+      set_not_before: z.string().datetime({ offset: true }).optional().describe(
+        "Set (or correct, by overwriting) the not-before date on a card that is ALREADY in Agent Needs Input: the earliest moment the hold is worth re-queueing, read from the hold note and confirmed by the operator. Refused on any other status and refused in the same call as move_to_needs_operator or release_claim (those transitions clear the date). Changes no status; the one AGENT STATUS audit event carries set_not_before. A past date is allowed and means the hold is already overdue. The date clears itself when the card leaves Agent Needs Input.",
+      ),
     },
   },
   async (
@@ -3222,6 +3229,7 @@ server.registerTool(
       release_claim,
       set_close_check,
       clear_close_check,
+      set_not_before,
     }: {
       task_id: string;
       reason: string;
@@ -3235,6 +3243,7 @@ server.registerTool(
       release_claim?: boolean;
       set_close_check?: Record<string, unknown>;
       clear_close_check?: boolean;
+      set_not_before?: string;
     },
   ) => {
     logToolInvocation("admin_amend_agent_task", {
@@ -3243,6 +3252,7 @@ server.registerTool(
       release_claim: release_claim === true,
       set_close_check: set_close_check !== undefined,
       clear_close_check: clear_close_check === true,
+      set_not_before: set_not_before !== undefined,
     }, "mcp");
     try {
       // Shape-validated here so a bad probe is refused at authorship, sharing the
@@ -3267,6 +3277,7 @@ server.registerTool(
         p_release_claim: release_claim === true,
         p_set_close_check: validatedCloseCheck,
         p_clear_close_check: clear_close_check === true,
+        p_set_not_before: set_not_before ?? null,
       });
       if (error) throw error;
       return textToolResponse({
@@ -3457,7 +3468,7 @@ server.registerTool(
   {
     title: "Hold Agent Task",
     description:
-      "Move a claimed Agent Working task to Agent Needs Input with an AGENT HUMAN HOLD receipt. The scheduled Queue Runner's claim-and-hold contract uses this when a packet validates but the scheduled path has no executor.",
+      "Move a claimed Agent Working task to Agent Needs Input with an AGENT HUMAN HOLD receipt. The scheduled Queue Runner's claim-and-hold contract uses this when a packet validates but the scheduled path has no executor. When the hold is TIMED (the packet says execute on or after a date, a dependency lands on a known day), pass not_before so the digest and the sentinel can report the hold as past due instead of letting it sit; an undated hold is a decision hold and never expires.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
@@ -3467,17 +3478,25 @@ server.registerTool(
       claim_token: z.string().uuid().optional().describe(
         "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
       ),
+      not_before: z.string().datetime({ offset: true }).optional().describe(
+        "ISO 8601 timestamp (with Z or an offset) before which this hold is not worth re-queueing. Stored on agent_tasks.not_before and carried on the AGENT HUMAN HOLD event; cleared automatically when the card leaves Agent Needs Input. Omit for a hold with no date.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, reason, claim_token }: {
+    { task_id, agent_code, reason, claim_token, not_before }: {
       task_id: string;
       agent_code: string;
       reason: string;
       claim_token?: string;
+      not_before?: string;
     },
   ) => {
-    logToolInvocation("hold_agent_task", { task_id, agent_code }, "mcp");
+    logToolInvocation("hold_agent_task", {
+      task_id,
+      agent_code,
+      not_before: not_before !== undefined,
+    }, "mcp");
     try {
       return textToolResponse(
         await moveAgentTaskViaTool({
@@ -3486,6 +3505,7 @@ server.registerTool(
           action: "hold",
           reason,
           claimToken: claim_token,
+          notBefore: not_before,
         }),
       );
     } catch (err: unknown) {

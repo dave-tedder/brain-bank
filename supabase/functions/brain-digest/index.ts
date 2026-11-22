@@ -13,6 +13,7 @@ import {
   formatReconcilerReport,
   formatSentinelReport,
 } from "./sentinel-report.ts";
+import { DESK_STATUSES, type DeskRow, renderDeskLine } from "./desk-line.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
@@ -181,6 +182,14 @@ async function synthesizeDigest(
   const openActionRows = (openActions ?? []) as DigestActionRow[];
   const openActionTotal = openActionsTotal ?? openActionRows.length;
 
+  // Loop-closing Task 2.3: the board desk, counted from exact rows, rendered
+  // deterministically after the checklist in both daily and weekly digests.
+  // Advisory like the sentinel line: a failed read prints an "unavailable"
+  // line rather than a clean-looking zero, and never blocks the digest.
+  // Reads not_before, so 20261105_agent_tasks_not_before.sql must be applied
+  // before this deploys; until then the line reads unavailable.
+  const deskLine = await loadDeskLine();
+
   const structuredLines = [
     `Open action item count: ${openActionTotal}`,
     `Top topics: ${Object.entries(topicCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([t, c]) => `${t} (${c})`).join(", ") || "none"}`,
@@ -326,7 +335,30 @@ Neither of those is today. Today is the one appointment, then clear.
 
   const synthesized = (data.choices?.[0]?.message?.content ?? "").trim();
   const checklist = renderOpenActionChecklist(openActionRows, openActionTotal);
-  return [synthesized, checklist].filter(Boolean).join("\n\n");
+  return [synthesized, checklist, deskLine].filter(Boolean).join("\n\n");
+}
+
+async function loadDeskLine(): Promise<string> {
+  try {
+    const { data, error } = await supabase
+      .from("agent_tasks")
+      .select(
+        "id, status, created_at, archived_at, not_before, title, desired_outcome",
+      )
+      .is("archived_at", null)
+      .in("status", [...DESK_STATUSES]);
+    if (error) {
+      console.error("desk line query failed (non-fatal):", error);
+      return "Board desk unavailable: agent_tasks could not be read.";
+    }
+    return renderDeskLine(
+      (data ?? []) as DeskRow[],
+      new Date().toISOString(),
+    );
+  } catch (err) {
+    console.error("desk line failed (non-fatal):", err);
+    return "Board desk unavailable: agent_tasks could not be read.";
+  }
 }
 
 // --- Previous Week Context (week-over-week comparison) ---
