@@ -9,6 +9,7 @@
 // call sites inside each checkAutoResolve are mirrored.
 
 import { type DecisionDb, recordDecision } from "./decisions.ts";
+import { transitionActionItem, type TransitionDb } from "./action-item-transition.ts";
 
 export type ResolveOutcome = "resolved" | "not_open" | "error";
 
@@ -17,32 +18,28 @@ export type ResolveOpenItemArgs = {
   description: string;
   thoughtId: string;
   quote: string;
-  now: string;
 };
 
 export async function resolveOpenItemAndRecord(
-  db: DecisionDb,
+  db: DecisionDb & TransitionDb,
   args: ResolveOpenItemArgs,
 ): Promise<ResolveOutcome> {
-  const { data: affected, error: updateError } = await db
-    .from("action_items")
-    .update({
-      status: "resolved",
-      resolved_by_thought_id: args.thoughtId,
-      resolved_at: args.now,
-    })
-    .eq("id", args.itemId)
-    .eq("status", "open")
-    .select("id");
-  if (updateError) {
+  const transition = await transitionActionItem(db, {
+    itemId: args.itemId,
+    from: ["open"],
+    to: "resolved",
+    actor: "auto-resolve",
+    closeReason: "done",
+    resolvedByThoughtId: args.thoughtId,
+    evidenceThoughtId: args.thoughtId,
+  });
+  if (!transition.ok) {
     console.error(
-      `checkAutoResolve: resolve UPDATE failed for item ${args.itemId}: ${
-        (updateError as { message?: string }).message ?? String(updateError)
-      }`,
+      `checkAutoResolve: resolve UPDATE failed for item ${args.itemId}: ${transition.error}`,
     );
     return "error";
   }
-  if (!Array.isArray(affected) || affected.length === 0) {
+  if (transition.affected === 0) {
     // The item left `open` while the model ran (deferred, closed by hand, or
     // resolved by a concurrent capture). Nothing changed, so nothing is
     // recorded as resolved.

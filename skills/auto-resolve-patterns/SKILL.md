@@ -24,7 +24,7 @@ Keep these behavior-identical in both capture functions:
 - The LAYER 3.5 invocation and fail-closed parse wiring.
 - Candidate scoping, exclusions, and update behavior.
 
-Shared helpers under `supabase/functions/_shared/` are single-source and do not need duplicated implementations.
+Shared helpers under `supabase/functions/_shared/` are single-source and do not need duplicated implementations. A resolve goes through `_shared/resolve-open-item.ts`, which calls the `transition_action_item` RPC (`_shared/action-item-transition.ts`), the one way TypeScript changes `action_items.status`: every close carries an actor, a `close_reason` and a current-status guard, and writes an `action_item_events` row.
 
 ## Required Verification
 

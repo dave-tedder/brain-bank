@@ -40,12 +40,22 @@ import {
 import { buildRestEventUpdate } from "./_rest_event.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
+  ACTION_ITEM_LIST_MAX,
+  actionItemListWindow,
   assertRestoreSelector,
-  buildDeferActionItemUpdate,
-  buildResolveActionItemUpdate,
-  buildRestoreActionItemUpdate,
+  buildArchiveTransition,
+  buildDeferTransition,
+  buildResolveTransition,
+  buildRestoreTransition,
   stateGuardError,
 } from "./_action_items.ts";
+import {
+  ACTION_ITEM_CLOSE_REASONS,
+  type ActionItemCloseReason,
+  restoreByDeferReason,
+  transitionActionItem,
+  type TransitionArgs,
+} from "../_shared/action-item-transition.ts";
 import {
   ACTIVE_ACTION_ITEM_DRAFT_STATUSES,
   ACTIVE_THOUGHT_DRAFT_STATUSES,
@@ -542,7 +552,6 @@ For each match you return, the "reason" field must quote the specific phrase in 
   // long precise quotes the LAYER 2 prompt demands.
   const resolvedDescriptions: string[] = [];
   // shared across the batch — intentional, do not move inside loop
-  const now = new Date().toISOString();
   for (const claim of claims) {
     const idx = claim.num - 1;
     if (idx < 0 || idx >= candidateItems.length) continue;
@@ -602,13 +611,13 @@ For each match you return, the "reason" field must quote the specific phrase in 
     }
     // Status-guarded resolve (loop-closing Task 1.4): only a row still `open`
     // is resolved, and the `resolved` decision row is written only when that
-    // row was affected. Shared helper, single source.
+    // row was affected. Goes through transition_action_item (Task 3.1), so the
+    // close carries a reason and an attributed event. Shared helper, single source.
     const resolved = await resolveOpenItemAndRecord(supabase, {
       itemId: item.id,
       description: item.description,
       thoughtId: newThoughtId,
       quote: claim.reason,
-      now,
     });
     if (resolved !== "resolved") continue;
     resolvedDescriptions.push(item.description);
@@ -2112,30 +2121,39 @@ server.registerTool(
   {
     title: "List Open Action Items",
     description:
-      "Read-only OE-12 triage surface. Returns open action_items rows, newest first, each flagged has_active_draft when an active agent_tasks draft already links to it. Set include_deferred=true to also return items held out by defer_action_item (each carrying defer_reason + deferred_at). Never resolves, archives, or mutates anything.",
+      "Read-only OE-12 triage surface. Returns open action_items rows, newest first by default, each flagged has_active_draft when an active agent_tasks draft already links to it. Set include_deferred=true to also return items held out by defer_action_item (each carrying defer_reason + deferred_at). Set order='oldest' to read the oldest first and offset to page; count is this page's size. Never resolves, archives, or mutates anything.",
     inputSchema: {
-      limit: z.number().int().min(1).max(100).optional(),
+      limit: z.number().int().min(1).max(ACTION_ITEM_LIST_MAX).optional(),
       include_deferred: z.boolean().optional(),
+      order: z.enum(["newest", "oldest"]).optional(),
+      offset: z.number().int().min(0).optional(),
     },
   },
   async (
-    { limit, include_deferred }: { limit?: number; include_deferred?: boolean },
+    { limit, include_deferred, order, offset }: {
+      limit?: number;
+      include_deferred?: boolean;
+      order?: "newest" | "oldest";
+      offset?: number;
+    },
   ) => {
     logToolInvocation(
       "list_open_action_items",
-      { limit, include_deferred },
+      { limit, include_deferred, order, offset },
       "mcp",
     );
     try {
       const statuses = include_deferred ? ["open", "deferred"] : ["open"];
+      const window = actionItemListWindow({ limit, offset });
       const { data: items, error } = await supabase
         .from("action_items")
         .select(
           "id, description, status, created_at, source_thought_id, defer_reason, deferred_at",
         )
         .in("status", statuses)
-        .order("created_at", { ascending: false })
-        .limit(limit ?? 50);
+        .order("created_at", { ascending: order === "oldest" })
+        .order("id", { ascending: true })
+        .range(window.from, window.to);
       if (error) throw error;
       const ids = (items ?? []).map((i) => i.id as string);
       let activeIds = new Set<string>();
@@ -2165,12 +2183,40 @@ server.registerTool(
   },
 );
 
+// Run one guarded transition and read the row back for the response. Zero affected
+// rows means the guard refused: report the status that refused it.
+async function runActionItemTransition(
+  action: "resolve" | "defer" | "restore" | "archive",
+  requiredStatus: string,
+  args: TransitionArgs,
+  columns: string,
+) {
+  const transition = await transitionActionItem(supabase, args);
+  if (!transition.ok) throw new Error(transition.error);
+  const { data: row, error } = await supabase
+    .from("action_items")
+    .select(transition.affected === 0 ? "status" : columns)
+    .eq("id", args.itemId)
+    .maybeSingle();
+  if (error) throw error;
+  if (transition.affected === 0) {
+    return {
+      refused: stateGuardError(
+        action,
+        requiredStatus,
+        row as unknown as { status: string } | null,
+      ),
+    };
+  }
+  return { row };
+}
+
 server.registerTool(
   "resolve_action_item",
   {
     title: "Resolve Action Item",
     description:
-      "Operator-gated close for a genuinely-done open action_items row. Sets status='resolved' and records reason as an audit note (resolution_note). Guarded: only an item currently 'open' can be resolved. This is NOT an is-it-done matcher — it trusts the caller's stated judgment and does no LLM matching. For a paused-project item you want back later, use defer_action_item instead.",
+      "Operator-gated close for a genuinely-done open action_items row. Sets status='resolved' with close_reason='done' and records reason as an audit note (resolution_note). Guarded: only an item currently 'open' can be resolved. This is NOT an is-it-done matcher — it trusts the caller's stated judgment and does no LLM matching. For a paused-project item you want back later, use defer_action_item instead; for an item that should close without being done, use archive_action_item.",
     inputSchema: {
       id: z.string().uuid(),
       reason: z.string().min(1).max(500),
@@ -2179,29 +2225,58 @@ server.registerTool(
   async ({ id, reason }: { id: string; reason: string }) => {
     logToolInvocation("resolve_action_item", { id }, "mcp");
     try {
-      const update = buildResolveActionItemUpdate(
-        reason,
-        new Date().toISOString(),
+      const result = await runActionItemTransition(
+        "resolve",
+        "open",
+        buildResolveTransition(id, reason),
+        "id, description, status, resolved_at, resolution_note, close_reason, closed_at",
       );
-      const { data: updated, error } = await supabase
-        .from("action_items")
-        .update(update)
-        .eq("id", id)
-        .eq("status", "open")
-        .select("id, description, status, resolved_at, resolution_note");
-      if (error) throw error;
-      if (!updated || updated.length === 0) {
-        const { data: current } = await supabase
-          .from("action_items")
-          .select("status")
-          .eq("id", id)
-          .maybeSingle();
-        return errorToolResponse(stateGuardError("resolve", "open", current));
-      }
-      return textToolResponse({ resolved: updated[0] });
+      if (result.refused) return errorToolResponse(result.refused);
+      return textToolResponse({ resolved: result.row });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error resolving action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "archive_action_item",
+  {
+    title: "Archive Action Item",
+    description:
+      "Operator-gated close for an open or deferred action_items row that should stop being tracked. Sets status='archived' with a required close_reason and records reason as the audit note. close_reason: done, superseded, duplicate (requires duplicate_of, the surviving item), fragment, expired, wont_do. Reversible with restore_action_item. Writes one action_item_events row.",
+    inputSchema: {
+      id: z.string().uuid(),
+      reason: z.string().min(1).max(500),
+      close_reason: z.enum(ACTION_ITEM_CLOSE_REASONS),
+      duplicate_of: z.string().uuid().optional().describe(
+        "The surviving item. Required with close_reason 'duplicate', refused with any other.",
+      ),
+    },
+  },
+  async (
+    { id, reason, close_reason, duplicate_of }: {
+      id: string;
+      reason: string;
+      close_reason: ActionItemCloseReason;
+      duplicate_of?: string;
+    },
+  ) => {
+    logToolInvocation("archive_action_item", { id, close_reason }, "mcp");
+    try {
+      const result = await runActionItemTransition(
+        "archive",
+        "open' or 'deferred",
+        buildArchiveTransition(id, reason, close_reason, duplicate_of),
+        "id, description, status, close_reason, closed_at, resolution_note, duplicate_of",
+      );
+      if (result.refused) return errorToolResponse(result.refused);
+      return textToolResponse({ archived: result.row });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error archiving action item: ${(err as Error).message}`,
       );
     }
   },
@@ -2221,26 +2296,14 @@ server.registerTool(
   async ({ id, reason }: { id: string; reason: string }) => {
     logToolInvocation("defer_action_item", { id }, "mcp");
     try {
-      const update = buildDeferActionItemUpdate(
-        reason,
-        new Date().toISOString(),
+      const result = await runActionItemTransition(
+        "defer",
+        "open",
+        buildDeferTransition(id, reason),
+        "id, description, status, defer_reason, deferred_at",
       );
-      const { data: updated, error } = await supabase
-        .from("action_items")
-        .update(update)
-        .eq("id", id)
-        .eq("status", "open")
-        .select("id, description, status, defer_reason, deferred_at");
-      if (error) throw error;
-      if (!updated || updated.length === 0) {
-        const { data: current } = await supabase
-          .from("action_items")
-          .select("status")
-          .eq("id", id)
-          .maybeSingle();
-        return errorToolResponse(stateGuardError("defer", "open", current));
-      }
-      return textToolResponse({ deferred: updated[0] });
+      if (result.refused) return errorToolResponse(result.refused);
+      return textToolResponse({ deferred: result.row });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error deferring action item: ${(err as Error).message}`,
@@ -2254,7 +2317,7 @@ server.registerTool(
   {
     title: "Restore Action Item",
     description:
-      "Operator-gated reverse of defer_action_item: flips deferred items back to 'open' and clears the defer marker. Provide EXACTLY ONE of id (one item) or defer_reason (every deferred item carrying that exact pause tag — the unpause path). Only 'deferred' rows are touched; anything already open or resolved is left alone.",
+      "Operator-gated reopen. Provide EXACTLY ONE of id or defer_reason. By id: reopens one deferred, archived or resolved item, the undo for every close verb; the old close reason, note, resolver and duplicate link move into the reopen event and leave the row. By defer_reason: restores the DEFERRED items carrying that exact pause tag when this call takes its locks (the unpause path) and touches nothing else, so an unpause can never reopen closed work. That set is a snapshot: a row tagged after it stays deferred, and restored_count says how many this call restored, not that none remain. Before treating a project unpause as reconciled, read list_open_action_items with include_deferred=true for rows still carrying the tag, or call again.",
     inputSchema: {
       id: z.string().uuid().optional(),
       defer_reason: z.string().min(1).max(500).optional(),
@@ -2266,37 +2329,28 @@ server.registerTool(
     logToolInvocation("restore_action_item", { id, defer_reason }, "mcp");
     try {
       const selector = assertRestoreSelector({ id, defer_reason });
-      const update = buildRestoreActionItemUpdate();
-      let query = supabase
-        .from("action_items")
-        .update(update)
-        .eq("status", "deferred");
-      query = "id" in selector
-        ? query.eq("id", selector.id)
-        : query.eq("defer_reason", selector.defer_reason);
-      const { data: restored, error } = await query.select(
-        "id, description, status",
+      if ("id" in selector) {
+        const result = await runActionItemTransition(
+          "restore",
+          "deferred', 'archived' or 'resolved",
+          buildRestoreTransition(selector.id),
+          "id, description, status, reopened_at",
+        );
+        if (result.refused) return errorToolResponse(result.refused);
+        return textToolResponse({ restored_count: 1, restored: [result.row] });
+      }
+      const bulk = await restoreByDeferReason(
+        supabase,
+        selector.defer_reason,
+        "operator",
       );
-      if (error) throw error;
-      if (!restored || restored.length === 0) {
-        if ("id" in selector) {
-          const { data: current } = await supabase
-            .from("action_items")
-            .select("status")
-            .eq("id", selector.id)
-            .maybeSingle();
-          return errorToolResponse(
-            stateGuardError("restore", "deferred", current),
-          );
-        }
+      if (!bulk.ok) throw new Error(bulk.error);
+      if (bulk.affected === 0) {
         return errorToolResponse(
           `No deferred action items found with defer_reason '${selector.defer_reason}'.`,
         );
       }
-      return textToolResponse({
-        restored_count: restored.length,
-        restored,
-      });
+      return textToolResponse({ restored_count: bulk.affected });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error restoring action item: ${(err as Error).message}`,

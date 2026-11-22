@@ -1,61 +1,65 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert@1.0.19";
 import {
+  actionItemListWindow,
   assertRestoreSelector,
-  buildDeferActionItemUpdate,
-  buildResolveActionItemUpdate,
-  buildRestoreActionItemUpdate,
+  buildArchiveTransition,
+  buildDeferTransition,
+  buildResolveTransition,
+  buildRestoreTransition,
   stateGuardError,
 } from "./_action_items.ts";
 
-const NOW = "2026-07-08T12:00:00.000Z";
+const ID = "11111111-0000-4000-8000-000000000001";
 
-Deno.test("resolve update sets resolved status, timestamp, and trimmed note", () => {
-  const update = buildResolveActionItemUpdate(
-    "  Done via applied task 17d39373  ",
-    NOW,
-  );
-  assertEquals(update, {
-    status: "resolved",
-    resolved_at: NOW,
-    resolution_note: "Done via applied task 17d39373",
-  });
+Deno.test("resolve goes through the guarded transition with a done reason and a trimmed note", () => {
+  const args = buildResolveTransition(ID, "  Done via applied task 17d39373  ");
+  assertEquals(args.from, ["open"]);
+  assertEquals(args.to, "resolved");
+  assertEquals(args.closeReason, "done");
+  assertEquals(args.resolutionNote, "Done via applied task 17d39373");
+  assertEquals(args.actor, "operator");
+  assertEquals(args.eventPayload, { actor_source: "mcp-shared-key" });
 });
 
-Deno.test("resolve update rejects empty or whitespace reason", () => {
-  assertThrows(() => buildResolveActionItemUpdate("", NOW), Error, "reason");
-  assertThrows(() => buildResolveActionItemUpdate("   ", NOW), Error, "reason");
+Deno.test("every note-bearing verb rejects an empty or over-long reason", () => {
+  for (const build of [
+    (r: string) => buildResolveTransition(ID, r),
+    (r: string) => buildDeferTransition(ID, r),
+    (r: string) => buildArchiveTransition(ID, r, "expired"),
+  ]) {
+    assertThrows(() => build(""), Error, "reason");
+    assertThrows(() => build("   "), Error, "reason");
+    assertThrows(() => build("x".repeat(501)), Error, "500");
+  }
 });
 
-Deno.test("resolve update rejects an over-long reason", () => {
-  assertThrows(
-    () => buildResolveActionItemUpdate("x".repeat(501), NOW),
-    Error,
-    "500",
-  );
+Deno.test("archive is legal from open and deferred and carries its reason and survivor", () => {
+  const args = buildArchiveTransition(ID, "older copy", "duplicate", "22222222-0000-4000-8000-000000000002");
+  assertEquals(args.from, ["open", "deferred"]);
+  assertEquals(args.to, "archived");
+  assertEquals(args.closeReason, "duplicate");
+  assertEquals(args.duplicateOf, "22222222-0000-4000-8000-000000000002");
+  assertEquals(args.resolutionNote, "older copy");
 });
 
-Deno.test("defer update sets deferred status, timestamp, and pause tag", () => {
-  const update = buildDeferActionItemUpdate(
-    "paused-project:some-project",
-    NOW,
-  );
-  assertEquals(update, {
-    status: "deferred",
-    deferred_at: NOW,
-    defer_reason: "paused-project:some-project",
-  });
+Deno.test("defer carries the pause tag and only leaves open", () => {
+  const args = buildDeferTransition(ID, "paused-project:some-project");
+  assertEquals(args.from, ["open"]);
+  assertEquals(args.to, "deferred");
+  assertEquals(args.deferReason, "paused-project:some-project");
+  assertEquals(args.closeReason, undefined);
 });
 
-Deno.test("defer update rejects empty reason", () => {
-  assertThrows(() => buildDeferActionItemUpdate("  ", NOW), Error, "reason");
+Deno.test("restore by id reopens deferred, archived and resolved rows", () => {
+  const args = buildRestoreTransition(ID);
+  assertEquals(args.to, "open");
+  assertEquals([...args.from].sort(), ["archived", "deferred", "resolved"]);
 });
 
-Deno.test("restore update reopens and clears defer fields", () => {
-  assertEquals(buildRestoreActionItemUpdate(), {
-    status: "open",
-    deferred_at: null,
-    defer_reason: null,
-  });
+Deno.test("list window is inclusive, defaults to page one, and pages without overlap", () => {
+  assertEquals(actionItemListWindow({}), { from: 0, to: 49 });
+  assertEquals(actionItemListWindow({ limit: 10 }), { from: 0, to: 9 });
+  assertEquals(actionItemListWindow({ limit: 10, offset: 10 }), { from: 10, to: 19 });
 });
 
 Deno.test("restore selector accepts a lone id", () => {
@@ -95,4 +99,16 @@ Deno.test("state guard error distinguishes missing from wrong-status", () => {
     msg.includes("resolved") && msg.includes("open") && msg.includes("defer"),
     true,
   );
+});
+
+Deno.test("the restore tool's help states the bulk path's snapshot semantics", async () => {
+  const source = await Deno.readTextFile(
+    new URL("./index.ts", import.meta.url),
+  );
+  const start = source.indexOf('"Operator-gated reopen.');
+  const help = source.slice(start, source.indexOf("\n", start));
+  assertEquals(start > 0, true);
+  assertEquals(help.includes("restores every DEFERRED"), false);
+  assertEquals(help.includes("a row tagged after it stays deferred"), true);
+  assertEquals(help.includes("not that none remain"), true);
 });

@@ -236,12 +236,11 @@ type Inserted = { table: string; row: Record<string, unknown> };
 function makeFakeDecisionDb(opts: {
   insertError?: unknown;
   insertThrows?: boolean;
-  affected?: Array<{ id: string }>;
-  updateError?: unknown;
+  affected?: number;
+  rpcError?: unknown;
 } = {}) {
   const inserted: Inserted[] = [];
-  const updates: Array<{ patch: Record<string, unknown>; filters: string[] }> =
-    [];
+  const rpcCalls: Array<{ fn: string; args: Record<string, unknown> }> = [];
   const db = {
     from: (table: string) => ({
       insert: (row: Record<string, unknown>) => {
@@ -249,26 +248,16 @@ function makeFakeDecisionDb(opts: {
         inserted.push({ table, row });
         return Promise.resolve({ error: opts.insertError ?? null });
       },
-      update: (patch: Record<string, unknown>) => {
-        const filters: string[] = [];
-        const chain = {
-          eq: (col: string, val: string) => {
-            filters.push(`${col}=${val}`);
-            return chain;
-          },
-          select: (_cols: string) => {
-            updates.push({ patch, filters });
-            return Promise.resolve({
-              data: opts.updateError ? null : (opts.affected ?? []),
-              error: opts.updateError ?? null,
-            });
-          },
-        };
-        return chain;
-      },
     }),
+    rpc: (fn: string, args: Record<string, unknown>) => {
+      rpcCalls.push({ fn, args });
+      return Promise.resolve({
+        data: opts.rpcError ? null : (opts.affected ?? 0),
+        error: opts.rpcError ?? null,
+      });
+    },
   };
-  return { db, inserted, updates };
+  return { db, inserted, rpcCalls };
 }
 
 const GATE_ROW: DecisionRow = {
@@ -316,32 +305,33 @@ Deno.test("recordDecision: refuses an illegal row before touching the db", async
 Deno.test("resolve path: no resolved row when the guarded update affects zero rows", async () => {
   // Simulates an item deferred while the LAYER 2 model ran: the status
   // predicate matches nothing, so nothing is recorded as resolved.
-  const { db, inserted, updates } = makeFakeDecisionDb({ affected: [] });
+  const { db, inserted, rpcCalls } = makeFakeDecisionDb({ affected: 0 });
   const outcome = await resolveOpenItemAndRecord(db, {
     itemId: "11111111-0000-4000-8000-000000000001",
     description: "ship the thing",
     thoughtId: "22222222-0000-4000-8000-000000000001",
     quote: "shipped the thing",
-    now: "2026-11-05T00:00:00.000Z",
   });
   assertEquals(outcome, "not_open");
   assertEquals(inserted.length, 0);
-  assertEquals(updates.length, 1);
-  assert(updates[0].filters.includes("status=open"), updates[0].filters.join());
+  assertEquals(rpcCalls.length, 1);
+  assertEquals(rpcCalls[0].fn, "transition_action_item");
+  assertEquals(rpcCalls[0].args.p_from_statuses, ["open"]);
 });
 
 Deno.test("resolve path: one resolved row when the guarded update affects the row", async () => {
-  const { db, inserted } = makeFakeDecisionDb({
-    affected: [{ id: "11111111-0000-4000-8000-000000000001" }],
-  });
+  const { db, inserted, rpcCalls } = makeFakeDecisionDb({ affected: 1 });
   const outcome = await resolveOpenItemAndRecord(db, {
     itemId: "11111111-0000-4000-8000-000000000001",
     description: "ship the thing",
     thoughtId: "22222222-0000-4000-8000-000000000001",
     quote: "shipped the thing",
-    now: "2026-11-05T00:00:00.000Z",
   });
   assertEquals(outcome, "resolved");
+  assertEquals(rpcCalls[0].args.p_to_status, "resolved");
+  assertEquals(rpcCalls[0].args.p_close_reason, "done");
+  assertEquals(rpcCalls[0].args.p_actor, "auto-resolve");
+  assertEquals(rpcCalls[0].args.p_resolved_by_thought_id, "22222222-0000-4000-8000-000000000001");
   assertEquals(inserted.length, 1);
   assertEquals(inserted[0].row.layer, "resolved");
   assertEquals(inserted[0].row.outcome, "resolved");
@@ -351,14 +341,13 @@ Deno.test("resolve path: one resolved row when the guarded update affects the ro
 
 Deno.test("resolve path: an update error records nothing", async () => {
   const { db, inserted } = makeFakeDecisionDb({
-    updateError: { message: "boom" },
+    rpcError: { message: "boom" },
   });
   const outcome = await resolveOpenItemAndRecord(db, {
     itemId: "11111111-0000-4000-8000-000000000001",
     description: "ship the thing",
     thoughtId: "22222222-0000-4000-8000-000000000001",
     quote: "shipped the thing",
-    now: "2026-11-05T00:00:00.000Z",
   });
   assertEquals(outcome, "error");
   assertEquals(inserted.length, 0);

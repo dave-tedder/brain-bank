@@ -15,9 +15,9 @@
 //      update, one resolved decision row). This is what shows the exclusion
 //      is doing the work and that removing the prefix entry can fire.
 //
-//   deno run --allow-net --allow-env --allow-read --no-lock \
-//     --config scripts/loop-closing/closeout-capture-probe.deno.json \
-//     scripts/loop-closing/closeout-capture-probe-harness.ts
+//   deno run --config scripts/loop-closing/closeout-capture-probe.deno.json --no-lock --allow-net --allow-env --allow-read scripts/loop-closing/closeout-capture-probe-harness.ts
+// The config is required: without it the run dies before any probe, because the
+// function's pinned zod 3.24.2 has no ./v3 subpath.
 //
 // Exit 0 with "CLOSEOUT CAPTURE PROBE PASSED" or non-zero with the first failed check.
 
@@ -84,6 +84,7 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
     const single = accept.includes("vnd.pgrst.object");
     if (table.startsWith("rpc/")) {
       if (table === "rpc/find_candidate_action_items") return json(scenario.candidates);
+      if (table === "rpc/transition_action_item") return json(scenario.updateAffected.length);
       return json(null);
     }
     if (table === "thoughts" && method === "POST") {
@@ -158,7 +159,7 @@ function fail(msg: string): never {
 }
 const expect = (cond: boolean, msg: string) => { if (!cond) fail(msg); };
 const inserts = (table: string) => recorded.filter((r) => r.table === table && r.method === "POST").flatMap((r) => Array.isArray(r.body) ? r.body : [r.body]) as Array<Record<string, unknown>>;
-const patches = (table: string) => recorded.filter((r) => r.table.startsWith(table) && r.method === "PATCH");
+const patches = (table: string) => recorded.filter((r) => (r.table.startsWith(table) && r.method === "PATCH") || (table === "action_items" && r.table === "rpc/transition_action_item"));
 function reset() { recorded.length = 0; logs.length = 0; modelCalls.metadata = 0; modelCalls.resolve = 0; }
 
 // The historical wording. Thought e3c698f3 (2026-11-05T19:03:18Z) was the
@@ -234,7 +235,7 @@ expect(c.status === 200 && c.text.startsWith("Captured as"), `probe C HTTP ${c.s
 const itemsC = inserts("action_items");
 expect(itemsC.length === 1 && itemsC[0].description === HISTORICAL_METADATA.action_items[0] && itemsC[0].status === "open", `probe C control: unprefixed wording stores the extracted item: ${JSON.stringify(itemsC)}`);
 const patchC = patches("action_items");
-expect(patchC.length === 1 && patchC[0].url.includes("status=eq.open") && patchC[0].url.includes(`id=eq.${candId}`), `probe C control: unprefixed wording reaches the status-guarded update: ${JSON.stringify(patchC.map((p) => p.url))}`);
+expect(patchC.length === 1 && patchC[0].table === "rpc/transition_action_item" && JSON.stringify((patchC[0].body as Record<string, unknown>).p_from_statuses) === '["open"]', `probe C control: unprefixed wording reaches the status-guarded transition: ${JSON.stringify(patchC.map((p) => p.url))}`);
 const resolvedC = inserts("auto_resolve_decisions").filter((d) => d.layer === "resolved");
 expect(resolvedC.length === 1 && resolvedC[0].item_id === candId && resolvedC[0].outcome === "resolved", `probe C control: one resolved decision row: ${JSON.stringify(resolvedC)}`);
 expect(modelCalls.resolve === 1, `probe C control: LAYER 2 consulted once (${modelCalls.resolve})`);

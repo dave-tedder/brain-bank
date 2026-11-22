@@ -28,6 +28,7 @@ import {
   recordDecision,
 } from "../_shared/decisions.ts";
 import { resolveOpenItemAndRecord } from "../_shared/resolve-open-item.ts";
+import { transitionActionItem } from "../_shared/action-item-transition.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import {
   buildSlackTaskIntakeRecord,
@@ -700,7 +701,6 @@ For each match you return, the "reason" field must quote the specific phrase in 
   // long precise quotes the LAYER 2 prompt demands.
   const resolvedDescriptions: string[] = [];
   // shared across the batch — intentional, do not move inside loop
-  const now = new Date().toISOString();
   for (const claim of claims) {
     const idx = claim.num - 1;
     if (idx < 0 || idx >= candidateItems.length) continue;
@@ -760,13 +760,13 @@ For each match you return, the "reason" field must quote the specific phrase in 
     }
     // Status-guarded resolve (loop-closing Task 1.4): only a row still `open`
     // is resolved, and the `resolved` decision row is written only when that
-    // row was affected. Shared helper, single source.
+    // row was affected. Goes through transition_action_item (Task 3.1), so the
+    // close carries a reason and an attributed event. Shared helper, single source.
     const resolved = await resolveOpenItemAndRecord(supabase, {
       itemId: item.id,
       description: item.description,
       thoughtId: newThoughtId,
       quote: claim.reason,
-      now,
     });
     if (resolved !== "resolved") continue;
     resolvedDescriptions.push(item.description);
@@ -886,20 +886,32 @@ async function handleDoneCommand(
 
   const closed: string[] = [];
   const failed: string[] = [];
-  const now = new Date().toISOString();
   for (const num of matched) {
     const idx = num - 1;
     if (idx >= 0 && idx < filteredItems.length) {
       const item = filteredItems[idx];
-      const { error: updateError } = await supabase
-        .from("action_items")
-        .update({ status: "resolved", resolved_at: now })
-        .eq("id", item.id);
-      if (updateError) {
+      // Status-guarded through the transition RPC (Task 3.1). This write used to
+      // go by id alone, so an item closed while the model ran was overwritten and
+      // reported as newly done.
+      const transition = await transitionActionItem(supabase, {
+        itemId: item.id,
+        from: ["open"],
+        to: "resolved",
+        actor: "slack:done-command",
+        closeReason: "done",
+        resolutionNote: "done: command",
+      });
+      if (!transition.ok) {
         console.error(
-          `handleDoneCommand: resolve UPDATE failed for item ${item.id}: ${updateError.message}`,
+          `handleDoneCommand: resolve failed for item ${item.id}: ${transition.error}`,
         );
         failed.push(item.description);
+        continue;
+      }
+      if (transition.affected === 0) {
+        console.log(
+          `handleDoneCommand: item ${item.id} no longer open, not reported as done`,
+        );
         continue;
       }
       closed.push(item.description);

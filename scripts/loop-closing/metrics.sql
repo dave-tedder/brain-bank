@@ -1,4 +1,4 @@
--- metrics v2 (v1 queries unchanged; auto_resolve_outcomes_by_week added by loop-closing Task 1.4)
+-- metrics v3 (v1 queries unchanged; auto_resolve_outcomes_by_week added by loop-closing Task 1.4, generation_scope added by the Task 3.1 amendment)
 -- created_by_week_and_class
 select date_trunc('week', a.created_at at time zone 'UTC')::date as week,
        case when t.content ~* 'session \d+|handoff|closed \(|commit [0-9a-f]{6,}|tracker|deliverables/|task [0-9a-f]{8}\y|\[OE:' then 'work_report'
@@ -20,12 +20,23 @@ select date_trunc('week', a.resolved_at at time zone 'UTC')::date as week,
 from action_items a where status in ('resolved','archived')
 group by 1, 2 order by 1, 2;
 
+-- closes_by_reason_since_task_3_1 (Task 3.1 measure: the null bucket stops growing)
+select date_trunc('week', coalesce(a.closed_at, a.resolved_at) at time zone 'UTC')::date as week,
+       coalesce(a.close_reason, 'unknown') as close_reason, count(*) as items
+from action_items a where status in ('resolved','archived')
+group by 1, 2 order by 1, 2;
+
+-- action_item_events_by_actor (Task 3.1 measure: actor = sql since the ship date is a defect)
+select date_trunc('week', e.at at time zone 'UTC')::date as week, e.actor,
+       e.old_status, e.new_status, count(*) as events
+from action_item_events e group by 1, 2, 3, 4 order by 1, 2, 3, 4;
+
 -- status_counts
 select count(*) filter (where status = 'open') as open,
        count(*) filter (where status = 'deferred') as deferred,
        count(*) filter (where status = 'resolved') as resolved,
        count(*) filter (where status = 'archived') as archived,
-       count(*) filter (where status in ('resolved','archived') and resolved_at is null) as closed_time_unknown
+       count(*) filter (where status in ('resolved','archived') and resolved_at is null and closed_at is null) as closed_time_unknown
 from action_items;
 
 -- open_age_histogram
@@ -53,16 +64,25 @@ from daily a join daily b on b.digest_date = a.digest_date - 14
 where a.n > 100 and a.n >= b.n * 1.2
 order by a.digest_date;
 
--- auto_resolve_outcomes_by_week (metrics v2, Task 1.4)
--- A proposed row whose item closed by another path (done: command, a card
--- verb, resolve_action_item) counts as closed_otherwise, never as kept or
--- accepted.
+-- auto_resolve_outcomes_by_week (metrics v3, Task 1.4, Task 3.1 amendment)
+-- generation_scope applies Task 3.1's rule, item_generation = reopen_generation:
+-- capture (no item), current, or prior_generation (the item was reopened since).
+-- Pending proposals are generation_scope = 'current' and outcome = 'proposed'. A
+-- current-generation proposal whose item closed by another path (done: command, a
+-- card verb, resolve_action_item) counts as closed_otherwise, never as kept or
+-- accepted. A prior-generation row stays as it was written: it is history, it is
+-- never pending, and the item's current status says nothing about it.
 select date_trunc('week', d.created_at at time zone 'UTC')::date as week,
        d.layer,
-       case when d.outcome = 'proposed' and a.status in ('resolved','archived') then 'closed_otherwise'
+       case when d.item_id is null then 'capture'
+            when d.item_generation is not distinct from a.reopen_generation then 'current'
+            else 'prior_generation' end as generation_scope,
+       case when d.outcome = 'proposed'
+                 and d.item_generation is not distinct from a.reopen_generation
+                 and a.status in ('resolved','archived') then 'closed_otherwise'
             else d.outcome end as outcome,
        d.reason,
        count(*) as decisions
 from auto_resolve_decisions d
 left join action_items a on a.id = d.item_id
-group by 1, 2, 3, 4 order by 1, 2, 3, 4;
+group by 1, 2, 3, 4, 5 order by 1, 2, 3, 4, 5;

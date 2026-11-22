@@ -35,7 +35,11 @@ const scenario = {
   candidates: [] as Array<Record<string, unknown>>,
   resolved: [] as Array<{ num: number; reason: string }>,
   updateAffected: [] as Array<{ id: string }>,
+  openItems: null as Array<{ id: string; description: string }> | null,
+  doneMatched: [] as number[],
+  transitionAnswers: [] as Array<number | "error">,
 };
+const slackReplies: string[] = [];
 
 const origLog = console.log, origErr = console.error;
 console.log = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
@@ -63,12 +67,18 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
     if (sys.startsWith("Extract metadata")) {
       return json({ choices: [{ message: { content: JSON.stringify(scenario.metadata) } }] });
     }
+    if (sys.startsWith("The user says they completed something")) {
+      return json({ choices: [{ message: { content: JSON.stringify({ matched: scenario.doneMatched }) } }] });
+    }
     if (sys.startsWith("You check whether a new note explicitly resolves")) {
       return json({ choices: [{ message: { content: JSON.stringify({ resolved: scenario.resolved }) } }] });
     }
     return json({ choices: [{ message: { content: "{}" } }] });
   }
-  if (url.startsWith("https://slack.com/")) return json({ ok: true });
+  if (url.startsWith("https://slack.com/")) {
+    slackReplies.push(String((body as { text?: string })?.text ?? ""));
+    return json({ ok: true });
+  }
   if (url.startsWith("http://supabase.mock/")) {
     const u = new URL(url);
     const table = u.pathname.replace("/rest/v1/", "");
@@ -79,13 +89,21 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
     const single = accept.includes("vnd.pgrst.object");
     if (table.startsWith("rpc/")) {
       if (table === "rpc/find_candidate_action_items") return json(scenario.candidates);
+      if (table === "rpc/transition_action_item") {
+        if (scenario.transitionAnswers.length) {
+          const answer = scenario.transitionAnswers.shift()!;
+          return answer === "error" ? json({ code: "22023", message: "boom" }, 400) : json(answer);
+        }
+        return json(scenario.updateAffected.length);
+      }
       return json(null);
     }
     if (table === "thoughts" && method === "POST") {
       const row = { id: crypto.randomUUID() };
       return json(single ? row : [row]);
     }
-    if (table === "action_items" && method === "PATCH") return json(scenario.updateAffected);
+    if (table === "action_items" && method === "GET" && scenario.openItems) return json(scenario.openItems);
+    if (table === "action_items" && method === "PATCH") throw new Error("direct action_items status update: every writer must use transition_action_item");
     if (method === "POST") return json([]);
     return json([]);
   }
@@ -150,19 +168,19 @@ scenario.candidates = [{ id: candId, description: "send Sam the sign-in link", s
 scenario.resolved = [{ num: 1, reason: "sent Sam the sign-in link" }];
 scenario.updateAffected = [{ id: candId }];
 expect(await postSlackMessage("Loop-closing probe 2: sent Sam the sign-in link this morning.") === 200, "probe 2 HTTP");
-const patch2 = recorded.filter((r) => r.table.startsWith("action_items") && r.method === "PATCH");
-expect(patch2.length === 1 && patch2[0].url.includes("status=eq.open") && patch2[0].url.includes(`id=eq.${candId}`), `probe 2 guarded update: ${JSON.stringify(patch2.map((p) => p.url))}`);
+const rpc2 = recorded.filter((r) => r.table === "rpc/transition_action_item").map((r) => r.body as Record<string, unknown>);
+expect(rpc2.length === 1 && rpc2[0].p_item_id === candId && JSON.stringify(rpc2[0].p_from_statuses) === '["open"]' && rpc2[0].p_to_status === "resolved" && rpc2[0].p_close_reason === "done" && rpc2[0].p_actor === "auto-resolve", `probe 2 guarded transition: ${JSON.stringify(rpc2)}`);
 const resolved2 = inserts("auto_resolve_decisions").filter((d) => d.layer === "resolved");
 expect(resolved2.length === 1 && resolved2[0].outcome === "resolved" && resolved2[0].reason === null && resolved2[0].item_id === candId && resolved2[0].quote === "sent Sam the sign-in link", `probe 2 resolved row: ${JSON.stringify(resolved2)}`);
 expect(inserts("action_items").length === 0, "probe 2 must store no items (observation, no FOR OPERATOR)");
-origLog("probe 2 ok: guarded PATCH carries status=eq.open, one resolved decision row with the quote");
+origLog("probe 2 ok: transition RPC guarded on open with a done reason, one resolved decision row with the quote");
 
 // --- Probe 3: same note, candidate no longer open -> no resolved row ---
 recorded.length = 0; logs.length = 0;
 scenario.updateAffected = [];
 expect(await postSlackMessage("Loop-closing probe 3: sent Sam the sign-in link again.") === 200, "probe 3 HTTP");
-const patch3 = recorded.filter((r) => r.table.startsWith("action_items") && r.method === "PATCH");
-expect(patch3.length === 1 && patch3[0].url.includes("status=eq.open"), "probe 3 guarded update");
+const rpc3 = recorded.filter((r) => r.table === "rpc/transition_action_item").map((r) => r.body as Record<string, unknown>);
+expect(rpc3.length === 1 && JSON.stringify(rpc3[0].p_from_statuses) === '["open"]', "probe 3 guarded transition");
 expect(inserts("auto_resolve_decisions").filter((d) => d.layer === "resolved").length === 0, "probe 3 must write no resolved row");
 expect(logs.some((l) => l.includes("resolve skipped for item") && l.includes("no longer open")), "probe 3 skip log line");
 origLog("probe 3 ok: zero affected rows, no resolved decision row, skip logged");
@@ -196,11 +214,36 @@ expect(await postSlackMessage(prefixed5) === 200, "probe 5 HTTP");
 const thoughts5 = inserts("thoughts");
 expect(thoughts5.length === 1 && String(thoughts5[0].content) === prefixed5, "probe 5 thought stored once with the prefixed content");
 expect(inserts("action_items").length === 0, "probe 5 prefixed closeout record must store no items, FOR OPERATOR line included");
-expect(recorded.filter((r) => r.table.startsWith("action_items") && r.method === "PATCH").length === 0, "probe 5 prefixed closeout record must issue no status update");
+expect(recorded.filter((r) => r.table === "rpc/transition_action_item").length === 0, "probe 5 prefixed closeout record must issue no status update");
 const l05 = inserts("auto_resolve_decisions");
 expect(l05.length === 1 && l05[0].layer === "L0" && l05[0].outcome === "blocked" && l05[0].reason === "mechanical_prefix" && l05[0].item_id === null, `probe 5 L0 row: ${JSON.stringify(l05)}`);
 expect(logs.some((l) => l.startsWith("checkAutoResolve: blocked mechanical capture")), "probe 5 L0 log line");
 origLog("probe 5 ok: prefixed closeout record stored, 0 items, 0 updates, one capture-level L0 row (probe 2 remains the unprefixed positive control)");
+
+// --- Probe 6: done: command. Three matches: one closes, one left open while the
+// model ran, one errors. Only the first may be reported as done. ---
+recorded.length = 0; logs.length = 0; slackReplies.length = 0;
+const done1 = crypto.randomUUID(), done2 = crypto.randomUUID(), done3 = crypto.randomUUID();
+scenario.openItems = [
+  { id: done1, description: "send Sam the invoice" },
+  { id: done2, description: "send Sam the contract" },
+  { id: done3, description: "send Sam the deposit link" },
+];
+scenario.doneMatched = [1, 2, 3];
+scenario.transitionAnswers = [1, 0, "error"];
+expect(await postSlackMessage("done: sent Sam everything") === 200, "probe 6 HTTP");
+const rpc6 = recorded.filter((r) => r.table === "rpc/transition_action_item").map((r) => r.body as Record<string, unknown>);
+expect(rpc6.length === 3, `probe 6 expected 3 transitions, got ${rpc6.length}`);
+for (const call of rpc6) {
+  expect(JSON.stringify(call.p_from_statuses) === '["open"]' && call.p_to_status === "resolved" && call.p_close_reason === "done" && call.p_resolution_note === "done: command" && call.p_actor === "slack:done-command", `probe 6 transition args: ${JSON.stringify(call)}`);
+}
+expect(recorded.filter((r) => r.table === "action_items" && r.method === "PATCH").length === 0, "probe 6 must not update by id");
+const reply6 = slackReplies.join("\n");
+expect(reply6.includes("Marked 1 item as done") && reply6.includes("send Sam the invoice"), `probe 6 reply reports the close: ${reply6}`);
+expect(!reply6.includes("send Sam the contract"), `probe 6 reply must not claim the item that was no longer open: ${reply6}`);
+expect(reply6.includes("Failed to mark 1 item") && reply6.includes("send Sam the deposit link"), `probe 6 reply reports the failure: ${reply6}`);
+scenario.openItems = null;
+origLog("probe 6 ok: done: goes through the guarded transition; a no-longer-open item is not reported as done; an error is reported as an error");
 
 console.log = origLog; console.error = origErr;
 console.log("INGEST PROBE PASSED");
