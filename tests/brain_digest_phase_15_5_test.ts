@@ -5,14 +5,19 @@ const source = await Deno.readTextFile(
 );
 
 Deno.test("digest caps actions and excludes Gmail deadlines", () => {
-  assert(source.includes("const ACTION_ITEM_DIGEST_CAP = 40"));
+  // Open items are read in full (bounded) with their triage review, and the
+  // checklist (action-checklist.ts) picks its 40 slots. If the review columns
+  // cannot be read, the fallback is the newest 40, still with an exact total.
+  assert(source.includes("const OPEN_ACTION_READ_MAX = 1000"));
+  assert(source.includes(".limit(OPEN_ACTION_READ_MAX)"));
+  assert(source.includes("const LEGACY_ACTION_ITEM_CAP = 40"));
   assert(
     source.includes(
       '.select("id, description, created_at", { count: "exact" })',
     ),
   );
   assert(source.includes('.order("created_at", { ascending: false })'));
-  assert(source.includes(".limit(ACTION_ITEM_DIGEST_CAP)"));
+  assert(source.includes(".limit(LEGACY_ACTION_ITEM_CAP)"));
   // The capped list reports the true total through the structured count line.
   assert(source.includes("Open action item count: ${openActionTotal}"));
   assert(source.includes('.neq("metadata->>source", "gmail")'));

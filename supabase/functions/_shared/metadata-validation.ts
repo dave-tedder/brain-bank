@@ -10,6 +10,11 @@
 //   B3 project enum coercion (loadKnownSlugs + coerceMetadata)
 //   B4 type validation (coerceType)
 //   B5 hyphen-recombine (recombineHyphenated)
+//   Loop-closing Task 5.1 fragment gate (normalizeItemPrefix,
+//   classifyFragmentItem, isFragmentItem)
+
+import { loadProfile } from "./profile.ts";
+import { descriptionContentTokens } from "./quote-coverage.ts";
 
 export const VALID_TYPES = [
   "observation",
@@ -72,14 +77,270 @@ export function coerceType(raw: unknown): ValidType {
 // Fail OPEN on missing/malformed metadata so real task captures
 // don't get silently swallowed if shape is unexpected.
 export function shouldExtractActionItems(metadata: RawMetadata): boolean {
+  return !isExcludedSource(metadata) && !isDescriptiveType(metadata);
+}
+
+// Loop-closing Task 1.2 split the B2 gate in two so the work-report marker can
+// override exactly one of its exclusions (the descriptive type) and never the
+// other two. Order inside extractAndStoreActionItems: mechanical prefix,
+// operation command, isExcludedSource, then operator-marker lines, then
+// isDescriptiveType for everything else.
+export function isExcludedSource(metadata: RawMetadata): boolean {
   // Slack task-intake captures become Standing agent-task drafts (OE-6);
   // extracting action items from them too would double-track the same work.
-  if (metadata?.task_intake === true) return false;
-  const type = String(metadata?.type ?? "").toLowerCase();
-  if (type === "observation" || type === "reference") return false;
+  if (metadata?.task_intake === true) return true;
   const source = String(metadata?.source ?? "").toLowerCase();
-  if (source === "gmail" || source === "email") return false;
-  return true;
+  return source === "gmail" || source === "email";
+}
+
+export function isDescriptiveType(metadata: RawMetadata): boolean {
+  const type = String(metadata?.type ?? "").toLowerCase();
+  return type === "observation" || type === "reference";
+}
+
+// Loop-closing Task 1.2 (A1 part 2). A "work report" is a session close-out,
+// handoff or tracker/deliverable note. Its LLM-extracted imperatives are the
+// single largest source of junk action items (287 of 368 recent items were
+// work-report born; 22 still open, a handful real), so a work report stores
+// ONLY its explicit operator-marker lines (`FOR OPERATOR:` by default; see
+// workReportMarker). Two shapes are required, not one, so a
+// real to-do that happens to mention a commit once is not swallowed.
+//
+// Mirror rule: scripts/loop-closing/work-report-backtest.mjs carries a Node
+// port of WORK_REPORT_SHAPES for the read-only production backtest. Change
+// both or the backtest measures a different classifier.
+export const WORK_REPORT_SHAPES: readonly RegExp[] = [
+  /\bsession \d+\b/i,
+  /\bhandoff\b/i,
+  // A git hash preceded by "commit" or wrapped in parentheses.
+  /(?:\bcommit\s+[0-9a-f]{7,40}\b|\([0-9a-f]{7,40}\))/i,
+  /\b(?:PROJECT-TRACKER\.md|SESSION-LOG\.md)\b/,
+  /\bdeliverables\/[\w./-]+\.\w+/,
+  /\[OE:[0-9a-f]{8}/,
+  /\b(?:closed|paused|built|deployed|shipped) (?:2026|2027)-\d\d-\d\d\b/i,
+  // Two shapes added on the operator's call 2026-11-05 after the production backtest:
+  // the plan's seven recalled 78 of 293 work-report items (27%) because 54 of
+  // 109 work-report thoughts carry only the dated close-out header
+  // ("CRM Session 86 (2026-11-02): ..."). With these two, 221 of 293
+  // (75%) with zero spillover into non-work-report items. The dated header
+  // overlaps "session N" by construction, so a dated session header alone
+  // counts as two shapes: that overlap IS the signal. It is also the one
+  // place an ordinary note can trip the gate by itself (Codex review of PR
+  // 16, 2026-11-05: "Jordan Lee remodel session 2 (2026-11-12): send Jordan
+  // the revised floor plan"), so the header counts only when its date is
+  // not after the capture day; see isWorkReportCapture.
+  /\bsession \d+\b[^\n]{0,24}?\b\d{4}-\d\d-\d\d\b/i,
+  /\btask [0-9a-f]{8}\b/i,
+];
+
+export const WORK_REPORT_MIN_SHAPES = 2;
+
+// Index of the dated close-out header in WORK_REPORT_SHAPES.
+export const WORK_REPORT_DATED_HEADER_INDEX = 7;
+// A close-out header is dated the day the session closed: 0 of the 683 dated
+// session captures in the 90 days before 2026-11-05 carried a date after their
+// capture day. A header dated later than that is an appointment, not a
+// report, and does not count toward the two shapes. One day of slack covers a
+// session that closes after midnight UTC and dates itself the local day.
+export const WORK_REPORT_FUTURE_SLACK_MS = 24 * 60 * 60 * 1000;
+
+const ISO_DATE_RE = /\b(\d{4})-(\d\d)-(\d\d)\b/;
+
+/** True when the dated session header's date is later than capturedAt plus
+ * the slack, or is not a real calendar date (a mistyped date, which Date.UTC
+ * would silently normalize, counts as not real). Supported years are 0100
+ * to 9999: Date.UTC reads 0 to 99 as 1900 to 1999, so a first-century date
+ * fails the round trip and is treated as not real, which keeps the capture's
+ * items (Codex third pass, 2026-11-05). */
+export function datedHeaderIsFuture(headerMatch: string, capturedAt: Date): boolean {
+  const m = ISO_DATE_RE.exec(headerMatch);
+  if (!m) return true;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  const t = Date.UTC(y, mo - 1, d);
+  // Date.UTC normalizes out-of-range parts instead of failing (February 30
+  // becomes March 2, month 00 becomes December of the year before), so a
+  // mistyped date must round-trip to its own components to count as real
+  // (Codex review of PR 16, 2026-11-05).
+  if (Number.isNaN(t)) return true;
+  const back = new Date(t);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) return true;
+  return t > capturedAt.getTime() + WORK_REPORT_FUTURE_SLACK_MS;
+}
+
+export function isWorkReportCapture(
+  content: string,
+  capturedAt: Date = new Date(),
+): boolean {
+  let hits = 0;
+  WORK_REPORT_SHAPES.forEach((shape, i) => {
+    if (i !== WORK_REPORT_DATED_HEADER_INDEX) {
+      if (shape.test(content)) hits += 1;
+      return;
+    }
+    // Every dated header in the content is checked; one dated on or before
+    // the capture day is enough for the shape to count.
+    const all = new RegExp(shape.source, shape.flags.includes("g") ? shape.flags : shape.flags + "g");
+    for (const m of String(content ?? "").matchAll(all)) {
+      if (!datedHeaderIsFuture(m[0], capturedAt)) { hits += 1; break; }
+    }
+  });
+  return hits >= WORK_REPORT_MIN_SHAPES;
+}
+
+// The work-report marker comes from the profile (`work_report_marker`, for
+// example "FOR ALEX"), defaulting to "FOR OPERATOR". It is matched
+// case-sensitively, so ordinary prose ("for alex: ...") never trips it.
+export const DEFAULT_WORK_REPORT_MARKER = "FOR OPERATOR";
+
+export function workReportMarker(): string {
+  const configured = loadProfile().work_report_marker;
+  return typeof configured === "string" && configured.trim()
+    ? configured.trim()
+    : DEFAULT_WORK_REPORT_MARKER;
+}
+
+function operatorLineRe(marker: string): RegExp {
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Line-anchored: the marker must open its line (leading whitespace allowed).
+  // A marker buried mid-sentence is prose, not a marker.
+  return new RegExp(`^\\s*${escaped}:\\s*(.+?)\\s*$`);
+}
+
+export function extractOperatorLines(
+  content: string,
+  marker: string = workReportMarker(),
+): string[] {
+  const out: string[] = [];
+  const re = operatorLineRe(marker);
+  for (const line of String(content ?? "").split(/\r?\n/)) {
+    const m = re.exec(line);
+    if (m && m[1]) out.push(m[1]);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Loop-closing Task 5.1 (A2, A3): the fragment gate.
+//
+// An extracted action item that is not a whole obligation ("deploy",
+// "switch on", "finalize what we're") is dropped before insert, and every drop
+// writes an auto_resolve_decisions row (layer fragment, outcome dropped) so the
+// rejected text stays auditable. The wiring lives in fragment-gate.ts; these are
+// the pure rules, unit-tested in metadata-validation.test.ts.
+//
+// Order: normalize (never reject on) a leading `then`, `next:`, `waiting on`,
+// `awaiting` or `TODO:`; then rule (a) one_token; then rule (b)
+// dangling_clause. The first rule that matches names the reason, so an item
+// both rules would drop ("deploy the") records one_token.
+//
+// A bare pronoun object is NOT a mechanical drop: the item is inserted and
+// recorded as a fragment suspect (layer fragment, outcome proposed, reason
+// pronoun_object) for review through Task 3.6 (`keep <id>` / `archive <id>`).
+// ---------------------------------------------------------------------------
+
+// Each prefix is stripped from the start, case-insensitively, repeatedly
+// ("TODO: then deploy" becomes "deploy"). Word boundaries keep "thence" and
+// "awaitingly" whole.
+const ITEM_PREFIX_RE =
+  /^\s*(?:then\b[\s,:;.-]*|next:\s*|waiting\s+on\b\s*|awaiting\b\s*|todo:\s*)/i;
+
+/** Strip, never reject on, leading `then`, `next:`, `waiting on`, `awaiting`
+ * and `TODO:` (any case, repeated). Returns the trimmed remainder, which may
+ * be empty. "Awaiting the operator to apply migration 063" becomes
+ * "The operator to apply migration 063". Classification only: the stored description
+ * is the original text (decision recorded in the Task 5.1 packet). */
+export function normalizeItemPrefix(desc: string): string {
+  let s = String(desc ?? "").trim();
+  for (;;) {
+    const next = s.replace(ITEM_PREFIX_RE, "").trim();
+    if (next === s) return s;
+    s = next;
+  }
+}
+
+// Rule (b): words that cannot end an obligation. Matched against the RAW final
+// token of the normalized description (lowercase, apostrophes kept, before the
+// stoplist). Not a wider stoplist: rule (a) never reads this list.
+export const DANGLING_FINAL_TOKENS: ReadonlySet<string> = new Set([
+  "the", "a", "an", "to", "and", "or", "of", "for", "with", "that", "what",
+  "which", "we're", "i'm", "you're", "they're", "it's", "is", "are", "be",
+]);
+
+// Pronouns that, as the object of an item, leave it unable to stand alone.
+// her, him and it count wherever they appear (possessive "her" included: the
+// item still does not name the person). this and that count only when nothing
+// follows or a preposition, particle or time word follows ("send this to
+// Jordan", "finish that up"); followed by anything else they are determiners or
+// a conjunction ("check this week's post", "confirm that the migration ran").
+export const PRONOUN_OBJECTS: readonly string[] = ["her", "him", "it", "that", "this"];
+const ALWAYS_PRONOUN: ReadonlySet<string> = new Set(["her", "him", "it"]);
+const DEMONSTRATIVE: ReadonlySet<string> = new Set(["this", "that"]);
+const DEMONSTRATIVE_OBJECT_FOLLOWERS: ReadonlySet<string> = new Set([
+  "to", "for", "with", "on", "in", "at", "by", "from", "into", "onto", "over",
+  "up", "off", "out", "back", "down", "again", "today", "tomorrow", "tonight",
+  "now", "asap", "soon", "later", "if", "when", "before", "after", "until",
+  "once", "so", "and", "or",
+]);
+
+/** Lowercased raw tokens: whitespace split, curly apostrophes folded to
+ * straight ones, every character other than a-z, 0-9 and the apostrophe
+ * trimmed from both ends, empty tokens removed. */
+export function rawItemTokens(desc: string): string[] {
+  return String(desc ?? "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u02bc]/g, "'")
+    .split(/\s+/)
+    .map((t) => t.replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, ""))
+    .filter((t) => t.length > 0);
+}
+
+export type FragmentDropReason = "one_token" | "dangling_clause";
+
+export type FragmentVerdict = {
+  /** The normalized description the rules read. */
+  normalized: string;
+  /** Null when the item is kept. */
+  drop: FragmentDropReason | null;
+  /** True when a kept item's object is a bare pronoun (fragment suspect).
+   * Always false for a dropped item. */
+  pronounObject: boolean;
+};
+
+/** True when the normalized description has a bare pronoun object. */
+export function hasPronounObject(normalized: string): boolean {
+  const toks = rawItemTokens(normalized);
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (ALWAYS_PRONOUN.has(t)) return true;
+    if (DEMONSTRATIVE.has(t)) {
+      const next = toks[i + 1];
+      if (next === undefined || DEMONSTRATIVE_OBJECT_FOLLOWERS.has(next)) return true;
+    }
+  }
+  return false;
+}
+
+/** The whole Task 5.1 classification of one extracted item. */
+export function classifyFragmentItem(desc: string): FragmentVerdict {
+  const normalized = normalizeItemPrefix(desc);
+  // (a) one_token: 1 or fewer distinct content tokens after the Task 1.3
+  // stoplist (single source: quote-coverage.ts).
+  if (new Set(descriptionContentTokens(normalized)).size <= 1) {
+    return { normalized, drop: "one_token", pronounObject: false };
+  }
+  // (b) dangling_clause: the raw final token cannot end an obligation.
+  const toks = rawItemTokens(normalized);
+  const last = toks[toks.length - 1];
+  if (last !== undefined && DANGLING_FINAL_TOKENS.has(last)) {
+    return { normalized, drop: "dangling_clause", pronounObject: false };
+  }
+  return { normalized, drop: null, pronounObject: hasPronounObject(normalized) };
+}
+
+/** True when the item is dropped by rule (a) or (b). A pronoun suspect is
+ * NOT a fragment drop. */
+export function isFragmentItem(desc: string): boolean {
+  return classifyFragmentItem(desc).drop !== null;
 }
 
 const RESCHEDULE_DATE_HINT_RE =

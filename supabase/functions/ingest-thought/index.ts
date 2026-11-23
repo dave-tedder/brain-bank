@@ -1,31 +1,77 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.47.10";
+import { serviceKey } from "../_shared/service-key.ts";
 import { loadProfile } from "../_shared/profile.ts";
 import {
   coerceMetadata,
+  extractOperatorLines,
+  isDescriptiveType,
+  isExcludedSource,
   isOperationCommandCapture,
+  isWorkReportCapture,
   loadKnownSlugs,
   loadRouteMap,
   routeProjectFromContent,
-  shouldExtractActionItems,
 } from "../_shared/metadata-validation.ts";
 import { timingSafeEqualStr } from "../_shared/access-key.ts";
 import { filterCandidatesForDone } from "../_shared/done-filter.ts";
 import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
+import {
+  stem,
+  SUBJECT_COVERAGE_THRESHOLD,
+  subjectCoverage,
+} from "../_shared/quote-coverage.ts";
+import {
+  DECISION_LOG_TRUNC,
+  type DecisionDb,
+  recordDecision,
+} from "../_shared/decisions.ts";
+import { resolveOpenItemAndRecord } from "../_shared/resolve-open-item.ts";
+import {
+  isMechanicalCapture,
+  LOG_TRUNC,
+  normalizeActionText,
+} from "../_shared/capture-helpers.ts";
+import {
+  applyFragmentGate,
+  recordPronounSuspects,
+} from "../_shared/fragment-gate.ts";
+import {
+  createBatchDedup,
+  loadSemanticCandidates,
+  proposeSemanticDuplicates,
+  recordBatchDuplicates,
+} from "../_shared/dedup.ts";
+import {
+  assignItemClients,
+  retryWithoutMissingClients,
+} from "../_shared/item-client.ts";
+import { transitionActionItem } from "../_shared/action-item-transition.ts";
+import {
+  parseReviewCommand,
+  type ReviewCommand,
+  reviewProposal,
+} from "../_shared/proposal-review.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import {
   buildSlackTaskIntakeRecord,
   parseSlackTaskIntake,
 } from "../_shared/slack-task-intake.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import {
+  EMBEDDING_TIMEOUT_MS,
+  METADATA_TIMEOUT_MS,
+  withTimeout,
+} from "../_shared/capture-timeouts.ts";
+import { EXTRACT_METADATA_SYSTEM_PROMPT } from "../_shared/capture-pipeline.ts";
 
 declare const EdgeRuntime: {
   waitUntil(promise: Promise<unknown>): void;
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_CAPTURE_CHANNEL = Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
 const SLACK_BRAIN_CHANNEL = Deno.env.get("SLACK_BRAIN_CHANNEL") || "";
@@ -67,10 +113,6 @@ async function verifySlackSignature(
 
 // --- Shared Utilities ---
 
-function titleCase(s: string): string {
-  return s.replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
 async function contentHash(text: string): Promise<string> {
   const data = new TextEncoder().encode(text.trim());
   const hash = await crypto.subtle.digest("SHA-256", data);
@@ -89,13 +131,15 @@ async function isDuplicate(hash: string): Promise<boolean> {
 }
 
 async function getEmbedding(text: string): Promise<number[]> {
-  const { data } = await callOpenRouter({
+  const { data } = await withTimeout(EMBEDDING_TIMEOUT_MS, (signal) =>
+    callOpenRouter({
+    signal,
     function_slug: FUNCTION_SLUG,
     call_site: "getEmbedding",
     model: "openai/text-embedding-3-small",
     endpoint: "embeddings",
     input: text,
-  });
+  }));
   return data.data![0].embedding!;
 }
 
@@ -133,7 +177,9 @@ async function findNearDuplicate(
 }
 
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const { data } = await callOpenRouter({
+  const { data } = await withTimeout(METADATA_TIMEOUT_MS, (signal) =>
+    callOpenRouter({
+    signal,
     function_slug: FUNCTION_SLUG,
     call_site: "extractMetadata",
     model: "openai/gpt-4o-mini",
@@ -141,28 +187,11 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     messages: [
         {
           role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned by full name when possible, e.g. "${loadProfile().example_person_name}" (use full name when possible) (empty if none)
-- "action_items": array of FUTURE to-dos the user still needs to do. STRICT RULES:
-    * Only include items phrased as future work: "need to X", "should X", "TODO: X", an imperative about something not yet done, or an explicit open question.
-    * NEVER include work described in past tense. If the note says "I updated X", "fixed Y", "shipped Z", "changed the ratio to 3px/1px", "replaced the background", those are DONE and must be excluded.
-    * NEVER restate completed work as an imperative. Do not turn "updated the ratio to 3px" into "Update the ratio to 3px".
-    * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
-    * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
-    * ONE request is ONE item. Never split a single instruction into its parts: the work itself, the output format, and where to deliver it all belong to the SAME item. "Research X and deliver the report under deliverables/foo/" is ONE action item, not two. A stranded clause like "Deliver the report under deliverables/<project-slug>/" is not work on its own, and it does real damage: when its sibling ships and resolves, the clause stays open and reads to downstream automation as an unhandled request, which is how a single request silently becomes a duplicate task-board card days later.
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one). Preserve hyphenated tokens as a single tag: "fitness-training" stays as one tag, never split into ["fitness", "training"].
-- "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
-- "project": the project or system this note is ABOUT, e.g. ${loadProfile().example_projects.map((p) => `"${p}"`).join(", ")}, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
-- "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
-
-Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or MEETING:, use that to inform the type field (decision->observation, CLIENT->person_note, IDEA->idea, MEETING->observation) and extract structured fields accordingly.
-
-Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
+          content: EXTRACT_METADATA_SYSTEM_PROMPT,
         },
         { role: "user", content: text },
     ],
-  });
+  }));
   try {
     return JSON.parse(data.choices![0].message!.content!);
   } catch {
@@ -288,37 +317,6 @@ async function handleQuery(queryText: string, channel: string, messageTs: string
 
 // --- Action Item Tracking ---
 
-function normalizeActionText(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
-}
-
-// Content starting with any of these prefixes is a mechanical/informational capture
-// (calendar sync, notion sync, email thread, weekly review, trend analysis, Meta DM
-// failure report). These captures describe STATE or EVENTS, not completion of action
-// items, so auto-resolve is unsafe — they carry topic/person metadata that scope-
-// matches real action items but aren't evidence of anything being done. Completion
-// signals from these sources must come through a manual `done:` command or a
-// dedicated session-log thought, not this path. Adding a pattern here means
-// "this source never resolves action items."
-// Structural prefixes are universal (every operator has these sync sources).
-// Operator-specific bridge prefixes come from profile.json — see
-// `profile.example.json` at the repo root (copied to
-// `supabase/functions/_shared/profile.json` during setup).
-const MECHANICAL_CAPTURE_PREFIXES = [
-  "[Calendar Sync]",
-  "[Notion Sync]",
-  "[Meta DM Scan]",
-  "[Weekly Review]",
-  "Email thread:",
-  "Meta DM Scan failed",
-  ...loadProfile().mechanical_capture_prefixes,
-];
-
-function isMechanicalCapture(content: string): boolean {
-  const head = content.trimStart();
-  return MECHANICAL_CAPTURE_PREFIXES.some((p) => head.startsWith(p));
-}
-
 // Token-set Jaccard similarity on 3+-char lowercased words. Used as a restatement
 // guard: if a new thought's own extracted action_item is highly similar to a
 // candidate open action item, the new thought is RE-CAPTURING that work, not
@@ -341,59 +339,12 @@ function jaccardTokens(a: string, b: string): number {
 
 const RESTATEMENT_THRESHOLD = 0.5;
 
-// Minimal stemmer for LAYER 3 quote-overlap. Collapses common English
-// verb/noun alternation so "rotation"/"rotate"/"rotating"/"rotated" all
-// converge on "rotat". Deliberately not a full Porter stemmer — only the
-// families that matter for the umbrella-item FP pattern and comparable
-// cases. Rules applied in order, chaining allowed.
-//
-// Known English surprises (documented, not bugs at the 0.25 threshold —
-// but worth knowing if you see a confusing stem in a drop log):
-//   - `notion` → `not`. The -tion rule fires on any word of length ≥ 5
-//     ending in "tion"; `notion` (6 chars) and `noting` both collapse.
-//     Shared stem is harmless at current threshold.
-//   - `-ment` is NOT covered. `deployment` stays whole while
-//     `deploy`/`deployed`/`deploying` collapse to `deploy`. A quote
-//     saying "deployed" vs a description saying "deployment" loses
-//     one overlap token.
-//   - `fixes` → `fixe` (diverges from `fix`/`fixing`/`fixed` which all
-//     collapse to `fix`). The length-5 floor on the final-e strip
-//     blocks `fixe` → `fix`, so that family splits across two stems.
-// If the 0.25 threshold ever gets tightened, revisit these cases.
-function stem(token: string): string {
-  let t = token;
-  if (t.length >= 4 && t.endsWith("s")) t = t.slice(0, -1);
-  if (t.length >= 5 && t.endsWith("ing")) t = t.slice(0, -3);
-  if (t.length >= 4 && t.endsWith("ed")) t = t.slice(0, -2);
-  if (t.length >= 5 && t.endsWith("tion")) t = t.slice(0, -4) + "t";
-  if (t.length >= 5 && t.endsWith("e")) t = t.slice(0, -1);
-  return t;
-}
-
-// LAYER 3 helper: Jaccard overlap on stemmed 3+-char tokens between the
-// LLM's past-tense `reason` quote and the candidate action item's
-// description. Used to prove the quote substantively addresses the item.
-function quoteOverlap(quote: string, description: string): number {
-  const toSet = (s: string) =>
-    new Set(
-      s
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]+/g, " ")
-        .split(/\s+/)
-        .filter((w) => w.length >= 3)
-        .map(stem)
-    );
-  const a = toSet(quote);
-  const b = toSet(description);
-  if (a.size === 0 || b.size === 0) return 0;
-  let inter = 0;
-  for (const t of a) if (b.has(t)) inter++;
-  const uni = a.size + b.size - inter;
-  return uni === 0 ? 0 : inter / uni;
-}
-
-const QUOTE_OVERLAP_THRESHOLD = 0.25;
-const LOG_TRUNC = 200;
+// `stem` and the LAYER 3 metric live in _shared/quote-coverage.ts (loop-closing
+// Task 1.3): subject coverage at SUBJECT_COVERAGE_THRESHOLD replaced the
+// Jaccard-over-the-union quoteOverlap that dropped 6 of 8 real completions on
+// 2026-11-02. Single source, no mirror burden for the helper itself.
+// LOG_TRUNC, isMechanicalCapture (and its prefix list) and normalizeActionText
+// live in _shared/capture-helpers.ts (loop-closing Task 5.2, correction 3).
 // Per-call ceiling on the LAYER 2 auto-resolve LLM call. A small
 // classification prompt normally answers in seconds; if it hangs, aborting
 // and skipping auto-resolve (fail-safe: no resolution) beats stalling the
@@ -405,13 +356,10 @@ async function extractAndStoreActionItems(
   metadata: Record<string, unknown>,
   content: string
 ): Promise<void> {
-  // Observations, references, and email-sourced captures are descriptive,
-  // not commitment-shaped, so they must not create open action items.
-  if (!shouldExtractActionItems(metadata)) return;
-
-  if (isOperationCommandCapture(content, String(metadata?.source ?? ""))) {
-    return;
-  }
+  // Precedence (loop-closing Task 1.2, amended round 4): mechanical prefix,
+  // operation command, excluded source, then the operator marker (profile work_report_marker), then the
+  // descriptive-type gate for everything else. The marker overrides the type
+  // gate and nothing else.
 
   // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
   // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
@@ -420,8 +368,47 @@ async function extractAndStoreActionItems(
   // action items so they don't pollute the digest's open-items section.
   if (isMechanicalCapture(content)) return;
 
-  const items = metadata.action_items;
-  if (!Array.isArray(items) || items.length === 0) return;
+  if (isOperationCommandCapture(content, String(metadata?.source ?? ""))) {
+    return;
+  }
+
+  // B2 part 1: task-intake captures already become board drafts; gmail/email
+  // captures are advisory marketing copy. Neither stores items, marker or not.
+  if (isExcludedSource(metadata)) return;
+
+  let items: unknown[];
+  if (isWorkReportCapture(content)) {
+    // Work-report gate: a session close-out stores ONLY its explicit
+    // operator-marker lines (`FOR OPERATOR:` by default); the LLM's extracted imperatives are discarded even
+    // when the report is typed task/idea, and the lines are kept even when it
+    // is typed observation.
+    const extracted = Array.isArray(metadata.action_items)
+      ? (metadata.action_items as unknown[])
+      : [];
+    items = extractOperatorLines(content);
+    console.log(
+      `work-report gate: replaced ${extracted.length} extracted items with ${items.length} operator-marker lines`,
+    );
+    // One decision row per replaced item, so the suppressed text is auditable
+    // (loop-closing Task 1.4; layer gate, outcome dropped, reason work_report).
+    for (const desc of extracted) {
+      await recordDecision(supabase, {
+        layer: "gate",
+        outcome: "dropped",
+        reason: "work_report",
+        candidate_description: String(desc),
+        thought_id: thoughtId,
+      });
+    }
+  } else {
+    // B2 part 2: observations and references are descriptive, not
+    // commitment-shaped.
+    if (isDescriptiveType(metadata)) return;
+    items = Array.isArray(metadata.action_items)
+      ? (metadata.action_items as unknown[])
+      : [];
+  }
+  if (items.length === 0) return;
 
   // Fetch existing open items to dedup against
   const { data: existingItems } = await supabase
@@ -433,7 +420,7 @@ async function extractAndStoreActionItems(
     (existingItems || []).map((item) => normalizeActionText(item.description))
   );
 
-  const rows = items
+  const guarded = items
     .map((desc: unknown) => ({
       source_thought_id: thoughtId,
       description: String(desc),
@@ -452,13 +439,63 @@ async function extractAndStoreActionItems(
         return false;
       }
       return true;
-    })
-    .filter((row) => !existingNormalized.has(normalizeActionText(row.description)));
+    });
+  // Fragment gate (loop-closing Task 5.1), after the appointment guard: drops
+  // one_token and dangling_clause items, one decision row per drop. Then the
+  // open-item exact dedup (silent, as before), then the batch-local exact
+  // dedup (Task 5.2): its normalized set is updated as the batch is filtered,
+  // so two identical strings in one batch insert once. The open-item dedup
+  // runs first so a batch copy of an item that is already open is skipped
+  // silently, never recorded against a survivor that was never inserted.
+  const batch = createBatchDedup(normalizeActionText);
+  const rows = (await applyFragmentGate(supabase, thoughtId, guarded))
+    .filter((row) =>
+      !existingNormalized.has(normalizeActionText(row.description))
+    )
+    .filter((row) => batch.keep(row.description));
 
   if (rows.length === 0) return;
+  // Client identity per item (Task 5.3): client_id is set only when the
+  // item's own text names exactly one client (_shared/item-client.ts).
+  await assignItemClients(supabase, rows);
+  // Semantic dedup candidates (Task 5.2), read BEFORE the insert so each is
+  // older than every row this batch inserts. Never throws.
+  const recent = await loadSemanticCandidates(supabase);
 
-  const { error } = await supabase.from("action_items").insert(rows);
-  if (error) console.error("Action item insert error:", error);
+  // Task 5.3: a client deleted between assignment and this insert fails the
+  // whole insert on the foreign key; it is retried once without the ids that
+  // no longer exist, so the batch is never lost (_shared/item-client.ts).
+  const { data: inserted, error } = await retryWithoutMissingClients(
+    supabase,
+    rows,
+    () => supabase.from("action_items").insert(rows).select("id, description"),
+  );
+  if (error) {
+    console.error("Action item insert error:", error);
+    return;
+  }
+  // Pronoun-object suspects are inserted, then proposed for review (Task 5.1).
+  await recordPronounSuspects(
+    supabase,
+    thoughtId,
+    (inserted ?? []) as Array<{ id: string; description: string }>,
+  );
+  // Task 5.2: each batch copy names the survivor the insert returned; then a
+  // semantic overlap with a recent open item is proposed, never suppressed.
+  await recordBatchDuplicates(
+    supabase,
+    thoughtId,
+    batch.duplicates,
+    inserted,
+    normalizeActionText,
+  );
+  await proposeSemanticDuplicates(
+    supabase,
+    recent,
+    thoughtId,
+    metadata.project,
+    inserted,
+  );
 }
 
 async function checkAutoResolve(
@@ -478,6 +515,13 @@ async function checkAutoResolve(
         .trimStart()
         .slice(0, 80)}`
     );
+    await recordDecision(supabase, {
+      layer: "L0",
+      outcome: "blocked",
+      reason: "mechanical_prefix",
+      candidate_description: newThoughtContent.trimStart().slice(0, DECISION_LOG_TRUNC),
+      thought_id: newThoughtId,
+    });
     return [];
   }
 
@@ -527,9 +571,11 @@ async function checkAutoResolve(
 
   if (newOwnActionItems.length > 0) {
     const beforeCount = candidateItems.length;
+    const restated: EnrichedItem[] = [];
     candidateItems = candidateItems.filter((cand) => {
       for (const own of newOwnActionItems) {
         if (jaccardTokens(own, cand.description) >= RESTATEMENT_THRESHOLD) {
+          restated.push(cand);
           return false;
         }
       }
@@ -538,6 +584,16 @@ async function checkAutoResolve(
     const droppedCount = beforeCount - candidateItems.length;
     if (droppedCount > 0) {
       console.log(`checkAutoResolve: restatement guard dropped ${droppedCount} candidate(s)`);
+    }
+    for (const cand of restated) {
+      await recordDecision(supabase, {
+        layer: "L1.5",
+        outcome: "dropped",
+        reason: "restatement",
+        candidate_description: cand.description,
+        item_id: cand.id,
+        thought_id: newThoughtId,
+      });
     }
     if (candidateItems.length === 0) return [];
   }
@@ -607,6 +663,7 @@ For each match you return, the "reason" field must quote the specific phrase in 
         e instanceof Error ? e.name : "unknown"
       }): ${e instanceof Error ? e.message : String(e)}`,
     );
+    await recordLayer2Drops(supabase, candidateItems, newThoughtId, "llm_failed");
     return [];
   } finally {
     clearTimeout(abortTimer);
@@ -637,35 +694,70 @@ For each match you return, the "reason" field must quote the specific phrase in 
       `checkAutoResolve: LAYER 2 JSON parse failed: ${error instanceof Error ? error.message : String(error)} ` +
         `(raw=${JSON.stringify((d.choices?.[0]?.message?.content ?? "").slice(0, LOG_TRUNC))})`
     );
+    await recordLayer2Drops(supabase, candidateItems, newThoughtId, "parse_failed");
     return [];
   }
 
-  // LAYER 3: quote-overlap guard. The LLM's `reason` quote must share
-  // substantive vocabulary with the candidate's description (stemmed
-  // Jaccard ≥ QUOTE_OVERLAP_THRESHOLD). Blocks umbrella-item FPs where
-  // the quote is a truthful past-tense completion of a SPECIFIC subtask
-  // but the candidate description is BROAD (e.g., "rotate 4 live secrets"
-  // resolved by "Notion token rotation COMPLETE").
+  // Candidates the model left out of its resolved list: not_claimed.
+  const claimedIdx = new Set(claims.map((c) => c.num - 1));
+  await recordLayer2Drops(
+    supabase,
+    candidateItems.filter((_item, i) => !claimedIdx.has(i)),
+    newThoughtId,
+    "not_claimed",
+  );
+
+  // LAYER 3: subject-coverage guard. The share of the candidate description's
+  // content tokens (generic verbs and function words dropped, then stemmed)
+  // that appear in the LLM's `reason` quote must reach
+  // SUBJECT_COVERAGE_THRESHOLD. Blocks umbrella-item FPs where the quote is a
+  // truthful past-tense completion of a SPECIFIC subtask but the candidate
+  // description is BROAD (e.g., "rotate 4 live secrets" resolved by "Notion
+  // token rotation COMPLETE", coverage 0.11). Session 55/56 bug. Replaced
+  // Jaccard against the quote (loop-closing Task 1.3), which punished the
+  // long precise quotes the LAYER 2 prompt demands.
   const resolvedDescriptions: string[] = [];
   // shared across the batch — intentional, do not move inside loop
-  const now = new Date().toISOString();
   for (const claim of claims) {
     const idx = claim.num - 1;
-    if (idx < 0 || idx >= candidateItems.length) continue;
+    // A claim index must be a whole number in range. A fractional `num`
+    // (1.5) passed the range check, read candidateItems[0.5] as undefined and
+    // threw on the missing item, ending this loop before the later valid claims.
+    if (!Number.isInteger(idx) || idx < 0 || idx >= candidateItems.length) continue;
     const item = candidateItems[idx];
     if (claim.reason === "") {
       console.log(
         `checkAutoResolve: LAYER 3 blocked item ${item.id}: no quote returned by LLM (legacy bare-number response)`
       );
+      await recordDecision(supabase, {
+        layer: "L3",
+        outcome: "dropped",
+        reason: "no_quote",
+        candidate_description: item.description,
+        item_id: item.id,
+        thought_id: newThoughtId,
+      });
       continue;
     }
-    const overlap = quoteOverlap(claim.reason, item.description);
-    if (overlap < QUOTE_OVERLAP_THRESHOLD) {
+    const coverage = subjectCoverage(claim.reason, item.description);
+    if (coverage < SUBJECT_COVERAGE_THRESHOLD) {
       console.log(
-        `checkAutoResolve: LAYER 3 quote-overlap guard dropped item ${item.id} ` +
-          `(overlap=${overlap.toFixed(3)}, quote=${JSON.stringify(claim.reason.slice(0, LOG_TRUNC))}, ` +
-          `desc=${JSON.stringify(item.description.slice(0, LOG_TRUNC))})`
+        `checkAutoResolve: LAYER 3 subject-coverage guard dropped item ${item.id} ` +
+          `(coverage=${coverage.toFixed(3)}, quote=${
+            JSON.stringify(claim.reason.slice(0, LOG_TRUNC))
+          }, ` +
+          `desc=${JSON.stringify(item.description.slice(0, LOG_TRUNC))})`,
       );
+      await recordDecision(supabase, {
+        layer: "L3",
+        outcome: "dropped",
+        reason: "coverage_below_threshold",
+        candidate_description: item.description,
+        item_id: item.id,
+        thought_id: newThoughtId,
+        score: coverage,
+        quote: claim.reason,
+      });
       continue;
     }
     const stillOwed = stillOwedAdjacencyVeto(newThoughtContent, item.description, stem);
@@ -675,21 +767,52 @@ For each match you return, the "reason" field must quote the specific phrase in 
           `(marker=${stillOwed.marker}, subject=${stillOwed.subject}, dist=${stillOwed.distance}, ` +
           `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`
       );
+      await recordDecision(supabase, {
+        layer: "L3.5",
+        outcome: "vetoed",
+        reason: "still_owed",
+        candidate_description: item.description,
+        item_id: item.id,
+        thought_id: newThoughtId,
+        quote: claim.reason,
+      });
       continue;
     }
-    const { error: updateError } = await supabase
-      .from("action_items")
-      .update({ status: "resolved", resolved_by_thought_id: newThoughtId, resolved_at: now })
-      .eq("id", item.id);
-    if (updateError) {
-      console.error(
-        `checkAutoResolve: resolve UPDATE failed for item ${item.id}: ${updateError.message}`,
-      );
-      continue;
-    }
+    // Status-guarded resolve (loop-closing Task 1.4): only a row still `open`
+    // is resolved, and the `resolved` decision row is written only when that
+    // row was affected. Goes through transition_action_item (Task 3.1), so the
+    // close carries a reason and an attributed event. Shared helper, single source.
+    const resolved = await resolveOpenItemAndRecord(supabase, {
+      itemId: item.id,
+      description: item.description,
+      thoughtId: newThoughtId,
+      quote: claim.reason,
+    });
+    if (resolved !== "resolved") continue;
     resolvedDescriptions.push(item.description);
   }
   return resolvedDescriptions;
+}
+
+// LAYER 2 drops share one shape: every listed candidate gets a row with the
+// given reason (`llm_failed` and `parse_failed` drop every candidate;
+// `not_claimed` drops the ones the model left out of its resolved list).
+async function recordLayer2Drops(
+  db: DecisionDb,
+  items: ReadonlyArray<{ id: string; description: string }>,
+  thoughtId: string,
+  reason: "not_claimed" | "llm_failed" | "parse_failed",
+): Promise<void> {
+  for (const item of items) {
+    await recordDecision(db, {
+      layer: "L2",
+      outcome: "dropped",
+      reason,
+      candidate_description: item.description,
+      item_id: item.id,
+      thought_id: thoughtId,
+    });
+  }
 }
 
 async function postCaptureHook(
@@ -719,6 +842,35 @@ async function postCaptureHook(
     );
     return [];
   }
+}
+
+// --- Proposal review replies (loop-closing Task 3.6) ---
+// `keep <id>`, `archive <id>`, `done <id>`, `done <id> <decision-id>`. The Slack
+// signature check has already run, and the router has already dropped every
+// subtype and every bot post, so event.user here is the top-level user of an
+// ordinary user message: a bound identity. A missing or empty user writes nothing
+// and replies nothing.
+async function handleReviewCommand(
+  command: ReviewCommand,
+  user: unknown,
+  channel: string,
+  replyTs: string,
+): Promise<void> {
+  if (typeof user !== "string" || user.trim() === "") {
+    console.error("handleReviewCommand: event has no user; nothing written, no reply");
+    return;
+  }
+  const result = await reviewProposal(supabase, {
+    verb: command.verb,
+    itemRef: command.itemRef,
+    decisionRef: command.decisionRef,
+    actor: `slack:${user.trim()}`,
+    source: "slack-signature",
+  });
+  if (result.status === "error") {
+    console.error(`handleReviewCommand: ${result.message}`);
+  }
+  await replyInSlack(channel, replyTs, result.text);
 }
 
 // --- "done:" Command ---
@@ -783,20 +935,32 @@ async function handleDoneCommand(
 
   const closed: string[] = [];
   const failed: string[] = [];
-  const now = new Date().toISOString();
   for (const num of matched) {
     const idx = num - 1;
     if (idx >= 0 && idx < filteredItems.length) {
       const item = filteredItems[idx];
-      const { error: updateError } = await supabase
-        .from("action_items")
-        .update({ status: "resolved", resolved_at: now })
-        .eq("id", item.id);
-      if (updateError) {
+      // Status-guarded through the transition RPC (Task 3.1). This write used to
+      // go by id alone, so an item closed while the model ran was overwritten and
+      // reported as newly done.
+      const transition = await transitionActionItem(supabase, {
+        itemId: item.id,
+        from: ["open"],
+        to: "resolved",
+        actor: "slack:done-command",
+        closeReason: "done",
+        resolutionNote: "done: command",
+      });
+      if (!transition.ok) {
         console.error(
-          `handleDoneCommand: resolve UPDATE failed for item ${item.id}: ${updateError.message}`,
+          `handleDoneCommand: resolve failed for item ${item.id}: ${transition.error}`,
         );
         failed.push(item.description);
+        continue;
+      }
+      if (transition.affected === 0) {
+        console.log(
+          `handleDoneCommand: item ${item.id} no longer open, not reported as done`,
+        );
         continue;
       }
       closed.push(item.description);
@@ -1199,9 +1363,18 @@ Deno.serve(async (req: Request): Promise<Response> => {
     // Route based on channel and thread context
     if (channel === SLACK_CAPTURE_CHANNEL) {
       const queryText = parseQuery(messageText);
+      // Exact-form review replies are checked BEFORE the free-text done: command,
+      // which is unchanged. Usually a reply in the digest's thread.
+      const reviewCommand = parseReviewCommand(messageText);
       const isDoneCommand = /^done:\s*/i.test(messageText);
-      if (isDoneCommand) {
-        EdgeRuntime.waitUntil(handleDoneCommand(messageText, channel, messageTs));
+      if (reviewCommand) {
+        EdgeRuntime.waitUntil(
+          handleReviewCommand(reviewCommand, event.user, channel, threadTs ?? messageTs),
+        );
+      } else if (isDoneCommand) {
+        EdgeRuntime.waitUntil(
+          handleDoneCommand(messageText, channel, messageTs),
+        );
       } else if (queryText) {
         EdgeRuntime.waitUntil(handleQuery(queryText, channel, messageTs, 0.4));
       } else if (threadTs) {

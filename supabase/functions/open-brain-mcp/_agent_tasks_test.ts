@@ -9,6 +9,7 @@ import {
   assertIntakePromotionAllowed,
   assertPromotionCallerAllowed,
   assertResumeTransitionAllowed,
+  assertSupersedeArgs,
   assertReviewApplyAllowed,
   assertStatusHeartbeatAllowed,
   assertWorkingExitAllowed,
@@ -433,4 +434,22 @@ Deno.test("resolveRequiresLocal: default derives from the known-local list", () 
   assertEquals(resolveRequiresLocal(null, "Some-Project"), false);
   assertEquals(resolveRequiresLocal(undefined, null), false);
   assertEquals(resolveRequiresLocal(undefined, ""), false);
+});
+
+Deno.test("supersede guard refuses a missing actor, a missing reason and self-replacement", () => {
+  const base = { task_id: "a", reason: "stale premise", actor: "operator" };
+  assertSupersedeArgs(base);
+  assertSupersedeArgs({ ...base, superseded_by: "b" });
+  assertThrows(() => assertSupersedeArgs({ ...base, actor: undefined }), Error, "requires an actor");
+  assertThrows(() => assertSupersedeArgs({ ...base, actor: "   " }), Error, "requires an actor");
+  assertThrows(() => assertSupersedeArgs({ ...base, reason: "  " }), Error, "requires a reason");
+  assertThrows(() => assertSupersedeArgs({ ...base, superseded_by: "a" }), Error, "cannot supersede itself");
+  assertSupersedeArgs({ ...base, expected_generation: 1 });
+  assertSupersedeArgs({ ...base, expected_generation: null });
+  assertThrows(() => assertSupersedeArgs({ ...base, expected_generation: 0 }), Error, "positive integer");
+  assertThrows(() => assertSupersedeArgs({ ...base, expected_generation: 1.5 }), Error, "positive integer");
+});
+
+Deno.test("TASK SUPERSEDED is a known receipt", () => {
+  assertEquals(AGENT_TASK_RECEIPTS.includes("TASK SUPERSEDED"), true);
 });

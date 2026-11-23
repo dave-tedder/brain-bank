@@ -9,6 +9,11 @@ const ingestSource = await Deno.readTextFile(
 const mcpSource = await Deno.readTextFile(
   new URL("../supabase/functions/open-brain-mcp/index.ts", import.meta.url),
 );
+// extractAndStoreActionItems lives here since the capture pipeline moved out of
+// open-brain-mcp; open-brain-mcp and external-crm-sync both call it.
+const pipelineSource = await Deno.readTextFile(
+  new URL("../supabase/functions/_shared/capture-pipeline.ts", import.meta.url),
+);
 
 Deno.test("Slack capture coerces extracted metadata before insert", () => {
   const start = ingestSource.indexOf("async function processCaptureMessage(");
@@ -42,6 +47,19 @@ Deno.test("REST capture coerces metadata while preserving explicit tags", () => 
 });
 
 Deno.test("both capture functions gate action-item storage", () => {
-  assertStringIncludes(ingestSource, "if (!shouldExtractActionItems(metadata)) return;");
-  assertStringIncludes(mcpSource, "if (!shouldExtractActionItems(metadata)) return;");
+  // The gate is split so the work-report marker can override the descriptive
+  // type and nothing else: excluded source first, then the work-report branch,
+  // then the descriptive-type gate for everything else.
+  for (const source of [ingestSource, pipelineSource]) {
+    assertStringIncludes(source, "if (isExcludedSource(metadata)) return;");
+    assertStringIncludes(source, "if (isWorkReportCapture(content)) {");
+    assertStringIncludes(source, "items = extractOperatorLines(content);");
+    assertStringIncludes(source, "if (isDescriptiveType(metadata)) return;");
+    assert(
+      source.indexOf("if (isExcludedSource(metadata)) return;") <
+        source.indexOf("if (isWorkReportCapture(content)) {"),
+      "excluded source must be checked before the work-report marker",
+    );
+  }
+  assertStringIncludes(mcpSource, "sharedExtractAndStoreActionItems(");
 });

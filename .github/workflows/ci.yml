@@ -69,6 +69,10 @@ jobs:
               supabase/functions/open-brain-mcp/*.ts &&
             deno cache \
               supabase/functions/brain-digest/*.ts \
+              supabase/functions/ingest-thought/*.ts \
+              supabase/functions/action-item-recheck/*.ts \
+              supabase/functions/external-crm-sync/*.ts \
+              supabase/functions/open-brain-oauth/*.ts \
               supabase/functions/_shared/*.ts \
               tests/*.ts \
               tests/_shared/*.ts
@@ -90,7 +94,13 @@ jobs:
       # Separate step because deno.json's workspace scopes resolution to
       # open-brain-mcp, so these suites are invisible to the run above.
       - name: Run Deno tests (brain-digest, _shared)
-        run: deno test --allow-read --allow-env supabase/functions/brain-digest/ supabase/functions/_shared/
+        run: deno test --allow-read --allow-env supabase/functions/brain-digest/ supabase/functions/action-item-recheck/ supabase/functions/external-crm-sync/ supabase/functions/open-brain-oauth/ supabase/functions/_shared/
+
+      # The loop-closing harnesses that need no database (the TS-vs-SQL
+      # differential and its judges). The SQL contracts need a local PostgreSQL
+      # and run by hand; see scripts/loop-closing/README.md.
+      - name: Run loop-closing Deno tests
+        run: deno test --allow-read --allow-env --allow-run --allow-write scripts/loop-closing/
 
       # The repo-root tests/ directory was not run by CI at all. The dashboard
       # step below runs `tests/*.test.mjs` but under `working-directory:
@@ -107,6 +117,16 @@ jobs:
       - name: Type-check Edge Functions
         run: deno check --config supabase/functions/open-brain-mcp/deno.json supabase/functions/open-brain-mcp/index.ts
 
+      # Every deployable function, not only the ones a test happens to import.
+      - name: Type-check ingest-thought, brain-digest, action-item-recheck
+        run: deno check supabase/functions/ingest-thought/index.ts supabase/functions/brain-digest/index.ts supabase/functions/action-item-recheck/index.ts
+
+      - name: Type-check external-crm-sync
+        run: deno check supabase/functions/external-crm-sync/index.ts
+
+      - name: Type-check open-brain-oauth
+        run: deno check supabase/functions/open-brain-oauth/index.ts
+
       - name: Verify queue-runner skill contract
         run: node skills/queue-runner/verify.mjs
 
@@ -114,6 +134,11 @@ jobs:
       # green locally and never runs in CI at all.
       - name: Run open-engine tests
         run: node --test scripts/open-engine/*.test.mjs
+
+      # The triage CLI's unit and CLI suites (they shell out to python3 for the
+      # strict-CSV differential, which ubuntu-latest ships).
+      - name: Run action-item-triage tests
+        run: node --test integrations/action-item-triage/*.test.mjs
 
       # The .sh suites were previously not run by CI at all — only the .mjs ones
       # were, so every bash test in the repo shipped green by omission. Globbed

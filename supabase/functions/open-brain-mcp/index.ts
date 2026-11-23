@@ -5,6 +5,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { serviceKey } from "../_shared/service-key.ts";
 import { loadProfile } from "../_shared/profile.ts";
 import {
   coerceMetadata,
@@ -18,15 +19,67 @@ import {
 import { isUnanchoredAppointmentItem } from "../_shared/appointment-guard.ts";
 import { clampInt, timingSafeEqualStr } from "../_shared/access-key.ts";
 import { stillOwedAdjacencyVeto } from "../_shared/still-owed-veto.ts";
-import { extractJsonObject } from "../_shared/extract-json.ts";
-import { callOpenRouter } from "../_shared/openrouter.ts";
 import {
+  stem,
+  SUBJECT_COVERAGE_THRESHOLD,
+  subjectCoverage,
+} from "../_shared/quote-coverage.ts";
+import {
+  DECISION_LOG_TRUNC,
+  type DecisionDb,
+  recordDecision,
+} from "../_shared/decisions.ts";
+import { resolveOpenItemAndRecord } from "../_shared/resolve-open-item.ts";
+import { isMechanicalCapture, LOG_TRUNC } from "../_shared/capture-helpers.ts";
+import { extractJsonObject } from "../_shared/extract-json.ts";
+import {
+  contentHash,
+  extractAndStoreActionItems as sharedExtractAndStoreActionItems,
+  extractMetadata as sharedExtractMetadata,
+  getEmbedding as sharedGetEmbedding,
+} from "../_shared/capture-pipeline.ts";
+import { buildRestEventUpdate } from "./_rest_event.ts";
+import { callOpenRouter } from "../_shared/openrouter.ts";
+import { proposeBookingMatches } from "../_shared/booking-match.ts";
+import {
+  type CompletionWarning,
+  evaluateCompletion,
+  ROUTE_SNAPSHOT_COLUMNS,
+  type RouteLookup,
+  type RouteSnapshotRow,
+} from "./_complete_contract.ts";
+import {
+  COMPLETE_CONTRACT_EVENTS_TABLE,
+  type ContractEventRow,
+  describeError,
+  refusalEventRow,
+  warningEventRow,
+  writeContractEvent,
+} from "./_complete_contract_events.ts";
+import {
+  ACTION_ITEM_LIST_MAX,
+  actionItemListWindow,
   assertRestoreSelector,
-  buildDeferActionItemUpdate,
-  buildResolveActionItemUpdate,
-  buildRestoreActionItemUpdate,
+  assertUnreviewedListArgs,
+  buildArchiveTransition,
+  buildDeferTransition,
+  buildResolveTransition,
+  buildRestoreTransition,
+  listUnreviewedActionItems,
+  REVIEW_OUTCOMES,
+  reviewActionItem,
   stateGuardError,
+  TRIAGE_DISPOSITIONS,
+  UNREVIEWED_DAYS_MAX,
 } from "./_action_items.ts";
+import {
+  ACTION_ITEM_CLOSE_REASONS,
+  type ActionItemCloseReason,
+  restoreByDeferReason,
+  transitionActionItem,
+  type TransitionArgs,
+} from "../_shared/action-item-transition.ts";
+import { REVIEW_VERBS, reviewProposal } from "../_shared/proposal-review.ts";
 import {
   ACTIVE_ACTION_ITEM_DRAFT_STATUSES,
   ACTIVE_THOUGHT_DRAFT_STATUSES,
@@ -60,6 +113,7 @@ import {
   assertPromotionCallerAllowed,
   assertResumeTransitionAllowed,
   assertReviewApplyAllowed,
+  assertSupersedeArgs,
   assertStatusHeartbeatAllowed,
   assertWorkingExitAllowed,
   compactObject,
@@ -78,7 +132,7 @@ import {
 } from "./_deliverables.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 
 const FUNCTION_SLUG = "open-brain-mcp";
@@ -112,20 +166,8 @@ function logToolInvocation(
   EdgeRuntime.waitUntil(writePromise);
 }
 
-function titleCase(s: string): string {
-  return s.replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^\w\s-]/g, "").replace(/\s+/g, "-");
-}
-
-async function contentHash(text: string): Promise<string> {
-  const data = new TextEncoder().encode(text.trim());
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
 }
 
 async function isDuplicate(hash: string): Promise<boolean> {
@@ -158,15 +200,8 @@ async function isNotionDuplicate(
   return (data?.length ?? 0) > 0;
 }
 
-async function getEmbedding(text: string): Promise<number[]> {
-  const { data } = await callOpenRouter({
-    function_slug: FUNCTION_SLUG,
-    call_site: "getEmbedding",
-    model: "openai/text-embedding-3-small",
-    endpoint: "embeddings",
-    input: text,
-  });
-  return data.data![0].embedding!;
+function getEmbedding(text: string): Promise<number[]> {
+  return sharedGetEmbedding(FUNCTION_SLUG, text);
 }
 
 // Near-duplicate guard: reworded re-captures of the same fact (session
@@ -202,89 +237,12 @@ async function findNearDuplicate(
   return (data?.[0]?.id as string | undefined) ?? null;
 }
 
-async function extractMetadata(text: string): Promise<Record<string, unknown>> {
-  const { data } = await callOpenRouter({
-    function_slug: FUNCTION_SLUG,
-    call_site: "extractMetadata",
-    model: "openai/gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content:
-          `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned by full name when possible, e.g. "${loadProfile().example_person_name}" (use full name when possible) (empty if none)
-- "action_items": array of FUTURE to-dos the user still needs to do. STRICT RULES:
-    * Only include items phrased as future work: "need to X", "should X", "TODO: X", an imperative about something not yet done, or an explicit open question.
-    * NEVER include work described in past tense. If the note says "I updated X", "fixed Y", "shipped Z", "changed the ratio to 3px/1px", "replaced the background", those are DONE and must be excluded.
-    * NEVER restate completed work as an imperative. Do not turn "updated the ratio to 3px" into "Update the ratio to 3px".
-    * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
-    * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
-    * ONE request is ONE item. Never split a single instruction into its parts: the work itself, the output format, and where to deliver it all belong to the SAME item. "Research X and deliver the report under deliverables/foo/" is ONE action item, not two. A stranded clause like "Deliver the report under deliverables/<project-slug>/" is not work on its own, and it does real damage: when its sibling ships and resolves, the clause stays open and reads to downstream automation as an unhandled request, which is how a single request silently becomes a duplicate task-board card days later.
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "${
-            loadProfile().domain.vocabulary[0]
-          }" not "${
-            titleCase(loadProfile().domain.vocabulary[0])
-          }", "project management" not "Project Management" (always at least one). Preserve hyphenated tokens as a single tag: "fitness-training" stays as one tag, never split into ["fitness", "training"].
-- "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
-- "project": the project or system this note is ABOUT, e.g. ${
-            loadProfile().example_projects.map((p) => `"${p}"`).join(", ")
-          }, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
-- "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
-
-Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or MEETING:, use that to inform the type field (decision->observation, CLIENT->person_note, IDEA->idea, MEETING->observation) and extract structured fields accordingly.
-
-Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
-      },
-      { role: "user", content: text },
-    ],
-  });
-  const d = data as { choices: Array<{ message: { content: string } }> };
-  try {
-    return JSON.parse(d.choices![0].message!.content!);
-  } catch {
-    return { topics: ["uncategorized"], type: "observation" };
-  }
+// Prompt and model live in _shared/capture-pipeline.ts.
+function extractMetadata(text: string): Promise<Record<string, unknown>> {
+  return sharedExtractMetadata(FUNCTION_SLUG, text);
 }
 
 // --- Action Item Tracking ---
-
-function normalizeActionText(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ")
-    .trim();
-}
-
-// Content starting with any of these prefixes is a mechanical/informational capture
-// (calendar sync, notion sync, email thread, weekly review, trend analysis, Meta DM
-// failure report). These captures describe STATE or EVENTS, not completion of action
-// items, so auto-resolve is unsafe — they carry topic/person metadata that scope-
-// matches real action items but aren't evidence of anything being done. Completion
-// signals from these sources must come through a manual `done:` command or a
-// dedicated session-log thought, not this path. Adding a pattern here means
-// "this source never resolves action items."
-// Structural prefixes are universal (every operator has these sync sources).
-// Operator-specific bridge prefixes come from profile.json — see
-// `profile.example.json` at the repo root (copied to
-// `supabase/functions/_shared/profile.json` during setup).
-const MECHANICAL_CAPTURE_PREFIXES = [
-  "[Calendar Sync]",
-  "[Notion Sync]",
-  "[Meta DM Scan]",
-  "[Weekly Review]",
-  "Email thread:",
-  "Meta DM Scan failed",
-  ...loadProfile().mechanical_capture_prefixes,
-];
-
-// MCP tool-surface enum values sourced from profile.
-const eventTypes = loadProfile().event_types;
-const contentTypes = loadProfile().content_types;
-
-function isMechanicalCapture(content: string): boolean {
-  const head = content.trimStart();
-  return MECHANICAL_CAPTURE_PREFIXES.some((p) => head.startsWith(p));
-}
 
 // Token-set Jaccard similarity on 3+-char lowercased words. Used as a restatement
 // guard: if a new thought's own extracted action_item is highly similar to a
@@ -308,125 +266,36 @@ function jaccardTokens(a: string, b: string): number {
 
 const RESTATEMENT_THRESHOLD = 0.5;
 
-// Minimal stemmer for LAYER 3 quote-overlap. Collapses common English
-// verb/noun alternation so "rotation"/"rotate"/"rotating"/"rotated" all
-// converge on "rotat". Deliberately not a full Porter stemmer — only the
-// families that matter for the umbrella-item FP pattern and comparable
-// cases. Rules applied in order, chaining allowed.
-//
-// Known English surprises (documented, not bugs at the 0.25 threshold —
-// but worth knowing if you see a confusing stem in a drop log):
-//   - `notion` → `not`. The -tion rule fires on any word of length ≥ 5
-//     ending in "tion"; `notion` (6 chars) and `noting` both collapse.
-//     Shared stem is harmless at current threshold.
-//   - `-ment` is NOT covered. `deployment` stays whole while
-//     `deploy`/`deployed`/`deploying` collapse to `deploy`. A quote
-//     saying "deployed" vs a description saying "deployment" loses
-//     one overlap token.
-//   - `fixes` → `fixe` (diverges from `fix`/`fixing`/`fixed` which all
-//     collapse to `fix`). The length-5 floor on the final-e strip
-//     blocks `fixe` → `fix`, so that family splits across two stems.
-// If the 0.25 threshold ever gets tightened, revisit these cases.
-function stem(token: string): string {
-  let t = token;
-  if (t.length >= 4 && t.endsWith("s")) t = t.slice(0, -1);
-  if (t.length >= 5 && t.endsWith("ing")) t = t.slice(0, -3);
-  if (t.length >= 4 && t.endsWith("ed")) t = t.slice(0, -2);
-  if (t.length >= 5 && t.endsWith("tion")) t = t.slice(0, -4) + "t";
-  if (t.length >= 5 && t.endsWith("e")) t = t.slice(0, -1);
-  return t;
-}
-
-// LAYER 3 helper: Jaccard overlap on stemmed 3+-char tokens between the
-// LLM's past-tense `reason` quote and the candidate action item's
-// description. Used to prove the quote substantively addresses the item.
-function quoteOverlap(quote: string, description: string): number {
-  const toSet = (s: string) =>
-    new Set(
-      s
-        .toLowerCase()
-        .replace(/[^a-z0-9\s]+/g, " ")
-        .split(/\s+/)
-        .filter((w) => w.length >= 3)
-        .map(stem),
-    );
-  const a = toSet(quote);
-  const b = toSet(description);
-  if (a.size === 0 || b.size === 0) return 0;
-  let inter = 0;
-  for (const t of a) if (b.has(t)) inter++;
-  const uni = a.size + b.size - inter;
-  return uni === 0 ? 0 : inter / uni;
-}
-
-const QUOTE_OVERLAP_THRESHOLD = 0.25;
-const LOG_TRUNC = 200;
+// `stem` and the LAYER 3 metric live in _shared/quote-coverage.ts (loop-closing
+// Task 1.3): subject coverage at SUBJECT_COVERAGE_THRESHOLD replaced the
+// Jaccard-over-the-union quoteOverlap that dropped 6 of 8 real completions on
+// 2026-11-02. Single source, no mirror burden for the helper itself.
+// LOG_TRUNC and isMechanicalCapture (and its prefix list) live in
+// _shared/capture-helpers.ts (loop-closing Task 5.2, correction 3).
 // Per-call ceiling on the LAYER 2 auto-resolve LLM call. A small
 // classification prompt normally answers in seconds; if it hangs, aborting
 // and skipping auto-resolve (fail-safe: no resolution) beats stalling the
 // capture path toward the Edge Runtime wall.
 const AUTO_RESOLVE_LLM_TIMEOUT_MS = 30_000;
 
-async function extractAndStoreActionItems(
+// MCP tool-surface enum values sourced from profile.
+const eventTypes = loadProfile().event_types;
+const contentTypes = loadProfile().content_types;
+
+// Moved to _shared/capture-pipeline.ts so external-crm-sync's
+// capture_intake reuses it. The mechanical test is _shared/capture-helpers.ts's.
+function extractAndStoreActionItems(
   thoughtId: string,
   metadata: Record<string, unknown>,
   content: string,
 ): Promise<void> {
-  // Observations, references, and email-sourced captures are descriptive,
-  // not commitment-shaped, so they must not create open action items.
-  if (!shouldExtractActionItems(metadata)) return;
-
-  if (isOperationCommandCapture(content, String(metadata?.source ?? ""))) {
-    return;
-  }
-
-  // Mirror of LAYER 0 in checkAutoResolve: mechanical captures (sync jobs, email
-  // threads, weekly reviews) are observation-shaped, not commitment-shaped. The
-  // extraction LLM may still pick up advisory phrases ("should reduce volume",
-  // "needs more sleep") from prose summaries; suppress storing those as open
-  // action items so they don't pollute the digest's open-items section.
-  if (isMechanicalCapture(content)) return;
-
-  const items = metadata.action_items;
-  if (!Array.isArray(items) || items.length === 0) return;
-
-  // Fetch existing open items to dedup against
-  const { data: existingItems } = await supabase
-    .from("action_items")
-    .select("description")
-    .eq("status", "open");
-
-  const existingNormalized = new Set(
-    (existingItems || []).map((item) => normalizeActionText(item.description)),
+  return sharedExtractAndStoreActionItems(
+    supabase,
+    thoughtId,
+    metadata,
+    content,
+    isMechanicalCapture,
   );
-
-  const rows = items
-    .map((desc: unknown) => ({
-      source_thought_id: thoughtId,
-      description: String(desc),
-      status: "open",
-    }))
-    // Appointment guard: unanchored appointment reminders (no still-owed
-    // language, no future-date signal in item or source) are review-only —
-    // they duplicate the booking system, not real backlog.
-    .filter((row) => {
-      if (isUnanchoredAppointmentItem(row.description, content, new Date())) {
-        console.log(
-          `appointment guard: skipped unanchored item: ${
-            row.description.slice(0, LOG_TRUNC)
-          }`,
-        );
-        return false;
-      }
-      return true;
-    })
-    .filter((row) =>
-      !existingNormalized.has(normalizeActionText(row.description))
-    );
-
-  if (rows.length === 0) return;
-  const { error } = await supabase.from("action_items").insert(rows);
-  if (error) console.error("Action item insert error:", error);
 }
 
 async function checkAutoResolve(
@@ -448,6 +317,13 @@ async function checkAutoResolve(
           .slice(0, 80)
       }`,
     );
+    await recordDecision(supabase, {
+      layer: "L0",
+      outcome: "blocked",
+      reason: "mechanical_prefix",
+      candidate_description: newThoughtContent.trimStart().slice(0, DECISION_LOG_TRUNC),
+      thought_id: newThoughtId,
+    });
     return [];
   }
 
@@ -506,9 +382,11 @@ async function checkAutoResolve(
 
   if (newOwnActionItems.length > 0) {
     const beforeCount = candidateItems.length;
+    const restated: EnrichedItem[] = [];
     candidateItems = candidateItems.filter((cand) => {
       for (const own of newOwnActionItems) {
         if (jaccardTokens(own, cand.description) >= RESTATEMENT_THRESHOLD) {
+          restated.push(cand);
           return false;
         }
       }
@@ -519,6 +397,16 @@ async function checkAutoResolve(
       console.log(
         `checkAutoResolve: restatement guard dropped ${droppedCount} candidate(s)`,
       );
+    }
+    for (const cand of restated) {
+      await recordDecision(supabase, {
+        layer: "L1.5",
+        outcome: "dropped",
+        reason: "restatement",
+        candidate_description: cand.description,
+        item_id: cand.id,
+        thought_id: newThoughtId,
+      });
     }
     if (candidateItems.length === 0) return [];
   }
@@ -595,6 +483,7 @@ For each match you return, the "reason" field must quote the specific phrase in 
         e instanceof Error ? e.name : "unknown"
       }): ${e instanceof Error ? e.message : String(e)}`,
     );
+    await recordLayer2Drops(supabase, candidateItems, newThoughtId, "llm_failed");
     return [];
   } finally {
     clearTimeout(abortTimer);
@@ -630,37 +519,70 @@ For each match you return, the "reason" field must quote the specific phrase in 
           )
         })`,
     );
+    await recordLayer2Drops(supabase, candidateItems, newThoughtId, "parse_failed");
     return [];
   }
 
-  // LAYER 3: quote-overlap guard. The LLM's `reason` quote must share
-  // substantive vocabulary with the candidate's description (stemmed
-  // Jaccard ≥ QUOTE_OVERLAP_THRESHOLD). Blocks umbrella-item FPs where
-  // the quote is a truthful past-tense completion of a SPECIFIC subtask
-  // but the candidate description is BROAD (e.g., "rotate 4 live secrets"
-  // resolved by "Notion token rotation COMPLETE").
+  // Candidates the model left out of its resolved list: not_claimed.
+  const claimedIdx = new Set(claims.map((c) => c.num - 1));
+  await recordLayer2Drops(
+    supabase,
+    candidateItems.filter((_item, i) => !claimedIdx.has(i)),
+    newThoughtId,
+    "not_claimed",
+  );
+
+  // LAYER 3: subject-coverage guard. The share of the candidate description's
+  // content tokens (generic verbs and function words dropped, then stemmed)
+  // that appear in the LLM's `reason` quote must reach
+  // SUBJECT_COVERAGE_THRESHOLD. Blocks umbrella-item FPs where the quote is a
+  // truthful past-tense completion of a SPECIFIC subtask but the candidate
+  // description is BROAD (e.g., "rotate 4 live secrets" resolved by "Notion
+  // token rotation COMPLETE", coverage 0.11). Session 55/56 bug. Replaced
+  // Jaccard against the quote (loop-closing Task 1.3), which punished the
+  // long precise quotes the LAYER 2 prompt demands.
   const resolvedDescriptions: string[] = [];
   // shared across the batch — intentional, do not move inside loop
-  const now = new Date().toISOString();
   for (const claim of claims) {
     const idx = claim.num - 1;
-    if (idx < 0 || idx >= candidateItems.length) continue;
+    // A claim index must be a whole number in range. A fractional `num`
+    // (1.5) passed the range check, read candidateItems[0.5] as undefined and
+    // threw on the missing item, ending this loop before the later valid claims.
+    if (!Number.isInteger(idx) || idx < 0 || idx >= candidateItems.length) continue;
     const item = candidateItems[idx];
     if (claim.reason === "") {
       console.log(
         `checkAutoResolve: LAYER 3 blocked item ${item.id}: no quote returned by LLM (legacy bare-number response)`,
       );
+      await recordDecision(supabase, {
+        layer: "L3",
+        outcome: "dropped",
+        reason: "no_quote",
+        candidate_description: item.description,
+        item_id: item.id,
+        thought_id: newThoughtId,
+      });
       continue;
     }
-    const overlap = quoteOverlap(claim.reason, item.description);
-    if (overlap < QUOTE_OVERLAP_THRESHOLD) {
+    const coverage = subjectCoverage(claim.reason, item.description);
+    if (coverage < SUBJECT_COVERAGE_THRESHOLD) {
       console.log(
-        `checkAutoResolve: LAYER 3 quote-overlap guard dropped item ${item.id} ` +
-          `(overlap=${overlap.toFixed(3)}, quote=${
+        `checkAutoResolve: LAYER 3 subject-coverage guard dropped item ${item.id} ` +
+          `(coverage=${coverage.toFixed(3)}, quote=${
             JSON.stringify(claim.reason.slice(0, LOG_TRUNC))
           }, ` +
           `desc=${JSON.stringify(item.description.slice(0, LOG_TRUNC))})`,
       );
+      await recordDecision(supabase, {
+        layer: "L3",
+        outcome: "dropped",
+        reason: "coverage_below_threshold",
+        candidate_description: item.description,
+        item_id: item.id,
+        thought_id: newThoughtId,
+        score: coverage,
+        quote: claim.reason,
+      });
       continue;
     }
     const stillOwed = stillOwedAdjacencyVeto(newThoughtContent, item.description, stem);
@@ -670,25 +592,52 @@ For each match you return, the "reason" field must quote the specific phrase in 
           `(marker=${stillOwed.marker}, subject=${stillOwed.subject}, dist=${stillOwed.distance}, ` +
           `note=${JSON.stringify(newThoughtContent.slice(0, LOG_TRUNC))})`
       );
+      await recordDecision(supabase, {
+        layer: "L3.5",
+        outcome: "vetoed",
+        reason: "still_owed",
+        candidate_description: item.description,
+        item_id: item.id,
+        thought_id: newThoughtId,
+        quote: claim.reason,
+      });
       continue;
     }
-    const { error: updateError } = await supabase
-      .from("action_items")
-      .update({
-        status: "resolved",
-        resolved_by_thought_id: newThoughtId,
-        resolved_at: now,
-      })
-      .eq("id", item.id);
-    if (updateError) {
-      console.error(
-        `checkAutoResolve: resolve UPDATE failed for item ${item.id}: ${updateError.message}`,
-      );
-      continue;
-    }
+    // Status-guarded resolve (loop-closing Task 1.4): only a row still `open`
+    // is resolved, and the `resolved` decision row is written only when that
+    // row was affected. Goes through transition_action_item (Task 3.1), so the
+    // close carries a reason and an attributed event. Shared helper, single source.
+    const resolved = await resolveOpenItemAndRecord(supabase, {
+      itemId: item.id,
+      description: item.description,
+      thoughtId: newThoughtId,
+      quote: claim.reason,
+    });
+    if (resolved !== "resolved") continue;
     resolvedDescriptions.push(item.description);
   }
   return resolvedDescriptions;
+}
+
+// LAYER 2 drops share one shape: every listed candidate gets a row with the
+// given reason (`llm_failed` and `parse_failed` drop every candidate;
+// `not_claimed` drops the ones the model left out of its resolved list).
+async function recordLayer2Drops(
+  db: DecisionDb,
+  items: ReadonlyArray<{ id: string; description: string }>,
+  thoughtId: string,
+  reason: "not_claimed" | "llm_failed" | "parse_failed",
+): Promise<void> {
+  for (const item of items) {
+    await recordDecision(db, {
+      layer: "L2",
+      outcome: "dropped",
+      reason,
+      candidate_description: item.description,
+      item_id: item.id,
+      thought_id: thoughtId,
+    });
+  }
 }
 
 async function postCaptureHook(
@@ -757,7 +706,7 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 const AGENT_TASK_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local, check_spec, close_check";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, context, sources, do_steps, acceptance_criteria, output_handoff, boundaries, explicit_approval, claimed_at, claimed_by, claim_expires_at, completed_at, blocked_reason, review_reason, attempt_count, last_failed_at, last_failure_reason, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_flags, critic_reviewed_by, critic_reviewed_at, archived_at, preferred_agent, requires_local, check_spec, close_check, not_before, superseded_by, superseded_reason, superseded_at, superseded_actor, superseded_closed_generation";
 
 // Internal load for the receipt-guard path only: includes claim_token so
 // assertClaimTokenMatches can pre-check. Never use for list/get responses.
@@ -785,7 +734,7 @@ const AGENT_TASK_LOAD_SELECT = `${AGENT_TASK_SELECT}, claim_token`;
 // gives one projection every scanning lane uses unmodified, instead of a
 // per-status special case in three separate routine prompts.
 const AGENT_TASK_COMPACT_SELECT =
-  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec, close_check";
+  "id, created_at, updated_at, title, label, agent_code, parent_task_id, project_slug, status, priority, risk, requested_by, intake_source, desired_outcome, claimed_by, claim_expires_at, completed_at, attempt_count, source_thought_id, linked_action_item_id, operator_action, operator_target, critic_verdict, critic_reviewed_by, critic_reviewed_at, preferred_agent, requires_local, check_spec, close_check, not_before, superseded_by, superseded_reason, superseded_at, superseded_actor, superseded_closed_generation";
 
 const AGENT_LEDGER_SELECT =
   "agent_code, operator, runtime, automation, automation_state, last_heartbeat, last_queue_result, last_successful_run, local_context, optional_skills, notes, updated_at";
@@ -818,12 +767,58 @@ async function loadAgentTaskForTool(taskId: string): Promise<
   return data as (AgentTaskAccessRow & Record<string, unknown>) | null;
 }
 
+// Task 5.4: the route capability snapshot for one slug. Never throws: a failed
+// read is infrastructure state, which evaluateCompletion turns into an
+// accept-with-warning, never a refusal.
+async function loadRouteSnapshot(slug: string): Promise<RouteLookup> {
+  try {
+    const { data, error } = await supabase
+      .from("closeout_routes")
+      .select(ROUTE_SNAPSHOT_COLUMNS)
+      .eq("slug", slug)
+      .maybeSingle();
+    if (error) return { row: null, error: error.message || String(error) };
+    return { row: (data as RouteSnapshotRow | null) ?? null };
+  } catch (err: unknown) {
+    return { row: null, error: (err as Error)?.message || String(err) };
+  }
+}
+
+// Task 5.4 measure (PR 32 decision 7): one complete_contract_events row per
+// "[complete-contract]" log line. Best-effort and off the critical path: the
+// writer never rejects, waitUntil keeps the insert alive after the answer is
+// sent, and everything here (building the row, starting the write, scheduling
+// it, formatting and logging a failure) sits inside one guard, so nothing about
+// the event write can change the tool's answer or block a completion. The row
+// is built here, at the emission site, so its occurred_at is the moment of the
+// log line, not of the later insert.
+function recordCompleteContractEvent(build: () => ContractEventRow): void {
+  try {
+    const write = writeContractEvent(
+      (r) => supabase.from(COMPLETE_CONTRACT_EVENTS_TABLE).insert(r),
+      build(),
+    );
+    EdgeRuntime.waitUntil(write);
+  } catch (err: unknown) {
+    try {
+      console.error(
+        `[complete-contract] event write not scheduled: ${describeError(err)}`,
+      );
+    } catch {
+      // telemetry about telemetry: nothing more to do, and nothing may escape
+    }
+  }
+}
+
 async function moveAgentTaskViaTool(args: {
   taskId: string;
   agentCode: string;
   action: AgentTaskToolAction;
   reason?: string;
   claimToken?: string;
+  // Task 2.3: only the hold tool sets this; the RPC refuses it on any other
+  // transition, so a stray value never lands silently.
+  notBefore?: string;
 }) {
   const task = await loadAgentTaskForTool(args.taskId);
   if (!task) throw new Error(`Task not found: ${args.taskId}`);
@@ -844,6 +839,66 @@ async function moveAgentTaskViaTool(args: {
     assertWorkingExitAllowed(task, args.action);
   }
 
+  // Task 5.4: the receipt contract at complete time, BEFORE the write. A
+  // refusal throws, so move_agent_task_status is never called and the task
+  // stays Agent Working under the same claim. request_agent_review writes the
+  // same AGENT DONE event the closeout controller reads, so it is checked too.
+  let warnings: CompletionWarning[] = [];
+  if (args.action === "complete" || args.action === "request-review") {
+    // Narrowed here; the event-row builders below run in closures, where
+    // TypeScript would forget the narrowing of args.action.
+    const contractAction = args.action;
+    const slug = typeof task.project_slug === "string"
+      ? task.project_slug.trim()
+      : "";
+    const verdict = evaluateCompletion({
+      receipt: args.reason ?? "",
+      task: {
+        project_slug: task.project_slug as string | null,
+        desired_outcome: task.desired_outcome as string | null,
+        title: task.title as string | null,
+      },
+      route: slug ? await loadRouteSnapshot(slug) : null,
+      now: new Date(),
+    });
+    if (!verdict.ok) {
+      // One line per refusal and per warning in the function log: the plan's
+      // measures (zero-hold rate, unavailable warnings per week) count these.
+      console.log(
+        `[complete-contract] COMPLETE_REFUSED task=${args.taskId} action=${args.action} reasons=${
+          verdict.reasons.join(",")
+        }`,
+      );
+      recordCompleteContractEvent(() =>
+        refusalEventRow({
+          action: contractAction,
+          taskId: args.taskId,
+          agentCode: args.agentCode,
+          slug,
+          reasons: verdict.reasons,
+          occurredAt: new Date(),
+        })
+      );
+      throw new Error(verdict.message);
+    }
+    warnings = verdict.warnings;
+    for (const w of warnings) {
+      console.log(
+        `[complete-contract] ${w.code} task=${args.taskId} action=${args.action} slug=${slug}`,
+      );
+      recordCompleteContractEvent(() =>
+        warningEventRow({
+          action: contractAction,
+          taskId: args.taskId,
+          agentCode: args.agentCode,
+          slug,
+          code: w.code,
+          occurredAt: new Date(),
+        })
+      );
+    }
+  }
+
   const { status, receipt } = receiptForTaskTool(args.action);
   const { data, error } = await supabase.rpc("move_agent_task_status", {
     p_task_id: args.taskId,
@@ -852,9 +907,12 @@ async function moveAgentTaskViaTool(args: {
     p_agent_code: args.agentCode,
     p_reason: args.reason ?? null,
     p_claim_token: args.claimToken ?? null,
+    p_not_before: args.notBefore ?? null,
   });
   if (error) throw error;
-  return { receipt, task: data };
+  return warnings.length > 0
+    ? { receipt, task: data, warnings }
+    : { receipt, task: data };
 }
 
 // Hard caps on user-supplied string lengths in REST handler bodies. The
@@ -1238,24 +1296,24 @@ async function handleRestEvent(req: Request): Promise<Response> {
     if (gcalId) {
       const { data: existing } = await supabase
         .from("business_events")
-        .select("id")
+        .select("id, metadata")
         .contains("metadata", { gcal_event_id: gcalId })
         .limit(1);
       if (existing && existing.length > 0) {
-        // Update existing event
+        // Update existing event. `metadata` is MERGED over the row's current
+        // jsonb, never replaced: this row may be shared with another writer
+        // (the CRM push in external-crm-sync stamps crm_appointment_id,
+        // source, status, kind, pushed_at) and a wholesale replace strips
+        // those keys on every calendar pass. See _rest_event.ts and
+        // ../_shared/metadata-merge.ts.
         const { error } = await supabase
           .from("business_events")
-          .update({
-            title,
-            event_type: event_type || null,
-            date_start: date_start || null,
-            date_end: date_end || null,
-            location: location || null,
-            notes: notes || null,
-            metadata: metadata || null,
-          })
+          .update(buildRestEventUpdate(body, existing[0].metadata))
           .eq("id", existing[0].id);
         if (error) return jsonResponse({ error: error.message }, 500);
+        // Loop-closing Task 5.3: a booking proposes closing the client's
+        // scheduling items (proposals only; never throws).
+        await proposeBookingMatches(supabase, existing[0].id);
         return jsonResponse({ status: "updated", id: existing[0].id });
       }
     }
@@ -1277,6 +1335,8 @@ async function handleRestEvent(req: Request): Promise<Response> {
     if (error || !inserted) {
       return jsonResponse({ error: error?.message || "unknown error" }, 500);
     }
+    // Loop-closing Task 5.3, as on the update path above.
+    await proposeBookingMatches(supabase, inserted.id);
     return jsonResponse({ status: "created", id: inserted.id });
   } catch (err: unknown) {
     return jsonResponse({ error: (err as Error).message }, 500);
@@ -2165,32 +2225,59 @@ server.registerTool(
   {
     title: "List Open Action Items",
     description:
-      "Read-only OE-12 triage surface. Returns open action_items rows, newest first, each flagged has_active_draft when an active agent_tasks draft already links to it. Set include_deferred=true to also return items held out by defer_action_item (each carrying defer_reason + deferred_at). Never resolves, archives, or mutates anything.",
+      "Read-only OE-12 triage surface. Returns open action_items rows, newest first by default, each flagged has_active_draft when an active agent_tasks draft already links to it. Set include_deferred=true to also return items held out by defer_action_item (each carrying defer_reason + deferred_at). Set order='oldest' to read the oldest first and offset to page; count is this page's size. Set unreviewed_days (the triage read, e.g. 14) to return only open items never reviewed or last reviewed more than that many days ago, oldest unreviewed first, each with its last review; unreviewed_total is the size of that whole window. A reviewed item leaves the window, so read with offset 0 again rather than paging. unreviewed_days cannot be combined with include_deferred or order='newest'. Never resolves, archives, or mutates anything.",
     inputSchema: {
-      limit: z.number().int().min(1).max(100).optional(),
+      limit: z.number().int().min(1).max(ACTION_ITEM_LIST_MAX).optional(),
       include_deferred: z.boolean().optional(),
+      order: z.enum(["newest", "oldest"]).optional(),
+      offset: z.number().int().min(0).optional(),
+      unreviewed_days: z.number().int().min(1).max(UNREVIEWED_DAYS_MAX).optional(),
     },
   },
   async (
-    { limit, include_deferred }: { limit?: number; include_deferred?: boolean },
+    { limit, include_deferred, order, offset, unreviewed_days }: {
+      limit?: number;
+      include_deferred?: boolean;
+      order?: "newest" | "oldest";
+      offset?: number;
+      unreviewed_days?: number;
+    },
   ) => {
     logToolInvocation(
       "list_open_action_items",
-      { limit, include_deferred },
+      { limit, include_deferred, order, offset, unreviewed_days },
       "mcp",
     );
     try {
-      const statuses = include_deferred ? ["open", "deferred"] : ["open"];
-      const { data: items, error } = await supabase
-        .from("action_items")
-        .select(
-          "id, description, status, created_at, source_thought_id, defer_reason, deferred_at",
-        )
-        .in("status", statuses)
-        .order("created_at", { ascending: false })
-        .limit(limit ?? 50);
-      if (error) throw error;
-      const ids = (items ?? []).map((i) => i.id as string);
+      let items: Array<Record<string, unknown>>;
+      let unreviewedTotal: number | null | undefined;
+      if (unreviewed_days !== undefined) {
+        // Loop-closing Task 3.3: the exclusion and the order are in SQL, before
+        // LIMIT (list_unreviewed_action_items).
+        assertUnreviewedListArgs({ include_deferred, order });
+        const page = await listUnreviewedActionItems(supabase, {
+          unreviewed_days,
+          limit,
+          offset,
+        });
+        items = page.items as unknown as Array<Record<string, unknown>>;
+        unreviewedTotal = page.unreviewed_total;
+      } else {
+        const statuses = include_deferred ? ["open", "deferred"] : ["open"];
+        const window = actionItemListWindow({ limit, offset });
+        const { data, error } = await supabase
+          .from("action_items")
+          .select(
+            "id, description, status, created_at, source_thought_id, defer_reason, deferred_at",
+          )
+          .in("status", statuses)
+          .order("created_at", { ascending: order === "oldest" })
+          .order("id", { ascending: true })
+          .range(window.from, window.to);
+        if (error) throw error;
+        items = (data ?? []) as Array<Record<string, unknown>>;
+      }
+      const ids = items.map((i) => i.id as string);
       let activeIds = new Set<string>();
       if (ids.length) {
         const { data: drafts, error: draftsError } = await supabase
@@ -2204,8 +2291,11 @@ server.registerTool(
         );
       }
       return textToolResponse({
-        count: (items ?? []).length,
-        items: (items ?? []).map((i) => ({
+        count: items.length,
+        ...(unreviewed_days !== undefined
+          ? { unreviewed_days, unreviewed_total: unreviewedTotal }
+          : {}),
+        items: items.map((i) => ({
           ...i,
           has_active_draft: activeIds.has(i.id as string),
         })),
@@ -2218,12 +2308,40 @@ server.registerTool(
   },
 );
 
+// Run one guarded transition and read the row back for the response. Zero affected
+// rows means the guard refused: report the status that refused it.
+async function runActionItemTransition(
+  action: "resolve" | "defer" | "restore" | "archive",
+  requiredStatus: string,
+  args: TransitionArgs,
+  columns: string,
+) {
+  const transition = await transitionActionItem(supabase, args);
+  if (!transition.ok) throw new Error(transition.error);
+  const { data: row, error } = await supabase
+    .from("action_items")
+    .select(transition.affected === 0 ? "status" : columns)
+    .eq("id", args.itemId)
+    .maybeSingle();
+  if (error) throw error;
+  if (transition.affected === 0) {
+    return {
+      refused: stateGuardError(
+        action,
+        requiredStatus,
+        row as unknown as { status: string } | null,
+      ),
+    };
+  }
+  return { row };
+}
+
 server.registerTool(
   "resolve_action_item",
   {
     title: "Resolve Action Item",
     description:
-      "Operator-gated close for a genuinely-done open action_items row. Sets status='resolved' and records reason as an audit note (resolution_note). Guarded: only an item currently 'open' can be resolved. This is NOT an is-it-done matcher — it trusts the caller's stated judgment and does no LLM matching. For a paused-project item you want back later, use defer_action_item instead.",
+      "Operator-gated close for a genuinely-done open action_items row. Sets status='resolved' with close_reason='done' and records reason as an audit note (resolution_note). Guarded: only an item currently 'open' can be resolved. This is NOT an is-it-done matcher — it trusts the caller's stated judgment and does no LLM matching. For a paused-project item you want back later, use defer_action_item instead; for an item that should close without being done, use archive_action_item.",
     inputSchema: {
       id: z.string().uuid(),
       reason: z.string().min(1).max(500),
@@ -2232,29 +2350,156 @@ server.registerTool(
   async ({ id, reason }: { id: string; reason: string }) => {
     logToolInvocation("resolve_action_item", { id }, "mcp");
     try {
-      const update = buildResolveActionItemUpdate(
-        reason,
-        new Date().toISOString(),
+      const result = await runActionItemTransition(
+        "resolve",
+        "open",
+        buildResolveTransition(id, reason),
+        "id, description, status, resolved_at, resolution_note, close_reason, closed_at",
       );
-      const { data: updated, error } = await supabase
-        .from("action_items")
-        .update(update)
-        .eq("id", id)
-        .eq("status", "open")
-        .select("id, description, status, resolved_at, resolution_note");
-      if (error) throw error;
-      if (!updated || updated.length === 0) {
-        const { data: current } = await supabase
-          .from("action_items")
-          .select("status")
-          .eq("id", id)
-          .maybeSingle();
-        return errorToolResponse(stateGuardError("resolve", "open", current));
-      }
-      return textToolResponse({ resolved: updated[0] });
+      if (result.refused) return errorToolResponse(result.refused);
+      return textToolResponse({ resolved: result.row });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error resolving action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "archive_action_item",
+  {
+    title: "Archive Action Item",
+    description:
+      "Operator-gated close for an open or deferred action_items row that should stop being tracked. Sets status='archived' with a required close_reason and records reason as the audit note. close_reason: done, superseded, duplicate (requires duplicate_of, the surviving item), fragment, expired, wont_do. Reversible with restore_action_item. Writes one action_item_events row.",
+    inputSchema: {
+      id: z.string().uuid(),
+      reason: z.string().min(1).max(500),
+      close_reason: z.enum(ACTION_ITEM_CLOSE_REASONS),
+      duplicate_of: z.string().uuid().optional().describe(
+        "The surviving item. Required with close_reason 'duplicate', refused with any other.",
+      ),
+    },
+  },
+  async (
+    { id, reason, close_reason, duplicate_of }: {
+      id: string;
+      reason: string;
+      close_reason: ActionItemCloseReason;
+      duplicate_of?: string;
+    },
+  ) => {
+    logToolInvocation("archive_action_item", { id, close_reason }, "mcp");
+    try {
+      const result = await runActionItemTransition(
+        "archive",
+        "open' or 'deferred",
+        buildArchiveTransition(id, reason, close_reason, duplicate_of),
+        "id, description, status, close_reason, closed_at, resolution_note, duplicate_of",
+      );
+      if (result.refused) return errorToolResponse(result.refused);
+      return textToolResponse({ archived: result.row });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error archiving action item: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "review_proposal",
+  {
+    title: "Review Proposal",
+    description:
+      "Record a review of a pending proposal on an action item (loop-closing Task 3.6; the same handler as the Slack replies `keep <id>`, `archive <id>`, `done <id>`, `done <id> <decision-id>`). item_ref: the item's full id or its first 8 characters. verb: keep (every pending proposal on the item is kept; the item stays as it is), archive (accepts the pending archive/fragment proposal and archives the item), done (accepts the one pending recheck/calendar/dedup proposal and closes the item; with two or more pending, the reply lists them and decision_ref picks one). decision_ref is accepted with done only. actor: 'operator' or a registered agent_code, recorded as reviewed_by with actor_source mcp-shared-key (claimed by the caller, not proven). Always answers with a status and a message: recorded, already_recorded, refused, ambiguous, not_found, nothing_pending, needs_decision. restore_action_item is the undo for archive and done.",
+    inputSchema: {
+      item_ref: z.string().min(1).max(64),
+      verb: z.enum(REVIEW_VERBS),
+      actor: z.string().min(1).max(64),
+      // No min(1): a supplied value, even "" or whitespace, must reach the
+      // handler's refusal ("keep and archive take no decision id", or the empty
+      // decision id refusal on done) rather than be mistaken for an absent one.
+      decision_ref: z.string().max(64).optional().describe(
+        "With done only: the decision's full id or first 8 characters. Omit it otherwise; any supplied value (even empty) is refused with keep or archive, and an empty one is refused with done.",
+      ),
+    },
+  },
+  async (
+    { item_ref, verb, actor, decision_ref }: {
+      item_ref: string;
+      verb: (typeof REVIEW_VERBS)[number];
+      actor: string;
+      decision_ref?: string;
+    },
+  ) => {
+    logToolInvocation("review_proposal", { item_ref, verb, actor, decision_ref }, "mcp");
+    try {
+      const result = await reviewProposal(supabase, {
+        verb,
+        itemRef: item_ref,
+        decisionRef: decision_ref ?? null,
+        actor,
+        source: "mcp-shared-key",
+      });
+      if (result.status === "error") return errorToolResponse(result.text);
+      return textToolResponse({ review: result });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error reviewing proposal: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "review_action_item",
+  {
+    title: "Review Action Item",
+    description:
+      "Record a triage review on an OPEN action item (loop-closing Task 3.3). It never closes, defers or reopens anything; it writes the review onto the item so the digest can show it and so list_open_action_items with unreviewed_days moves on to the next oldest. outcome keep: reviewed, still a real open item; pass no disposition, evidence or replacement_id. outcome proposal: triage proposes a disposition for the operator to act on, with disposition stale, duplicate, vague, done or paused and evidence (required, 500 characters or fewer) saying why. duplicate also requires replacement_id, the surviving item, and only duplicate takes one. done requires evidence that starts with a pointer: thought:<id>, commit:<sha>, pr:<ref>, card:<id> or url:<address>. actor: 'operator' or a registered agent_code, recorded as last_reviewed_by (claimed by the caller, not proven by the shared key). A later review replaces the earlier one. Answers with a status and a message: recorded, refused (the item is not open, or the replacement does not exist) or not_found; malformed input is an error and writes nothing.",
+    inputSchema: {
+      id: z.string().uuid(),
+      outcome: z.enum(REVIEW_OUTCOMES),
+      actor: z.string().min(1).max(64),
+      // No min(1) on evidence: a supplied value, even "", must reach the SQL
+      // refusal rather than be mistaken for an absent one.
+      disposition: z.enum(TRIAGE_DISPOSITIONS).optional(),
+      evidence: z.string().max(500).optional(),
+      replacement_id: z.string().uuid().optional(),
+    },
+  },
+  async (
+    { id, outcome, actor, disposition, evidence, replacement_id }: {
+      id: string;
+      outcome: (typeof REVIEW_OUTCOMES)[number];
+      actor: string;
+      disposition?: (typeof TRIAGE_DISPOSITIONS)[number];
+      evidence?: string;
+      replacement_id?: string;
+    },
+  ) => {
+    logToolInvocation(
+      "review_action_item",
+      { id, outcome, actor, disposition, replacement_id },
+      "mcp",
+    );
+    try {
+      const result = await reviewActionItem(supabase, {
+        id,
+        outcome,
+        actor,
+        disposition,
+        evidence,
+        replacement_id,
+      });
+      if (result.status === "error") {
+        return errorToolResponse(`Error reviewing action item: ${result.message}`);
+      }
+      return textToolResponse({ review: result });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error reviewing action item: ${(err as Error).message}`,
       );
     }
   },
@@ -2274,26 +2519,14 @@ server.registerTool(
   async ({ id, reason }: { id: string; reason: string }) => {
     logToolInvocation("defer_action_item", { id }, "mcp");
     try {
-      const update = buildDeferActionItemUpdate(
-        reason,
-        new Date().toISOString(),
+      const result = await runActionItemTransition(
+        "defer",
+        "open",
+        buildDeferTransition(id, reason),
+        "id, description, status, defer_reason, deferred_at",
       );
-      const { data: updated, error } = await supabase
-        .from("action_items")
-        .update(update)
-        .eq("id", id)
-        .eq("status", "open")
-        .select("id, description, status, defer_reason, deferred_at");
-      if (error) throw error;
-      if (!updated || updated.length === 0) {
-        const { data: current } = await supabase
-          .from("action_items")
-          .select("status")
-          .eq("id", id)
-          .maybeSingle();
-        return errorToolResponse(stateGuardError("defer", "open", current));
-      }
-      return textToolResponse({ deferred: updated[0] });
+      if (result.refused) return errorToolResponse(result.refused);
+      return textToolResponse({ deferred: result.row });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error deferring action item: ${(err as Error).message}`,
@@ -2307,7 +2540,7 @@ server.registerTool(
   {
     title: "Restore Action Item",
     description:
-      "Operator-gated reverse of defer_action_item: flips deferred items back to 'open' and clears the defer marker. Provide EXACTLY ONE of id (one item) or defer_reason (every deferred item carrying that exact pause tag — the unpause path). Only 'deferred' rows are touched; anything already open or resolved is left alone.",
+      "Operator-gated reopen. Provide EXACTLY ONE of id or defer_reason. By id: reopens one deferred, archived or resolved item, the undo for every close verb; the old close reason, note, resolver and duplicate link move into the reopen event and leave the row. By defer_reason: restores the DEFERRED items carrying that exact pause tag when this call takes its locks (the unpause path) and touches nothing else, so an unpause can never reopen closed work. That set is a snapshot: a row tagged after it stays deferred, and restored_count says how many this call restored, not that none remain. Before treating a project unpause as reconciled, read list_open_action_items with include_deferred=true for rows still carrying the tag, or call again.",
     inputSchema: {
       id: z.string().uuid().optional(),
       defer_reason: z.string().min(1).max(500).optional(),
@@ -2319,37 +2552,28 @@ server.registerTool(
     logToolInvocation("restore_action_item", { id, defer_reason }, "mcp");
     try {
       const selector = assertRestoreSelector({ id, defer_reason });
-      const update = buildRestoreActionItemUpdate();
-      let query = supabase
-        .from("action_items")
-        .update(update)
-        .eq("status", "deferred");
-      query = "id" in selector
-        ? query.eq("id", selector.id)
-        : query.eq("defer_reason", selector.defer_reason);
-      const { data: restored, error } = await query.select(
-        "id, description, status",
+      if ("id" in selector) {
+        const result = await runActionItemTransition(
+          "restore",
+          "deferred', 'archived' or 'resolved",
+          buildRestoreTransition(selector.id),
+          "id, description, status, reopened_at",
+        );
+        if (result.refused) return errorToolResponse(result.refused);
+        return textToolResponse({ restored_count: 1, restored: [result.row] });
+      }
+      const bulk = await restoreByDeferReason(
+        supabase,
+        selector.defer_reason,
+        "operator",
       );
-      if (error) throw error;
-      if (!restored || restored.length === 0) {
-        if ("id" in selector) {
-          const { data: current } = await supabase
-            .from("action_items")
-            .select("status")
-            .eq("id", selector.id)
-            .maybeSingle();
-          return errorToolResponse(
-            stateGuardError("restore", "deferred", current),
-          );
-        }
+      if (!bulk.ok) throw new Error(bulk.error);
+      if (bulk.affected === 0) {
         return errorToolResponse(
           `No deferred action items found with defer_reason '${selector.defer_reason}'.`,
         );
       }
-      return textToolResponse({
-        restored_count: restored.length,
-        restored,
-      });
+      return textToolResponse({ restored_count: bulk.affected });
     } catch (err: unknown) {
       return errorToolResponse(
         `Error restoring action item: ${(err as Error).message}`,
@@ -3234,7 +3458,7 @@ server.registerTool(
   {
     title: "Admin Amend Agent Task",
     description:
-      "Ops-correction escape hatch (C3). One honest verb for board fixes that otherwise need raw SQL: set project_slug, append sources, set operator_action/operator_target, set requires_local, move a held or terminal task onto the Needs Operator desk, author or clear a close_check, and/or release a stuck claim (the folded handoff). Never touches attempt_count, never writes a false AGENT FAILED, never edits an existing event. Writes exactly one honest audit event (AGENT NEEDS OPERATOR when moving to the desk, else AGENT STATUS). Human/ops use only — not for executor lanes.",
+      "Ops-correction escape hatch (C3). One honest verb for board fixes that otherwise need raw SQL: set project_slug, append sources, set operator_action/operator_target, set requires_local, move a held or terminal task onto the Needs Operator desk, author or clear a close_check, set the not-before date on a card already in Agent Needs Input, and/or release a stuck claim (the folded handoff). Never touches attempt_count, never writes a false AGENT FAILED, never edits an existing event. Writes exactly one honest audit event (AGENT NEEDS OPERATOR when moving to the desk, else AGENT STATUS). Human/ops use only — not for executor lanes.",
     inputSchema: {
       task_id: z.string().uuid(),
       reason: z.string().min(1).describe(
@@ -3264,6 +3488,9 @@ server.registerTool(
       clear_close_check: z.boolean().optional().describe(
         "Clear this card's close_check, returning it to the human-read desk. The first-line rollback lever for a bad probe. Cannot be combined with set_close_check.",
       ),
+      set_not_before: z.string().datetime({ offset: true }).optional().describe(
+        "Set (or correct, by overwriting) the not-before date on a card that is ALREADY in Agent Needs Input: the earliest moment the hold is worth re-queueing, read from the hold note and confirmed by the operator. Refused on any other status and refused in the same call as move_to_needs_operator or release_claim (those transitions clear the date). Changes no status; the one AGENT STATUS audit event carries set_not_before. A past date is allowed and means the hold is already overdue. The date clears itself when the card leaves Agent Needs Input.",
+      ),
     },
   },
   async (
@@ -3280,6 +3507,7 @@ server.registerTool(
       release_claim,
       set_close_check,
       clear_close_check,
+      set_not_before,
     }: {
       task_id: string;
       reason: string;
@@ -3293,6 +3521,7 @@ server.registerTool(
       release_claim?: boolean;
       set_close_check?: Record<string, unknown>;
       clear_close_check?: boolean;
+      set_not_before?: string;
     },
   ) => {
     logToolInvocation("admin_amend_agent_task", {
@@ -3301,6 +3530,7 @@ server.registerTool(
       release_claim: release_claim === true,
       set_close_check: set_close_check !== undefined,
       clear_close_check: clear_close_check === true,
+      set_not_before: set_not_before !== undefined,
     }, "mcp");
     try {
       // Shape-validated here so a bad probe is refused at authorship, sharing the
@@ -3325,6 +3555,7 @@ server.registerTool(
         p_release_claim: release_claim === true,
         p_set_close_check: validatedCloseCheck,
         p_clear_close_check: clear_close_check === true,
+        p_set_not_before: set_not_before ?? null,
       });
       if (error) throw error;
       return textToolResponse({
@@ -3334,6 +3565,109 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error amending agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "supersede_agent_task",
+  {
+    title: "Supersede Agent Task",
+    description:
+      "Close a card whose premise went stale or whose work another card already covers, without pretending its operator step happened. Legal only from Needs Operator, Agent Needs Input or Agent Review. Moves the card to Agent Done, records the reason and optional replacement on the card, and writes one TASK SUPERSEDED event. The linked action item is NOT touched. This verb writes no project history: use `closeout-run.sh --supersede <uuid> [--by <uuid>] --reason <text>` so the tracker and session log record it. Give a card with no closeout route a routed project_slug first: the audit reports a close with no route until it has one. A repeat call with the same reason and replacement returns the card and writes nothing; a different reason or replacement is refused. A card that was superseded and then reopened can be closed again only with expected_generation set to its next generation: each TASK SUPERSEDED event is one generation, named by payload.generation (never by event time or position), and the number stops an old retry from closing reopened work. superseded_closed_generation on the card says which generation closed it right now, and is null whenever the card has moved off Done since. A card closed by this tool and then reopened gets no history from `--supersede`: `closeout-run.sh --audit-unrecorded` reports the generation and `closeout-run.sh --repair-supersede <uuid> --generation <n>` writes it from the event. That is detection and repair after the fact, not prevention.",
+    inputSchema: {
+      task_id: z.string().uuid(),
+      reason: z.string().min(1).describe(
+        "Why this card is being closed as superseded. Recorded on the card and in the event.",
+      ),
+      actor: z.string().min(1).describe(
+        "Who is closing it: 'operator', or an agent_code in the ledger. Recorded as claimed by the caller with actor_source mcp-shared-key, because the shared key does not prove identity.",
+      ),
+      superseded_by: z.string().uuid().optional().describe(
+        "The card that replaces this one. Omit for a premise-stale close with no replacement.",
+      ),
+      expected_generation: z.number().int().positive().optional().describe(
+        "The supersede generation this call authorizes: the next number after the highest payload.generation on the card's TASK SUPERSEDED events, or the highest number itself for a replay of a card closed right now. Optional on a card's first supersede and on a read-only replay of the generation closed right now; required to close a card that was superseded and reopened. A mismatch is refused. It guards the supersede count, not other edits to the card.",
+      ),
+    },
+  },
+  async (
+    { task_id, reason, actor, superseded_by, expected_generation }: {
+      task_id: string;
+      reason: string;
+      actor: string;
+      superseded_by?: string;
+      expected_generation?: number;
+    },
+  ) => {
+    logToolInvocation("supersede_agent_task", {
+      task_id,
+      actor,
+      has_replacement: superseded_by !== undefined,
+      expected_generation: expected_generation ?? null,
+    }, "mcp");
+    try {
+      assertSupersedeArgs({
+        task_id,
+        reason,
+        actor,
+        superseded_by,
+        expected_generation,
+      });
+      const { data, error } = await supabase.rpc(
+        "close_agent_task_superseded",
+        {
+          p_task_id: task_id,
+          p_reason: reason,
+          p_superseded_by: superseded_by ?? null,
+          p_actor: actor,
+          p_expected_generation: expected_generation ?? null,
+        },
+      );
+      if (error) throw error;
+      return textToolResponse({ receipt: "TASK SUPERSEDED", task: data });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error superseding agent task: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "list_supersede_events",
+  {
+    title: "List Supersede Events",
+    description:
+      "Read-only. Every TASK SUPERSEDED event on the board, newest first, whatever the card's status or archive state. The closeout controller's --audit-unrecorded uses it to compare events to project-history markers, because a close through the bare supersede_agent_task tool writes no history. total is the exact number of such events; total above count, or count equal to limit, means the list may be cut short.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(500).optional().describe(
+        "Rows to return. Default and maximum 500.",
+      ),
+    },
+  },
+  async ({ limit }: { limit?: number }) => {
+    logToolInvocation("list_supersede_events", { limit }, "mcp");
+    try {
+      const cap = Math.max(1, Math.min(500, limit ?? 500));
+      const { data, error, count } = await supabase
+        .from("agent_task_events")
+        .select("id, task_id, created_at", { count: "exact" })
+        .eq("event_type", "TASK SUPERSEDED")
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(cap);
+      if (error) throw error;
+      return textToolResponse({
+        count: data?.length ?? 0,
+        total: count ?? null,
+        limit: cap,
+        events: data ?? [],
+      });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error listing supersede events: ${(err as Error).message}`,
       );
     }
   },
@@ -3515,7 +3849,7 @@ server.registerTool(
   {
     title: "Hold Agent Task",
     description:
-      "Move a claimed Agent Working task to Agent Needs Input with an AGENT HUMAN HOLD receipt. The scheduled Queue Runner's claim-and-hold contract uses this when a packet validates but the scheduled path has no executor.",
+      "Move a claimed Agent Working task to Agent Needs Input with an AGENT HUMAN HOLD receipt. The scheduled Queue Runner's claim-and-hold contract uses this when a packet validates but the scheduled path has no executor. When the hold is TIMED (the packet says execute on or after a date, a dependency lands on a known day), pass not_before so the digest and the sentinel can report the hold as past due instead of letting it sit; an undated hold is a decision hold and never expires.",
     inputSchema: {
       task_id: z.string().uuid(),
       agent_code: z.string().min(1),
@@ -3525,17 +3859,25 @@ server.registerTool(
       claim_token: z.string().uuid().optional().describe(
         "The claim_token returned by this run's claim (or resume) call. Required once the task carries one: a run that cannot present the current token must not write receipts on this task.",
       ),
+      not_before: z.string().datetime({ offset: true }).optional().describe(
+        "ISO 8601 timestamp (with Z or an offset) before which this hold is not worth re-queueing. Stored on agent_tasks.not_before and carried on the AGENT HUMAN HOLD event; cleared automatically when the card leaves Agent Needs Input. Omit for a hold with no date.",
+      ),
     },
   },
   async (
-    { task_id, agent_code, reason, claim_token }: {
+    { task_id, agent_code, reason, claim_token, not_before }: {
       task_id: string;
       agent_code: string;
       reason: string;
       claim_token?: string;
+      not_before?: string;
     },
   ) => {
-    logToolInvocation("hold_agent_task", { task_id, agent_code }, "mcp");
+    logToolInvocation("hold_agent_task", {
+      task_id,
+      agent_code,
+      not_before: not_before !== undefined,
+    }, "mcp");
     try {
       return textToolResponse(
         await moveAgentTaskViaTool({
@@ -3544,6 +3886,7 @@ server.registerTool(
           action: "hold",
           reason,
           claimToken: claim_token,
+          notBefore: not_before,
         }),
       );
     } catch (err: unknown) {

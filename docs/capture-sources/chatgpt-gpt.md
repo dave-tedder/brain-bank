@@ -6,6 +6,8 @@ If you have not completed [`deploy-from-scratch.md`](../deploy-from-scratch.md) 
 
 Eight steps, about twenty minutes the first time.
 
+This path gives the GPT your `MCP_ACCESS_KEY`. To connect ChatGPT without sharing any key, signing in with OAuth instead, see [`chatgpt-connector.md`](chatgpt-connector.md).
+
 ## What you get by connecting ChatGPT
 
 - **Search your brain from any chat.** "What have I thought about X?" triggers a semantic search across every captured thought, and the GPT summarizes results conversationally.

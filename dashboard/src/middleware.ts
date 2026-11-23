@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifySessionToken } from "@/lib/auth";
 
 export async function middleware(request: NextRequest) {
-  if (request.nextUrl.pathname === "/login") {
+  if (request.nextUrl.pathname === "/login" || request.nextUrl.pathname === "/oauth/consent") {
     const response = NextResponse.next();
     response.headers.set("X-Robots-Tag", "noindex, nofollow");
     return response;

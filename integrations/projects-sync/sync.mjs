@@ -106,23 +106,33 @@ async function enumerateNotion() {
     console.warn('notionProjectsDbId not set in config - skipping Notion');
     return [];
   }
+  // Notion failures degrade instead of aborting: the run still upserts the
+  // filesystem projects, and Notion rows read before the failure are kept.
+  // Safe because upsert never deletes or archives a row Notion did not return.
   const out = [];
   let cursor;
   do {
-    const res = await fetch(
-      `https://api.notion.com/v1/databases/${config.notionProjectsDbId}/query`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${NOTION_TOKEN}`,
-          'Notion-Version': '2022-06-28',
-          'Content-Type': 'application/json',
+    let res;
+    try {
+      res = await fetch(
+        `https://api.notion.com/v1/databases/${config.notionProjectsDbId}/query`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${NOTION_TOKEN}`,
+            'Notion-Version': '2022-06-28',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(cursor ? { start_cursor: cursor } : {}),
         },
-        body: JSON.stringify(cursor ? { start_cursor: cursor } : {}),
-      },
-    );
+      );
+    } catch (err) {
+      console.warn(`Notion query failed (${err.message}); skipping the rest of Notion`);
+      return out;
+    }
     if (!res.ok) {
-      throw new Error(`Notion query failed: ${res.status} ${await res.text()}`);
+      console.warn(`Notion query failed (${res.status}); skipping the rest of Notion`);
+      return out;
     }
     const data = await res.json();
     for (const page of data.results) {

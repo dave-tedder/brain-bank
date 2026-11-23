@@ -1,0 +1,269 @@
+// external-crm-sync — write-only receiver for an external CRM push.
+//
+// An external CRM (the operator's system of record for contacts and
+// appointments) pushes them here one way. Three operations, POST JSON:
+//
+//   POST /external-crm-sync/upsert_client   keyed on clients.metadata.crm_id
+//   POST /external-crm-sync/upsert_event    keyed on business_events.metadata.crm_appointment_id,
+//                                          then metadata.gcal_event_id in either form; a
+//                                          booking then PROPOSES closing the client's
+//                                          scheduling items (_shared/booking-match.ts)
+//   POST /external-crm-sync/capture_intake  a new inbound request (an intake) as a thought,
+//                                          keyed on thoughts.metadata.crm_intake_id;
+//                                          built through the shared capture pipeline
+//                                          (embedding, metadata extraction) so it reaches
+//                                          the daily digest like any capture. It stores NO
+//                                          action items: the CRM owns request state
+//
+// Still NO READ OPERATIONS. Nothing here returns a row, a list, or a search; the
+// only response bodies are `{status, id}` and error strings. The function's
+// own lookups (find by id before deciding insert vs update) are internal and
+// never echoed.
+//
+// Authenticated by EXTERNAL_CRM_PUSH_KEY in the `x-push-key` header, checked in
+// `_auth.ts`. MCP_ACCESS_KEY does not unlock this function; the push key does
+// not unlock anything else. The decision logic lives in `_sync.ts` and is
+// unit-tested there; this file is HTTP plumbing plus the supabase-js store.
+//
+// Deploy: supabase functions deploy external-crm-sync --no-verify-jwt --project-ref <ref>
+// Secret: supabase secrets set --env-file <(...) --project-ref <ref>   (EXTERNAL_CRM_PUSH_KEY)
+
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "npm:@supabase/supabase-js@2.47.10";
+import { serviceKey } from "../_shared/service-key.ts";
+import { authenticatePushKey } from "./_auth.ts";
+import {
+  contentHash,
+  extractMetadata,
+  getEmbedding,
+} from "../_shared/capture-pipeline.ts";
+import {
+  coerceMetadata,
+  loadKnownSlugs,
+  loadRouteMap,
+  routeProjectFromContent,
+} from "../_shared/metadata-validation.ts";
+import {
+  type CapturePipeline,
+  captureIntake,
+  type ClientInsert,
+  type ClientPatch,
+  type ClientRow,
+  type EventInsert,
+  type EventPatch,
+  type EventRow,
+  SYNC,
+  type SyncStore,
+  type ThoughtInsert,
+  UniqueViolation,
+  upsertClient,
+  upsertEvent,
+} from "./_sync.ts";
+import { proposeBookingMatches } from "../_shared/booking-match.ts";
+
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const FUNCTION_SLUG = "external-crm-sync";
+
+// `notes` and `preferred_styles` are NOT selected: the push cannot read them,
+// so it cannot write them back.
+const CLIENT_COLS =
+  "id, name, email, phone, instagram, first_contact, last_contact, metadata";
+const EVENT_COLS =
+  "id, title, event_type, date_start, date_end, location, metadata";
+
+function throwDbError(error: { code?: string; message: string }): never {
+  if (error.code === "23505") throw new UniqueViolation(error.message);
+  throw new Error(error.message);
+}
+
+class SupabaseSyncStore implements SyncStore {
+  async findClientByExternalId(externalId: string): Promise<ClientRow | null> {
+    const { data, error } = await supabase
+      .from("clients")
+      .select(CLIENT_COLS)
+      .eq(`metadata->>${SYNC.clientIdKey}`, externalId)
+      .order("created_at", { ascending: true })
+      .limit(1);
+    if (error) throwDbError(error);
+    return (data?.[0] as ClientRow | undefined) ?? null;
+  }
+
+  async findClientById(id: string): Promise<ClientRow | null> {
+    const { data, error } = await supabase
+      .from("clients")
+      .select(CLIENT_COLS)
+      .eq("id", id)
+      .limit(1);
+    if (error) throwDbError(error);
+    return (data?.[0] as ClientRow | undefined) ?? null;
+  }
+
+  async insertClient(record: ClientInsert): Promise<{ id: string }> {
+    const { data, error } = await supabase
+      .from("clients")
+      .insert(record)
+      .select("id")
+      .single();
+    if (error || !data) throwDbError(error ?? { message: "insert returned no row" });
+    return { id: data.id };
+  }
+
+  async updateClient(id: string, patch: ClientPatch): Promise<void> {
+    const { error } = await supabase.from("clients").update(patch).eq("id", id);
+    if (error) throwDbError(error);
+  }
+
+  async findEventByAppointmentId(appointmentId: string): Promise<EventRow | null> {
+    const { data, error } = await supabase
+      .from("business_events")
+      .select(EVENT_COLS)
+      .eq(`metadata->>${SYNC.appointmentIdKey}`, appointmentId)
+      .order("created_at", { ascending: true })
+      .limit(1);
+    if (error) throwDbError(error);
+    return (data?.[0] as EventRow | undefined) ?? null;
+  }
+
+  async findEventByGcalIds(ids: string[]): Promise<EventRow | null> {
+    const { data, error } = await supabase
+      .from("business_events")
+      .select(EVENT_COLS)
+      .in(`metadata->>${SYNC.gcalIdKey}`, ids)
+      .order("created_at", { ascending: true })
+      .limit(1);
+    if (error) throwDbError(error);
+    return (data?.[0] as EventRow | undefined) ?? null;
+  }
+
+  async insertEvent(record: EventInsert): Promise<{ id: string }> {
+    const { data, error } = await supabase
+      .from("business_events")
+      .insert(record)
+      .select("id")
+      .single();
+    if (error || !data) throwDbError(error ?? { message: "insert returned no row" });
+    return { id: data.id };
+  }
+
+  async updateEvent(id: string, patch: EventPatch): Promise<void> {
+    const { error } = await supabase
+      .from("business_events")
+      .update(patch)
+      .eq("id", id);
+    if (error) throwDbError(error);
+  }
+
+  async findThoughtByIntakeId(intakeId: string): Promise<{ id: string } | null> {
+    const { data, error } = await supabase
+      .from("thoughts")
+      .select("id")
+      .eq(`metadata->>${SYNC.intakeIdKey}`, intakeId)
+      .order("created_at", { ascending: true })
+      .limit(1);
+    if (error) throwDbError(error);
+    return (data?.[0] as { id: string } | undefined) ?? null;
+  }
+
+  async insertThought(record: ThoughtInsert): Promise<{ id: string }> {
+    const { data, error } = await supabase
+      .from("thoughts")
+      .insert(record)
+      .select("id")
+      .single();
+    if (error || !data) throwDbError(error ?? { message: "insert returned no row" });
+    return { id: data.id };
+  }
+}
+
+const store = new SupabaseSyncStore();
+
+// The same steps handleRestCapture runs in open-brain-mcp, minus the two
+// rejection guards (content-hash dedup and the near-duplicate embedding guard):
+// the intake id is this route's dedupe key. Auto-resolve is not run at all, and
+// neither is action-item extraction: an intake is a request the CRM already
+// tracks, not a to-do source, so no action_items row and no
+// auto_resolve_decisions row is written for it. The extracted strings stay in
+// the thought's metadata.action_items, as on every capture.
+const pipeline: CapturePipeline = {
+  hash: contentHash,
+  async analyze(content: string) {
+    const [embedding, raw] = await Promise.all([
+      getEmbedding(FUNCTION_SLUG, content),
+      extractMetadata(FUNCTION_SLUG, content),
+    ]);
+    const coerced = coerceMetadata(raw, await loadKnownSlugs(supabase), content);
+    if (!coerced.project) {
+      coerced.project = routeProjectFromContent(
+        content,
+        await loadRouteMap(supabase),
+      );
+    }
+    return { embedding, metadata: { ...coerced } };
+  },
+  afterInsert() {
+    return Promise.resolve();
+  },
+};
+
+const OPS = ["upsert_client", "upsert_event", "capture_intake"] as const;
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+Deno.serve(async (req: Request): Promise<Response> => {
+  const path = new URL(req.url).pathname.split("/external-crm-sync").pop() || "/";
+  const op = path.replace(/^\/+|\/+$/g, "");
+
+  const auth = authenticatePushKey(req.headers);
+  if (!auth.ok) {
+    if (auth.reason === "not_configured") {
+      return json({ error: "push key not configured" }, 503);
+    }
+    return json({ error: "Invalid or missing push key" }, 401);
+  }
+  if (req.method !== "POST") return json({ error: "POST only" }, 405);
+  if (!(OPS as readonly string[]).includes(op)) {
+    return json({ error: "unknown operation" }, 404);
+  }
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "body must be JSON" }, 400);
+  }
+
+  try {
+    const result = op === "upsert_client"
+      ? await upsertClient(store, body)
+      : op === "upsert_event"
+      ? await upsertEvent(store, body)
+      : await captureIntake(store, pipeline, body);
+    // After a business_events insert or update, a booking proposes closing the
+    // client's scheduling items. Proposals only; never throws, and never
+    // changes the response.
+    if (
+      op === "upsert_event" && (result.status === 200 || result.status === 201) &&
+      typeof result.body.id === "string"
+    ) {
+      await proposeBookingMatches(supabase, result.body.id);
+    }
+    // Log the op and outcome only. Payloads carry contact details and intake
+    // text, and must never reach the function logs.
+    const outcome = typeof result.body.status === "string"
+      ? ` ${result.body.status}`
+      : "";
+    console.log(`external-crm-sync ${op} -> ${result.status}${outcome}`);
+    return json(result.body, result.status);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`external-crm-sync ${op} failed: ${message}`);
+    return json({ error: "write failed" }, 500);
+  }
+});

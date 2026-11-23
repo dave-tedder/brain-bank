@@ -1,0 +1,12 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:typescript@6.0.3": "6.0.3"
+  },
+  "npm": {
+    "typescript@6.0.3": {
+      "integrity": "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==",
+      "bin": true
+    }
+  }
+}

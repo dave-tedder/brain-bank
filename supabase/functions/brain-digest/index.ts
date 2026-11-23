@@ -1,20 +1,39 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.47.10";
+import { serviceKey } from "../_shared/service-key.ts";
 import { loadProfile } from "../_shared/profile.ts";
 import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import { authenticateAccessKey } from "../_shared/access-key.ts";
 import {
-  DigestActionRow,
-  renderOpenActionChecklist,
+  buildOpenActionChecklist,
+  type ChecklistInput,
+  type DigestActionRow,
 } from "./action-checklist.ts";
 import {
   formatReconcilerReport,
   formatSentinelReport,
 } from "./sentinel-report.ts";
+import { DESK_STATUSES, type DeskRow, renderDeskLine } from "./desk-line.ts";
+import {
+  type ArchiveJobRun,
+  type ArchiveProposalRow,
+  renderArchiveProposals,
+} from "./archive-proposals.ts";
+import {
+  type RecheckProposalRow,
+  type RecheckRunRow,
+  renderRecheckProposals,
+} from "./recheck-proposals.ts";
+import {
+  type FragmentProposalRow,
+  renderFragmentProposals,
+} from "./fragment-proposals.ts";
+import { type DedupProposalRow, renderDedupProposals } from "./dedup-proposals.ts";
+import { type CalendarProposalRow, renderCalendarProposals } from "./calendar-proposals.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
 const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 const SLACK_DIGEST_CHANNEL =
   Deno.env.get("SLACK_DIGEST_CHANNEL") || Deno.env.get("SLACK_CAPTURE_CHANNEL")!;
@@ -167,18 +186,44 @@ async function synthesizeDigest(
     }
   }
 
-  // Cap the open-action dump so a large backlog cannot dominate the prompt.
-  // Newest-first plus an exact total preserves the true scale.
-  const ACTION_ITEM_DIGEST_CAP = 40;
-  const { data: openActions, count: openActionsTotal } = await supabase
-    .from("action_items")
-    .select("id, description, created_at", { count: "exact" })
-    .eq("status", "open")
-    .order("created_at", { ascending: false })
-    .limit(ACTION_ITEM_DIGEST_CAP);
+  // Pull open action items from the action_items table (source of truth).
+  // Loop-closing Task 3.3: every open row with its triage review, so the
+  // checklist can show the proposal tags and split its 40 slots (15 reserved
+  // for dated or client-shaped items). The synthesis prompt still gets only the
+  // exact count. Reads the columns from 20261119b; until that is applied the
+  // checklist falls back to the newest 40 without tags and says so.
+  const openActionsInput = await loadOpenActions();
+  const openActionTotal = openActionsInput.total ??
+    (openActionsInput.rows ?? openActionsInput.legacyRows ?? []).length;
 
-  const openActionRows = (openActions ?? []) as DigestActionRow[];
-  const openActionTotal = openActionsTotal ?? openActionRows.length;
+  // Loop-closing Task 2.3: the board desk, counted from exact rows, rendered
+  // deterministically after the checklist in both daily and weekly digests.
+  // Advisory like the sentinel line: a failed read prints an "unavailable"
+  // line rather than a clean-looking zero, and never blocks the digest.
+  // Reads not_before, so 20261105_agent_tasks_not_before.sql must be applied
+  // before this deploys; until then the line reads unavailable.
+  const deskLine = await loadDeskLine();
+  // Loop-closing Task 3.2: pending archive proposals from the 05:30 UTC job,
+  // rendered deterministically after the desk line. Reads the columns from
+  // 20261107 and the RPC from 20261119; until 20261119 is applied the job line
+  // reads unavailable and the list reads none pending.
+  const archiveSection = await loadArchiveProposals();
+  // Loop-closing Task 4.1: pending "looks done" proposals from the 04:00 UTC
+  // re-check, after the archive section. Reads the RPC and the receipt table
+  // from 20261119c; until that is applied both lines read unavailable.
+  const recheckSection = await loadRecheckProposals();
+  // Loop-closing Task 5.1: pending fragment suspects (pronoun objects), after
+  // the recheck section. Reads the RPC from 20261120; until that is applied
+  // the section reads unavailable. Omitted when nothing is pending.
+  const fragmentSection = await loadFragmentProposals();
+  // Loop-closing Task 5.2: pending semantic dedup proposals, after the
+  // fragment section. Reads the RPC from 20261120c; until that is applied the
+  // section reads unavailable. Omitted when nothing is pending.
+  const dedupSection = await loadDedupProposals();
+  // Loop-closing Task 5.3: pending booking proposals, after the dedup
+  // section. Reads the RPC from 20261121b; until that is applied the section
+  // reads unavailable. Omitted when nothing is pending.
+  const calendarSection = await loadCalendarProposals();
 
   const structuredLines = [
     `Open action item count: ${openActionTotal}`,
@@ -324,8 +369,185 @@ Neither of those is today. Today is the one appointment, then clear.
   });
 
   const synthesized = (data.choices?.[0]?.message?.content ?? "").trim();
-  const checklist = renderOpenActionChecklist(openActionRows, openActionTotal);
-  return [synthesized, checklist].filter(Boolean).join("\n\n");
+  const checklist = buildOpenActionChecklist(openActionsInput);
+  return [synthesized, checklist, deskLine, archiveSection, recheckSection, fragmentSection, dedupSection, calendarSection].filter(Boolean).join("\n\n");
+}
+
+// Every failure is non-fatal and visible: buildOpenActionChecklist prints what
+// could not be read instead of a list that looks complete.
+const OPEN_ACTION_READ_MAX = 1000;
+const LEGACY_ACTION_ITEM_CAP = 40;
+async function loadOpenActions(): Promise<ChecklistInput> {
+  const input: ChecklistInput = {
+    rows: null,
+    total: null,
+    clientNames: null,
+    legacyRows: null,
+  };
+  try {
+    const { data, count, error } = await supabase
+      .from("action_items")
+      .select(
+        "id, description, created_at, last_reviewed_at, review_outcome, triage_disposition, triage_evidence, triage_replacement_id",
+        { count: "exact" },
+      )
+      .eq("status", "open")
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .limit(OPEN_ACTION_READ_MAX);
+    if (error) {
+      console.error("open action items query failed (non-fatal):", error);
+    } else {
+      input.rows = (data ?? []) as DigestActionRow[];
+      input.total = count ?? null;
+    }
+  } catch (err) {
+    console.error("open action items read failed (non-fatal):", err);
+  }
+  if (input.rows === null) {
+    try {
+      const { data, count, error } = await supabase
+        .from("action_items")
+        .select("id, description, created_at", { count: "exact" })
+        .eq("status", "open")
+        .order("created_at", { ascending: false })
+        .limit(LEGACY_ACTION_ITEM_CAP);
+      if (error) {
+        console.error("open action items legacy query failed (non-fatal):", error);
+      } else {
+        input.legacyRows = (data ?? []) as DigestActionRow[];
+        input.total = count ?? null;
+      }
+    } catch (err) {
+      console.error("open action items legacy read failed (non-fatal):", err);
+    }
+    return input;
+  }
+  try {
+    const { data, count, error } = await supabase
+      .from("clients")
+      .select("name", { count: "exact" });
+    if (error) {
+      console.error("client names query failed (non-fatal):", error);
+    } else {
+      input.clientNames = (data ?? [])
+        .map((c) => String((c as { name?: unknown }).name ?? ""))
+        .filter(Boolean);
+      // A capped read is said, not passed off as the whole client list.
+      input.clientNamesPartial = count === null || count > (data ?? []).length;
+    }
+  } catch (err) {
+    console.error("client names read failed (non-fatal):", err);
+  }
+  return input;
+}
+
+async function loadArchiveProposals(): Promise<string> {
+  let rows: ArchiveProposalRow[] | null = null;
+  let run: ArchiveJobRun | null = null;
+  try {
+    const { data, error } = await supabase
+      .from("action_items")
+      .select("id, description, created_at, archive_proposed_at")
+      .eq("status", "open")
+      .not("archive_proposed_at", "is", null)
+      .is("archive_review_outcome", null);
+    if (error) console.error("archive proposals query failed (non-fatal):", error);
+    else rows = (data ?? []) as ArchiveProposalRow[];
+  } catch (err) {
+    console.error("archive proposals read failed (non-fatal):", err);
+  }
+  try {
+    const { data, error } = await supabase.rpc("archive_proposals_last_run");
+    if (error) console.error("archive job last-run read failed (non-fatal):", error);
+    else run = (Array.isArray(data) && data[0]) ? data[0] as ArchiveJobRun : { status: null, start_time: null };
+  } catch (err) {
+    console.error("archive job last-run read failed (non-fatal):", err);
+  }
+  return renderArchiveProposals(rows, run, new Date().toISOString());
+}
+
+async function loadRecheckProposals(): Promise<string> {
+  let rows: RecheckProposalRow[] | null = null;
+  let run: RecheckRunRow | null = null;
+  try {
+    const { data, error } = await supabase.rpc("recheck_pending_proposals", { p_limit: 200 });
+    if (error) console.error("recheck proposals read failed (non-fatal):", error);
+    else rows = (data ?? []) as RecheckProposalRow[];
+  } catch (err) {
+    console.error("recheck proposals read failed (non-fatal):", err);
+  }
+  try {
+    const { data, error } = await supabase
+      .from("action_item_recheck_runs")
+      .select("started_at, status, summary")
+      .order("started_at", { ascending: false })
+      .limit(1);
+    if (error) console.error("recheck last-run read failed (non-fatal):", error);
+    else run = (Array.isArray(data) && data[0]) ? data[0] as RecheckRunRow : { started_at: null, status: null };
+  } catch (err) {
+    console.error("recheck last-run read failed (non-fatal):", err);
+  }
+  return renderRecheckProposals(rows, run, new Date().toISOString());
+}
+
+async function loadFragmentProposals(): Promise<string> {
+  let rows: FragmentProposalRow[] | null = null;
+  try {
+    const { data, error } = await supabase.rpc("fragment_pending_proposals", { p_limit: 200 });
+    if (error) console.error("fragment proposals read failed (non-fatal):", error);
+    else rows = (data ?? []) as FragmentProposalRow[];
+  } catch (err) {
+    console.error("fragment proposals read failed (non-fatal):", err);
+  }
+  return renderFragmentProposals(rows);
+}
+
+async function loadDedupProposals(): Promise<string> {
+  let rows: DedupProposalRow[] | null = null;
+  try {
+    const { data, error } = await supabase.rpc("dedup_pending_proposals", { p_limit: 200 });
+    if (error) console.error("dedup proposals read failed (non-fatal):", error);
+    else rows = (data ?? []) as DedupProposalRow[];
+  } catch (err) {
+    console.error("dedup proposals read failed (non-fatal):", err);
+  }
+  return renderDedupProposals(rows);
+}
+
+async function loadCalendarProposals(): Promise<string> {
+  let rows: CalendarProposalRow[] | null = null;
+  try {
+    const { data, error } = await supabase.rpc("calendar_pending_proposals", { p_limit: 200 });
+    if (error) console.error("calendar proposals read failed (non-fatal):", error);
+    else rows = (data ?? []) as CalendarProposalRow[];
+  } catch (err) {
+    console.error("calendar proposals read failed (non-fatal):", err);
+  }
+  return renderCalendarProposals(rows);
+}
+
+async function loadDeskLine(): Promise<string> {
+  try {
+    const { data, error } = await supabase
+      .from("agent_tasks")
+      .select(
+        "id, status, created_at, archived_at, not_before, title, desired_outcome",
+      )
+      .is("archived_at", null)
+      .in("status", [...DESK_STATUSES]);
+    if (error) {
+      console.error("desk line query failed (non-fatal):", error);
+      return "Board desk unavailable: agent_tasks could not be read.";
+    }
+    return renderDeskLine(
+      (data ?? []) as DeskRow[],
+      new Date().toISOString(),
+    );
+  } catch (err) {
+    console.error("desk line failed (non-fatal):", err);
+    return "Board desk unavailable: agent_tasks could not be read.";
+  }
 }
 
 // --- Previous Week Context (week-over-week comparison) ---

@@ -27,6 +27,7 @@ export const AGENT_TASK_RECEIPTS = [
   "AGENT SKILL DECLINED",
   "AGENT FOLLOW-UP",
   "AGENT STATUS",
+  "TASK SUPERSEDED",
 ] as const;
 
 export const AGENT_LEDGER_AUTOMATION_STATES = [
@@ -64,6 +65,38 @@ export interface AgentTaskAccessRow {
   explicit_approval: boolean;
   claim_token?: string | null;
   status: AgentTaskStatus;
+}
+
+// Task 3.4: the wrapper's guard for supersede_agent_task. The SQL verb re-checks
+// every one of these and is the real gate; this makes the refusal legible before
+// the RPC and pins the required actor, since the MCP has no caller identity to
+// derive one from (a shared key authorizes the call, it does not name the caller).
+export function assertSupersedeArgs(args: {
+  task_id: string;
+  reason?: string | null;
+  actor?: string | null;
+  superseded_by?: string | null;
+  expected_generation?: number | null;
+}): void {
+  if (!args.reason?.trim()) {
+    throw new Error("supersede_agent_task requires a reason.");
+  }
+  if (!args.actor?.trim()) {
+    throw new Error(
+      "supersede_agent_task requires an actor: 'operator' or a registered agent_code.",
+    );
+  }
+  if (args.superseded_by && args.superseded_by === args.task_id) {
+    throw new Error("A task cannot supersede itself.");
+  }
+  if (
+    args.expected_generation !== undefined &&
+    args.expected_generation !== null &&
+    (!Number.isInteger(args.expected_generation) ||
+      args.expected_generation < 1)
+  ) {
+    throw new Error("expected_generation must be a positive integer.");
+  }
 }
 
 export function isAgentTaskStatus(value: string): value is AgentTaskStatus {

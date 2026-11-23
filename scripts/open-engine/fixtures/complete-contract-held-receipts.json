@@ -1,0 +1,144 @@
+{
+  "_note": "Loop-closing Task 5.4: the 7 receipts held on 2026-11-03 (Task 2.1). The plan says these were 'captured as fixtures before repair'; they were NOT: no fixture, packet or receipt text for any of the 7 exists in the repository (searched 2026-11-20: scripts/open-engine/fixtures, deliverables/, docs/). The original AGENT DONE events are immutable on the production board but were not read for this task (no production access). Each receipt below is RECONSTRUCTED from what the repository records: the per-card hold reasons (Codex audit section 4), the target shapes it quotes, the deliverable path where one is committed, and the repair sheet's description. Everything else in each receipt is synthetic filler marked as such. The test proves (1) on main's controller rules each reconstruction reproduces the recorded 2026-11-03 hold reasons (with the renamed target code), and (2) complete_agent_task refuses each with the expected reason. It does NOT prove the real receipts carried no other defect.",
+  "fixture_route": "fixture-route",
+  "cases": [
+    {
+      "card": "d055613a",
+      "recorded_from": [
+        "docs/audits/2026-11-03-loop-closing-audit-codex.md section 4 (per-card table of actual hold reasons from evaluate() on 2026-11-03)",
+        "deliverables/brain-bank/loop-closing-board-repair-2026-11.md (repair rows)",
+        "deliverables/shop-website/d055613a-releaseform-post-cutover-verification.md (the deliverable path, as committed)"
+      ],
+      "recorded_reasons_2026_11_03": [
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ],
+      "project_slug": "fixture-route",
+      "desired_outcome": "A verification report (reconstructed wording; Task 2.2's reference scope)",
+      "reconstructed": "Receipt names the committed deliverable path and carries no OPERATOR-ACTION marker (the receipt said all acceptance points passed). Slug resolved to a valid route at the time, so a fixture route stands in for it.",
+      "receipt": "Work summary: Reconstructed fixture; the original receipt text was never captured in the repository.\nVerification: Reconstructed fixture.\nTouched files or records: deliverables/shop-website/d055613a-releaseform-post-cutover-verification.md\nLimitations: Reconstructed fixture; only the defect the repository records is reproduced.\nTracker draft: - [x] reconstructed fixture\nSession-log draft: reconstructed fixture\nBrain Bank capture draft: reconstructed fixture\nFollow-up recommendation:\nAll acceptance points passed; nothing further is needed.",
+      "expected_complete_refusal": [
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ]
+    },
+    {
+      "card": "381943e7",
+      "recorded_from": [
+        "docs/audits/2026-11-03-loop-closing-audit-codex.md section 4 (per-card table of actual hold reasons from evaluate() on 2026-11-03)",
+        "docs/audits/2026-11-03-loop-closing-audit-claude.md (hold table)",
+        "deliverables/brain-bank/loop-closing-board-repair-2026-11.md (repair rows)"
+      ],
+      "recorded_reasons_2026_11_03": [
+        "MISSING_PROJECT_SLUG",
+        "UNKNOWN_PROJECT_ROUTE"
+      ],
+      "project_slug": null,
+      "desired_outcome": "A recommendation (reconstructed wording)",
+      "reconstructed": "Held only for the missing slug, so the receipt is otherwise contract-clean: a well-formed install marker with an absolute-path target is assumed. The real marker and target text are not recorded.",
+      "receipt": "Work summary: Reconstructed fixture; the original receipt text was never captured in the repository.\nVerification: Reconstructed fixture.\nTouched files or records: deliverables/external-crm/381943e7-recommendation.md (reconstructed path)\nLimitations: Reconstructed fixture; only the defect the repository records is reproduced.\nTracker draft: - [x] reconstructed fixture\nSession-log draft: reconstructed fixture\nBrain Bank capture draft: reconstructed fixture\nFollow-up recommendation:\nOPERATOR-ACTION: Read the recommendation and decide || OPERATOR-TARGET: /reconstructed/path/381943e7-recommendation.md",
+      "expected_complete_refusal": [
+        "MISSING_PROJECT_SLUG"
+      ]
+    },
+    {
+      "card": "a92be35b",
+      "recorded_from": [
+        "docs/audits/2026-11-03-loop-closing-audit-codex.md section 4 (per-card table of actual hold reasons from evaluate() on 2026-11-03)",
+        "docs/audits/2026-11-03-loop-closing-audit-claude.md (hold table)"
+      ],
+      "recorded_reasons_2026_11_03": [
+        "OPERATOR_TARGET_UNSAFE_SCHEME",
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ],
+      "project_slug": "fixture-route",
+      "desired_outcome": "A symbolism brief (reconstructed wording)",
+      "reconstructed": "OPERATOR-TARGET was prose, not a URL or path. This card's exact target text is not recorded (the audit quotes three shapes across the four target cards); a generic prose target stands in.",
+      "receipt": "Work summary: Reconstructed fixture; the original receipt text was never captured in the repository.\nVerification: Reconstructed fixture.\nTouched files or records: deliverables/example-site/a92be35b-brief.md (reconstructed path)\nLimitations: Reconstructed fixture; only the defect the repository records is reproduced.\nTracker draft: - [x] reconstructed fixture\nSession-log draft: reconstructed fixture\nBrain Bank capture draft: reconstructed fixture\nFollow-up recommendation:\nOPERATOR-ACTION: Review the brief with the client || OPERATOR-TARGET: the client's consult record in the intake system",
+      "expected_complete_refusal": [
+        "OPERATOR_TARGET_NOT_URL_OR_PATH",
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ]
+    },
+    {
+      "card": "6e1395cf",
+      "recorded_from": [
+        "docs/audits/2026-11-03-loop-closing-audit-codex.md section 4 (per-card table of actual hold reasons from evaluate() on 2026-11-03)",
+        "docs/audits/2026-11-03-loop-closing-audit-claude.md (hold table)",
+        "deliverables/brain-bank/loop-closing-board-repair-2026-11.md (repair rows)"
+      ],
+      "recorded_reasons_2026_11_03": [
+        "MISSING_PROJECT_SLUG",
+        "UNKNOWN_PROJECT_ROUTE"
+      ],
+      "project_slug": null,
+      "desired_outcome": "A specification (reconstructed wording)",
+      "reconstructed": "Held only for the missing slug; the repair sheet says its install marker was preserved, so a well-formed marker is assumed. The real marker text is not recorded.",
+      "receipt": "Work summary: Reconstructed fixture; the original receipt text was never captured in the repository.\nVerification: Reconstructed fixture.\nTouched files or records: deliverables/external-crm/6e1395cf-spec.md (reconstructed path)\nLimitations: Reconstructed fixture; only the defect the repository records is reproduced.\nTracker draft: - [x] reconstructed fixture\nSession-log draft: reconstructed fixture\nBrain Bank capture draft: reconstructed fixture\nFollow-up recommendation:\nOPERATOR-ACTION: Use the spec as design input for the build || OPERATOR-TARGET: /reconstructed/path/6e1395cf-spec.md",
+      "expected_complete_refusal": [
+        "MISSING_PROJECT_SLUG"
+      ]
+    },
+    {
+      "card": "83a4acfa",
+      "recorded_from": [
+        "docs/audits/2026-11-03-loop-closing-audit-codex.md section 4 (per-card table of actual hold reasons from evaluate() on 2026-11-03)",
+        "docs/audits/2026-11-03-loop-closing-audit-claude.md (hold table)",
+        "deliverables/brain-bank/loop-closing-board-repair-2026-11.md (repair rows)"
+      ],
+      "recorded_reasons_2026_11_03": [
+        "OPERATOR_TARGET_UNSAFE_SCHEME",
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ],
+      "project_slug": "fixture-route",
+      "desired_outcome": "A design brief (reconstructed wording)",
+      "reconstructed": "The repair sheet says a descriptive Notion target was replaced; the Codex audit quotes one target that 'starts Notion intake page before a real URL'. That shape is reproduced with a placeholder URL.",
+      "receipt": "Work summary: Reconstructed fixture; the original receipt text was never captured in the repository.\nVerification: Reconstructed fixture.\nTouched files or records: deliverables/example-site/83a4acfa-brief.md (reconstructed path)\nLimitations: Reconstructed fixture; only the defect the repository records is reproduced.\nTracker draft: - [x] reconstructed fixture\nSession-log draft: reconstructed fixture\nBrain Bank capture draft: reconstructed fixture\nFollow-up recommendation:\nOPERATOR-ACTION: Review layout and colour with the client || OPERATOR-TARGET: Notion intake page https://www.notion.so/reconstructed-placeholder",
+      "expected_complete_refusal": [
+        "OPERATOR_TARGET_NOT_URL_OR_PATH",
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ]
+    },
+    {
+      "card": "145d662a",
+      "recorded_from": [
+        "docs/audits/2026-11-03-loop-closing-audit-codex.md section 4 (per-card table of actual hold reasons from evaluate() on 2026-11-03)",
+        "docs/audits/2026-11-03-loop-closing-audit-claude.md (hold table)",
+        "deliverables/brain-bank/loop-closing-board-repair-2026-11.md (repair rows)"
+      ],
+      "recorded_reasons_2026_11_03": [
+        "OPERATOR_TARGET_UNSAFE_SCHEME",
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ],
+      "project_slug": "fixture-route",
+      "desired_outcome": "A brainstorm reference (reconstructed wording)",
+      "reconstructed": "The repair sheet says a descriptive target was replaced; the audit quotes one target that 'is just a named intake record'. That shape is reproduced with a placeholder name.",
+      "receipt": "Work summary: Reconstructed fixture; the original receipt text was never captured in the repository.\nVerification: Reconstructed fixture.\nTouched files or records: deliverables/example-site/145d662a-brainstorm.md (reconstructed path)\nLimitations: Reconstructed fixture; only the defect the repository records is reproduced.\nTracker draft: - [x] reconstructed fixture\nSession-log draft: reconstructed fixture\nBrain Bank capture draft: reconstructed fixture\nFollow-up recommendation:\nOPERATOR-ACTION: Review the brainstorm and verify the historical facts || OPERATOR-TARGET: Client intake record (reconstructed placeholder)",
+      "expected_complete_refusal": [
+        "OPERATOR_TARGET_NOT_URL_OR_PATH",
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ]
+    },
+    {
+      "card": "02b30e4d",
+      "recorded_from": [
+        "docs/audits/2026-11-03-loop-closing-audit-codex.md section 4 (per-card table of actual hold reasons from evaluate() on 2026-11-03)",
+        "docs/audits/2026-11-03-loop-closing-audit-claude.md (hold table)",
+        "deliverables/brain-bank/loop-closing-board-repair-2026-11.md (repair rows)"
+      ],
+      "recorded_reasons_2026_11_03": [
+        "MISSING_PROJECT_SLUG",
+        "UNKNOWN_PROJECT_ROUTE",
+        "OPERATOR_TARGET_UNSAFE_SCHEME",
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION"
+      ],
+      "project_slug": null,
+      "desired_outcome": "A slide-by-slide outline (the accepted scope the repair sheet quotes)",
+      "reconstructed": "Missing route plus a target that names an Adobe Express presentation (the audit's wording) plus a staged deliverable. Placeholder target text.",
+      "receipt": "Work summary: Reconstructed fixture; the original receipt text was never captured in the repository.\nVerification: Reconstructed fixture.\nTouched files or records: deliverables/external-crm/02b30e4d-deck-outline.md (reconstructed path)\nLimitations: Reconstructed fixture; only the defect the repository records is reproduced.\nTracker draft: - [x] reconstructed fixture\nSession-log draft: reconstructed fixture\nBrain Bank capture draft: reconstructed fixture\nFollow-up recommendation:\nOPERATOR-ACTION: Edit and render the outline || OPERATOR-TARGET: Adobe Express presentation (reconstructed placeholder)",
+      "expected_complete_refusal": [
+        "OPERATOR_TARGET_NOT_URL_OR_PATH",
+        "DELIVERABLE_WITHOUT_OPERATOR_ACTION",
+        "MISSING_PROJECT_SLUG"
+      ]
+    }
+  ]
+}

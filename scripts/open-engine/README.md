@@ -118,6 +118,49 @@ pass an absolute path to the main checkout's `closeout-run.sh`. This is working
 as intended, not a bug: the registry points at real project trackers outside
 this repo, and a worktree has no business writing to them under a stale route.
 
+### Route capability snapshot (`publish-route-snapshot.mjs`, Task 5.4)
+
+`complete_agent_task` checks each receipt against the same contract the
+controller applies (`supabase/functions/_shared/receipt-shape.js`) and refuses a
+completion whose route is known to be broken. The Edge Function cannot read the
+registry, so `publish-route-snapshot.mjs` publishes four booleans per route key
+(workspace, tracker and session-log paths exist on this machine; a capture tag
+is set) into `public.closeout_routes` through the `publish_closeout_routes` RPC.
+No path leaves the machine. A slug with no row, or a row older than 7 days, is
+`ROUTE_SNAPSHOT_UNAVAILABLE`: the completion is accepted with a warning.
+
+```bash
+node scripts/open-engine/publish-route-snapshot.mjs --dry-run   # what it would publish
+node scripts/open-engine/publish-route-snapshot.mjs             # publish
+```
+
+It needs a PostgREST JWT for the `closeout_route_publisher` role
+(`scripts/open-engine/mint-route-publisher-jwt.py`) and the anon key, each in a
+mode-600 file under `~/.config/brain-bank/`, plus `BRAIN_BANK_SUPABASE_URL` or
+`BRAIN_BANK_MCP_URL`. Exit 0 published, 1 partial or refused, 2 never ran.
+
+### Refusal and warning counts (`public.complete_contract_events`)
+
+Each `[complete-contract]` line `complete_agent_task` or `request_agent_review`
+logs (a refusal, or a `ROUTE_SNAPSHOT_UNAVAILABLE` warning) also writes one row
+to `public.complete_contract_events` (migration
+`20261121c_complete_contract_events.sql`): tool, task, agent, outcome
+(`refused` or `warned`), the reason codes, the slug, and `occurred_at`, the
+moment the line was emitted (the insert itself runs later under `waitUntil`;
+the weekly queries use `occurred_at`). Never receipt text. The
+write is best-effort: a failed insert logs `[complete-contract] event write
+failed` and the tool answers exactly as before. The weekly read is
+`scripts/loop-closing/complete-contract-metrics.sql` (read-only; how to read
+each column is in its header).
+
+```bash
+deno run --config scripts/loop-closing/closeout-capture-probe.deno.json --no-lock --allow-net --allow-env --allow-read scripts/open-engine/complete-contract-events-probe-harness.ts
+bash scripts/open-engine/complete-contract-events-sql-test.sh                 # local throwaway cluster
+bash scripts/open-engine/complete-contract-events-sql-test.sh --all-mutations
+bash scripts/open-engine/complete-contract-events-sql-test.sh --inject-selftest
+python3 scripts/open-engine/complete-contract-events-mutants.py
+```
+
 ### OE-8B draft writer (`--write-drafts`)
 
 `--write-drafts` writes one pending-closeout draft per APPLYABLE project batch

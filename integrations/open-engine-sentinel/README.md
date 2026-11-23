@@ -19,3 +19,11 @@ to your actual lane schedule, and set env vars `BRAIN_BANK_MCP_URL` and
 only, never into files this repo tracks). Record the trigger ID in your operator
 notes. Before the first run, seed the `sentinel` ledger identity per the
 one-time preflight in `skills/open-engine-sentinel/SKILL.md`.
+
+Step 3d (backlog drift) reads four tables through PostgREST with a read-only
+credential pair, never the MCP key: apply migration `20261105_sentinel_reader_role.sql`,
+mint the token with `python3 scripts/loop-closing/mint-sentinel-read-jwt.py` in your own
+terminal, and set `BRAIN_BANK_SENTINEL_READ_JWT` and `BRAIN_BANK_SENTINEL_APIKEY` on the
+routine's environment. `scripts/loop-closing/verify-sentinel-reads.sh` runs the same four
+reads locally and prints only statuses and counts; `sentinel-reads-reference.sql` holds
+their SQL twins for comparison. Until those are set, step 3d reports a failed read.

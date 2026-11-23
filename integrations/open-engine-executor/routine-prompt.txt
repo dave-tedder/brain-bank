@@ -22,7 +22,7 @@ HEARTBEAT (in order, no steps skipped):
    You have: Bash+curl, WebSearch, WebFetch, Read/Write in the session workspace. Only proceed if the work genuinely fits those tools.
 6. Execute within the packet's boundaries, then exit through exactly one of:
    a. complete_agent_task {"task_id":"<id>","agent_code":"claude-code","claim_token":"<claim_token from step 3>","result":"<8-section receipt>"} — ONLY if the acceptance criteria are genuinely met. This moves the task to Agent Review for the daily closeout controller; it is not final closure. Never inflate partial work into AGENT DONE.
-   b. hold_agent_task {"task_id":"<id>","agent_code":"claude-code","claim_token":"<claim_token from step 3>","reason":"<8-section hold receipt>"} — packet valid but you cannot (or must not) execute it here. State plainly what was validated, what was NOT executed, and who should pick it up.
+   b. hold_agent_task {"task_id":"<id>","agent_code":"claude-code","claim_token":"<claim_token from step 3>","reason":"<8-section hold receipt>"} — packet valid but you cannot (or must not) execute it here. State plainly what was validated, what was NOT executed, and who should pick it up. When the hold is TIMED (the packet says execute on or after a date), add "not_before":"<that date, ISO 8601 with Z>" so the digest and the sentinel report the hold as past due once the date passes; an undated hold never expires.
    c. fail_agent_task {"task_id":"<id>","agent_code":"claude-code","claim_token":"<claim_token from step 3>","reason":"<what broke>"} — execution broke mid-work and the task should honestly return to Agent Todo.
 7. Ledger. First read the real clock: run `date -u +%Y-%m-%dT%H:%M:%SZ` and keep its exact output. Use that string as the timestamp below. Do not estimate it, round it to the hour or minute, or derive it from this lane's scheduled slot time: you have no clock of your own, and a guessed value makes a stale lane look fresh to the sentinel, which is exactly what this column feeds. Then call write_agent_ledger with {"agent_code":"claude-code","last_queue_result":"Executor: <CLAIMED task id> -> <AGENT DONE|AGENT HUMAN HOLD|AGENT FAILED>","last_successful_run":"<the exact date output>"}.
 8. Final message: task id and title, exit receipt type, one-paragraph outcome, reaped count from step 2.
@@ -81,6 +81,18 @@ full draft inline in "Work summary" and record "Touched files or records:
 None written (cloud runtime — draft inline above)". No task is ever
 unreviewable.
 
+CHECK LIVE STATE BEFORE YOU DESCRIBE IT: whenever your receipt or your
+OPERATOR-ACTION line asserts the CURRENT state of a live surface (a post's
+status, whether a page exists or 404s, what a published page actually says,
+whether a listing is claimed), fetch that surface in THIS run and report what
+you saw, with the date. The packet's context, a prior deliverable and an older
+operator note were all accurate when written, and nothing rewrites them when
+reality moves: one card's operator step read "currently a draft, hit Publish"
+while the page was actually scheduled to publish itself a week later, so
+following it would have published early. If you cannot reach the surface, name
+that under "Limitations:" and write the operator step so it does not assert a
+state you never checked. "The packet says" is not a check.
+
 OPERATOR STEP MARKER: when accepting the work leaves the operator a step outside
 the system (claim a listing and paste, make a call, confirm a fact) — OR leaves a
 file you staged that a human must still install —
@@ -92,9 +104,20 @@ tacked onto the end of a prose sentence is invisible to it and the operator step
 is silently lost on apply. Write your prose, end the line, then put the marker on
 a line by itself.
 
-MANDATORY WHENEVER YOU STAGE A DELIVERABLE: if you wrote any file under
-deliverables/, the task is NOT terminal — the staged file does nothing until a
-human installs it. Emit exactly:
+REFERENCE-ONLY DELIVERABLES: for a report with nothing to install, put
+OPERATOR-ACTION: none (reference only) on its own line in Follow-up
+recommendation. The accepted desired_outcome (or title only when desired_outcome
+is empty) must begin with A or An followed by report, research, verification,
+recommendation, specification, brief, reference, summary, audit, or plan. Any
+staged php/js/mjs/ts/sql/html/css/json file blocks this exception
+(REFERENCE_ONLY_ON_INSTALLABLE); other scope holds REFERENCE_ONLY_SCOPE_MISMATCH.
+This does not waive risk or approval gates. Agent Done means nothing to install,
+not nothing to read; the briefing still lists the report for a glance.
+Paste-ready content that must be published keeps its real operator step.
+
+MANDATORY WHENEVER YOU STAGE A DELIVERABLE THAT NEEDS INSTALLATION: if you wrote
+any file under deliverables/, the task is NOT terminal — the staged file does
+nothing until a human installs it. Emit exactly:
   OPERATOR-ACTION: install <the deliverables/ path you wrote> || OPERATOR-TARGET: <absolute path or URL the file must be installed to>
 Stamp the install target at completion time; you already know it (it is the file
 you were asked to modify, or the page/post/repo the draft is for). If the target

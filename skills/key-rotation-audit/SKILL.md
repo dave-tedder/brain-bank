@@ -45,3 +45,19 @@ Rotating any secret that authenticates to Brain Bank (`MCP_ACCESS_KEY` / `BRAIN_
    **Why the Apps Scripts are non-negotiable if you run them.** Neither script is loud when it fails: they run on their own schedule, and a 401 just means no data arrives. A script that silently 401s can go unnoticed for a long time, because nothing errors where a human is looking — the failure mode is a `business_events` table that quietly stops growing, not an alert. Both scripts read `BRAIN_KEY` from a Script Property (Project Settings → Script Properties), so a rotation is a one-field change plus a test run, per script — there's no excuse to skip the smoke.
 
    If any smoke fails, STOP and fix that consumer before moving to the next. Do not close the rotation task with an unchecked box.
+
+## Legacy JWT secret: two minted tokens depend on it
+
+The project's Dashboard shows the JWT settings migrated to signing keys, but the LEGACY JWT secret still verifies, and two narrow-role tokens are signed with it. Rotating or revoking the legacy secret invalidates BOTH at once, with no error anywhere a human is looking. Re-mint both in the same sitting (each script takes the secret and the anon key at hidden prompts; never paste either token into chat, a command line or a doc):
+
+| Token | Role | Local copies (0600, not cloud-synced) | Other copies | Expires | Re-mint | What breaks if it is dead |
+|---|---|---|---|---|---|---|
+| Sentinel read token | `sentinel_reader` | `~/.config/brain-bank/sentinel-read-jwt`, `sentinel-apikey` | the sentinel routine's cloud environment: `BRAIN_BANK_SENTINEL_READ_JWT`, `BRAIN_BANK_SENTINEL_APIKEY` (operator, in the routine UI) | one year after minting | `scripts/loop-closing/mint-sentinel-read-jwt.py` | Sentinel step 3d fails closed (FAIL) every morning |
+| Route publisher token | `closeout_route_publisher` | `~/.config/brain-bank/route-publisher-jwt`, `route-publisher-apikey` | none | one year after minting | `scripts/open-engine/mint-route-publisher-jwt.py` | the scheduled route-snapshot publish fails; after 7 days `complete_agent_task` accepts with `ROUTE_SNAPSHOT_UNAVAILABLE` warnings |
+
+Smoke, one per token, after re-minting (and after any legacy-secret change, even if you did not intend to touch these):
+
+- [ ] **Sentinel read token.** Run `scripts/loop-closing/verify-sentinel-reads.sh` locally (reads the local copies), then fire the sentinel routine once and confirm its ledger `last_queue_result` shows step 3d reads succeeding, not FAIL. The cloud copy is only proven by the routine run.
+- [ ] **Route publisher token.** `env BRAIN_BANK_SUPABASE_URL=https://<your-project-ref>.supabase.co node scripts/open-engine/publish-route-snapshot.mjs` prints `PUBLISHED <n>` (your route count), then `select max(published_at) from public.closeout_routes;` reads within the last minute. `--dry-run` does not exercise the token.
+
+An expiry is the same event on a calendar: if you minted both together they expire together, so re-mint them together.

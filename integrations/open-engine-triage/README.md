@@ -1,6 +1,6 @@
 # Open Engine Triage (scheduled OE-12 lane)
 
-The intake lane for the Open Engine board: a daily pass as agent code `triage` that reads open action items, classifies them, and creates full-packet **Standing** drafts for the board-eligible ones. Its one promotion power is the guarded stage-4 auto-promote: for drafts it created in the same run, it may call `auto_promote_agent_task_intake`, and the server itself enforces the safety allowlist (low-risk, action-item-linked, full-packet, non-local, non-live-surface) plus a daily cap, declining anything else. It never calls the human promote path, never resolves action items, never edits files, never runs git, never sends anything. The next briefing surfaces whatever it drafted so the operator can decide what else to promote.
+The intake lane for the Open Engine board: a daily pass as agent code `triage` that reads the oldest unreviewed open action items (`list_open_action_items` with `unreviewed_days: 14`), classifies them, creates full-packet **Standing** drafts for the board-eligible ones, and records a durable review on every item it read with `review_action_item`: `keep` for real open work, or a `proposal` with a disposition (stale, duplicate, vague, done, paused) and its evidence, which the morning digest shows as a tag beside the item. Its one promotion power is the guarded stage-4 auto-promote (live since 2026-07-15): for drafts it created in the same run, it may call `auto_promote_agent_task_intake`, and the server itself enforces the safety allowlist (low-risk, action-item-linked, full-packet, non-local, non-live-surface) plus the daily cap, declining anything else. It never calls the human promote path, never resolves, archives or defers action items (a review is a tag, not a status change), never edits files, never runs git, never sends anything. The next OE-11 briefing surfaces whatever it drafted so the operator can decide what else to promote.
 
 ## How it relates to the other lanes
 
@@ -17,7 +17,8 @@ Alternative: run it as a local scheduled task pointing at the `open-engine-triag
 - Fail-closed preflight (env/tool check + ledger read) before any draft.
 - Draft-safe by default: every write is a **Standing** `create_agent_task_intake`. The only promotion is `auto_promote_agent_task_intake` on same-run drafts, where the server re-checks the allowlist and daily cap itself and declines non-qualifying calls.
 - Never calls `promote_agent_task_intake`, never grants `explicit_approval`, never assigns an `agent_code` at draft time.
-- Never resolves, archives, edits, or creates action items or thoughts — resolution belongs to the auto-resolve pipeline and the operator.
+- Never resolves, archives, defers, restores, or creates action items or thoughts — resolution is the auto-resolve pipeline's and the operator's job. Its one write to an action item is `review_action_item`, which records the review columns and cannot change a status; a proposal waits for the operator.
+- An item triage did not finish (past the draft cap, or a failed draft call) is left unreviewed so it leads the next run.
 - Never edits trackers/session logs, never runs git, never deploys, never sends email/Slack/posts.
 - Draft cap per run and a bounded read; overflow is reported in the ledger summary, not silently dropped.
 - Risk is fail-closed: anything not clearly low per the rubric is medium, which the auto-promote allowlist can never touch.
