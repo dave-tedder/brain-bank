@@ -1,22 +1,43 @@
 #!/usr/bin/env node
 // Brain Bank action-item triage. Dry-run is the default.
+//
+// Status flips only; no row is ever deleted. --apply goes through the guarded
+// transition_action_item RPC, so every close carries an actor, a reason and a
+// current-status guard. The close reason is an explicit field of the decision, never
+// inferred from its free text (see normalizeMiddleDecision):
+//   {"bucket":"ARCHIVE","close_reason":"fragment","reason":"<quote>"}   never a real task
+//   {"bucket":"RESOLVE","close_reason":"done","evidence":"commit:abc1234","reason":"<why>"}
+// A decision without a valid one stays open in REVIEW, including every ARCHIVE in a
+// file written before this contract. A disposition CSV records each answer the RPC
+// gave, applied or skipped; a call that throws has no row, and a lost response can
+// leave an event with no row, so action_item_events is the durable record. Undo a row
+// with restore_action_item, which records the reopen. This needs the migration
+// 20261106_action_items_close_reason.sql: without the RPC, --apply fails on its first
+// call having written nothing.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { appendFileSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   addDryRunExternalCompletionSignals,
+  applyDispositions,
   bucketize,
-  csv,
+  CLASSIFIER_SYSTEM,
   DEFAULT_DONE_STATUSES,
   DEFAULT_PROTECTED_PHRASES,
   DEFAULT_WORK_ITEM_SHAPE_TERMS,
+  DISPOSITION_HEADER,
+  dispositionLines,
+  llmDecision,
   mergeMiddle,
   normalizeEvidenceText,
+  planDispositionBytes,
   projectNameFromDisplay,
   renderReport,
   runCascade,
 } from './triage-lib.mjs';
+import { claimDispositionFile } from './disposition-claim.mjs';
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -107,11 +128,14 @@ function projectFromRow(row, statuses) {
   const displayName = row.display_name || '';
   const aliases = PROJECT_ALIASES[displayName] || [];
   const matchTerms = [...new Set([projectNameFromDisplay(displayName), displayName, ...aliases].filter(Boolean))];
+  const liveStatus = statuses.get(row.notion_page_id?.replace(/-/g, ''));
   return {
     displayName,
     matchTerms,
     matchTermsNorm: matchTerms.map(normalizeEvidenceText).filter(Boolean),
-    status: statuses.get(row.notion_page_id?.replace(/-/g, '')) || row.status || '',
+    status: liveStatus || row.status || '',
+    // Where the status was read, so a cascade close names a source someone can open.
+    statusSource: liveStatus ? 'notion' : 'projects-table',
   };
 }
 
@@ -191,14 +215,6 @@ async function loadInput() {
   };
 }
 
-const CLASSIFIER_SYSTEM = [
-  'You triage one captured action item at a time for a Brain Bank operator.',
-  'KEEP only a concrete, unfinished commitment. ARCHIVE advice, conditional ideas, narration, or plainly completed implementation notes.',
-  'REVIEW anything uncertain or involving a customer, contract, money, legal obligation, or deadline.',
-  'Judge the item alone and quote the phrase that drove the decision.',
-  'Return strict JSON: {"bucket":"keep|archive|review","reason":"<short quote>"}.',
-].join('\n');
-
 async function classifyOne(item) {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -224,11 +240,7 @@ async function classifyOne(item) {
     throw new Error('OpenRouter ' + response.status + ': ' + (await response.text()).slice(0, 200));
   }
   const data = await response.json();
-  const parsed = JSON.parse(data.choices[0].message.content);
-  const bucket = ['keep', 'archive', 'review'].includes(parsed.bucket)
-    ? parsed.bucket.toUpperCase()
-    : 'REVIEW';
-  return { bucket, reason: String(parsed.reason || '').slice(0, 200) };
+  return llmDecision(JSON.parse(data.choices[0].message.content));
 }
 
 async function classifyMiddle(middle) {
@@ -248,18 +260,63 @@ async function classifyMiddle(middle) {
   return decisions;
 }
 
-async function applyStatus(status, items) {
-  for (let index = 0; index < items.length; index += 100) {
-    const ids = items.slice(index, index + 100).map((item) => '"' + item.id + '"').join(',');
-    await supabase('action_items?id=in.(' + ids + ')', {
-      method: 'PATCH',
-      headers: { Prefer: 'return=minimal' },
-      body: JSON.stringify({
-        status,
-        resolved_at: status === 'resolved' ? new Date().toISOString() : null,
-      }),
-    });
+// Takes this run's claim on the file, or stops the run. Released on any exit; a run that
+// is killed leaves its claim behind, and the next run proves it dead and recovers it.
+function claimOrRefuse(path) {
+  const claim = claimDispositionFile(path);
+  if (claim.busy) {
+    console.error(`\nRefusing --apply: another run holds ${path}. Nothing was written to the database or the file. Run this again when it finishes. A claim left by a dead process on this machine is recovered automatically. One from another host, or one that cannot be read, is not: confirm that process is gone, then delete the claim file named here.\n${JSON.stringify(claim.holders, null, 2)}`);
+    process.exit(1);
   }
+  process.on('exit', claim.release);
+  if (claim.recovered.length > 0) {
+    console.error(`Recovered ${claim.recovered.length} claim(s) left by a dead process: ${claim.recovered.join(', ')}`);
+  }
+  return claim;
+}
+
+// Leaves the file ready to append to, or stops the run. A migration writes a temp file
+// beside it, keeps the original as a backup, and renames over, so a crash leaves either
+// the old file or the new one and never half of one. Both names are unique to this run,
+// and a stale temp from an earlier crash is left alone and never read.
+function prepareDispositionFile(path) {
+  const plan = existsSync(path) ? planDispositionBytes(readFileSync(path)) : { action: 'create' };
+  if (plan.action === 'refuse') {
+    console.error(`\nRefusing --apply: ${path} holds ${plan.problem}. Nothing was written to the database or the file. Move that file aside, keeping it as its run's record, and re-run: this run then starts a new one.`);
+    process.exit(1);
+  }
+  if (plan.unterminatedLast) {
+    console.error(`Note: the last record in ${path} had no line ending. A spreadsheet saves files this way, and so does a write cut short; if it was cut short, that record may be incomplete. It is kept as it is: ${plan.unterminatedLast.slice(0, 200)}`);
+  }
+  if (plan.action === 'create') {
+    writeFileSync(path, `${DISPOSITION_HEADER}\n`);
+  } else if (plan.action === 'append') {
+    if (plan.needsNewline) appendFileSync(path, '\n');
+  } else {
+    const unique = randomUUID();
+    const temp = `${path}.${unique}.migrating`;
+    const backup = `${path}.pre-evidence-${Date.now()}-${unique}.bak`;
+    try {
+      writeFileSync(temp, plan.content, { flag: 'wx' });
+      copyFileSync(path, backup, constants.COPYFILE_EXCL);
+      renameSync(temp, path);
+    } finally {
+      rmSync(temp, { force: true });
+    }
+    console.error(`Disposition file migrated to the evidence column: ${plan.records} prior record(s) kept, original at ${backup}`);
+  }
+}
+
+async function applyFlips(newStatus, list, records) {
+  await applyDispositions(
+    list,
+    newStatus,
+    (args) => supabase('rpc/transition_action_item', { method: 'POST', body: JSON.stringify(args) }),
+    records,
+    (done, total) => {
+      if (done % 100 === 0 || done === total) console.error(`  ${newStatus}: ${done}/${total}`);
+    },
+  );
 }
 
 async function main() {
@@ -281,9 +338,14 @@ async function main() {
     const inputPath = join(OUT_DIR, 'triage-classify-input-' + STAMP + '.json');
     writeFileSync(inputPath, JSON.stringify(middle, null, 2));
     console.error('No optional OpenRouter credentials; wrote classification input to ' + inputPath);
+    console.error('Classify them, write {id:{bucket,close_reason,reason}} JSON (see the README for the contract), re-run with --decisions=<file>');
   }
 
   let decided = mergeMiddle(deterministic, middle, middleDecisions);
+  const held = Object.values(decided).filter((decision) => decision.held).length;
+  if (held) {
+    console.error(`${held} decision(s) held in REVIEW with no valid close reason; they stay open and the report says why`);
+  }
   if (!APPLY) {
     decided = addDryRunExternalCompletionSignals(decided, items, externalEvidence).decided;
   }
@@ -310,18 +372,27 @@ async function main() {
     return;
   }
 
-  await applyStatus('archived', buckets.ARCHIVE);
-  await applyStatus('resolved', buckets.RESOLVE);
-  const lines = ['id,old_status,new_status,bucket,reason,description'];
-  for (const bucket of ['ARCHIVE', 'RESOLVE']) {
-    for (const item of buckets[bucket]) {
-      const status = bucket === 'ARCHIVE' ? 'archived' : 'resolved';
-      lines.push([item.id, 'open', status, bucket, csv(item.reason), csv(item.description)].join(','));
+  // The CSV is written even when a call fails partway, and appended to, so a re-run
+  // on the same day keeps the first run's record. Its shape is settled here, before
+  // any database write: a file this run could not add to refuses with nothing closed,
+  // rather than closing items whose record it cannot keep. The claim is held from here
+  // through the final append, so another run cannot replace the file under this one.
+  const dispPath = join(OUT_DIR, 'triage-disposition-' + STAMP + '.csv');
+  const claim = claimOrRefuse(dispPath);
+  prepareDispositionFile(dispPath);
+  const records = [];
+  try {
+    await applyFlips('archived', buckets.ARCHIVE, records);
+    await applyFlips('resolved', buckets.RESOLVE, records);
+  } finally {
+    if (records.length) appendFileSync(dispPath, `${dispositionLines(records).join('\n')}\n`);
+    if (!claim.held()) {
+      console.error(`\nWARNING: this run's claim on ${dispPath} was removed while it ran. Its records were appended, but another run may have replaced the file meanwhile. Compare the file with action_item_events.`);
+      process.exitCode = 1;
     }
+    const skipped = records.filter((record) => record.outcome !== 'applied').length;
+    console.error(`Applied ${records.length - skipped}, skipped ${skipped} that left 'open' since classification. Disposition: ${dispPath}`);
   }
-  const dispositionPath = join(OUT_DIR, 'triage-disposition-' + STAMP + '.csv');
-  writeFileSync(dispositionPath, lines.join('\n'));
-  console.error('Applied reversible status changes. Disposition: ' + dispositionPath);
 }
 
 main().catch((error) => {
