@@ -43,11 +43,17 @@ import {
   ACTION_ITEM_LIST_MAX,
   actionItemListWindow,
   assertRestoreSelector,
+  assertUnreviewedListArgs,
   buildArchiveTransition,
   buildDeferTransition,
   buildResolveTransition,
   buildRestoreTransition,
+  listUnreviewedActionItems,
+  REVIEW_OUTCOMES,
+  reviewActionItem,
   stateGuardError,
+  TRIAGE_DISPOSITIONS,
+  UNREVIEWED_DAYS_MAX,
 } from "./_action_items.ts";
 import {
   ACTION_ITEM_CLOSE_REASONS,
@@ -2122,41 +2128,59 @@ server.registerTool(
   {
     title: "List Open Action Items",
     description:
-      "Read-only OE-12 triage surface. Returns open action_items rows, newest first by default, each flagged has_active_draft when an active agent_tasks draft already links to it. Set include_deferred=true to also return items held out by defer_action_item (each carrying defer_reason + deferred_at). Set order='oldest' to read the oldest first and offset to page; count is this page's size. Never resolves, archives, or mutates anything.",
+      "Read-only OE-12 triage surface. Returns open action_items rows, newest first by default, each flagged has_active_draft when an active agent_tasks draft already links to it. Set include_deferred=true to also return items held out by defer_action_item (each carrying defer_reason + deferred_at). Set order='oldest' to read the oldest first and offset to page; count is this page's size. Set unreviewed_days (the triage read, e.g. 14) to return only open items never reviewed or last reviewed more than that many days ago, oldest unreviewed first, each with its last review; unreviewed_total is the size of that whole window. A reviewed item leaves the window, so read with offset 0 again rather than paging. unreviewed_days cannot be combined with include_deferred or order='newest'. Never resolves, archives, or mutates anything.",
     inputSchema: {
       limit: z.number().int().min(1).max(ACTION_ITEM_LIST_MAX).optional(),
       include_deferred: z.boolean().optional(),
       order: z.enum(["newest", "oldest"]).optional(),
       offset: z.number().int().min(0).optional(),
+      unreviewed_days: z.number().int().min(1).max(UNREVIEWED_DAYS_MAX).optional(),
     },
   },
   async (
-    { limit, include_deferred, order, offset }: {
+    { limit, include_deferred, order, offset, unreviewed_days }: {
       limit?: number;
       include_deferred?: boolean;
       order?: "newest" | "oldest";
       offset?: number;
+      unreviewed_days?: number;
     },
   ) => {
     logToolInvocation(
       "list_open_action_items",
-      { limit, include_deferred, order, offset },
+      { limit, include_deferred, order, offset, unreviewed_days },
       "mcp",
     );
     try {
-      const statuses = include_deferred ? ["open", "deferred"] : ["open"];
-      const window = actionItemListWindow({ limit, offset });
-      const { data: items, error } = await supabase
-        .from("action_items")
-        .select(
-          "id, description, status, created_at, source_thought_id, defer_reason, deferred_at",
-        )
-        .in("status", statuses)
-        .order("created_at", { ascending: order === "oldest" })
-        .order("id", { ascending: true })
-        .range(window.from, window.to);
-      if (error) throw error;
-      const ids = (items ?? []).map((i) => i.id as string);
+      let items: Array<Record<string, unknown>>;
+      let unreviewedTotal: number | null | undefined;
+      if (unreviewed_days !== undefined) {
+        // Loop-closing Task 3.3: the exclusion and the order are in SQL, before
+        // LIMIT (list_unreviewed_action_items).
+        assertUnreviewedListArgs({ include_deferred, order });
+        const page = await listUnreviewedActionItems(supabase, {
+          unreviewed_days,
+          limit,
+          offset,
+        });
+        items = page.items as unknown as Array<Record<string, unknown>>;
+        unreviewedTotal = page.unreviewed_total;
+      } else {
+        const statuses = include_deferred ? ["open", "deferred"] : ["open"];
+        const window = actionItemListWindow({ limit, offset });
+        const { data, error } = await supabase
+          .from("action_items")
+          .select(
+            "id, description, status, created_at, source_thought_id, defer_reason, deferred_at",
+          )
+          .in("status", statuses)
+          .order("created_at", { ascending: order === "oldest" })
+          .order("id", { ascending: true })
+          .range(window.from, window.to);
+        if (error) throw error;
+        items = (data ?? []) as Array<Record<string, unknown>>;
+      }
+      const ids = items.map((i) => i.id as string);
       let activeIds = new Set<string>();
       if (ids.length) {
         const { data: drafts, error: draftsError } = await supabase
@@ -2170,8 +2194,11 @@ server.registerTool(
         );
       }
       return textToolResponse({
-        count: (items ?? []).length,
-        items: (items ?? []).map((i) => ({
+        count: items.length,
+        ...(unreviewed_days !== undefined
+          ? { unreviewed_days, unreviewed_total: unreviewedTotal }
+          : {}),
+        items: items.map((i) => ({
           ...i,
           has_active_draft: activeIds.has(i.id as string),
         })),
@@ -2323,6 +2350,59 @@ server.registerTool(
     } catch (err: unknown) {
       return errorToolResponse(
         `Error reviewing proposal: ${(err as Error).message}`,
+      );
+    }
+  },
+);
+
+server.registerTool(
+  "review_action_item",
+  {
+    title: "Review Action Item",
+    description:
+      "Record a triage review on an OPEN action item (loop-closing Task 3.3). It never closes, defers or reopens anything; it writes the review onto the item so the digest can show it and so list_open_action_items with unreviewed_days moves on to the next oldest. outcome keep: reviewed, still a real open item; pass no disposition, evidence or replacement_id. outcome proposal: triage proposes a disposition for the operator to act on, with disposition stale, duplicate, vague, done or paused and evidence (required, 500 characters or fewer) saying why. duplicate also requires replacement_id, the surviving item, and only duplicate takes one. done requires evidence that starts with a pointer: thought:<id>, commit:<sha>, pr:<ref>, card:<id> or url:<address>. actor: 'operator' or a registered agent_code, recorded as last_reviewed_by (claimed by the caller, not proven by the shared key). A later review replaces the earlier one. Answers with a status and a message: recorded, refused (the item is not open, or the replacement does not exist) or not_found; malformed input is an error and writes nothing.",
+    inputSchema: {
+      id: z.string().uuid(),
+      outcome: z.enum(REVIEW_OUTCOMES),
+      actor: z.string().min(1).max(64),
+      // No min(1) on evidence: a supplied value, even "", must reach the SQL
+      // refusal rather than be mistaken for an absent one.
+      disposition: z.enum(TRIAGE_DISPOSITIONS).optional(),
+      evidence: z.string().max(500).optional(),
+      replacement_id: z.string().uuid().optional(),
+    },
+  },
+  async (
+    { id, outcome, actor, disposition, evidence, replacement_id }: {
+      id: string;
+      outcome: (typeof REVIEW_OUTCOMES)[number];
+      actor: string;
+      disposition?: (typeof TRIAGE_DISPOSITIONS)[number];
+      evidence?: string;
+      replacement_id?: string;
+    },
+  ) => {
+    logToolInvocation(
+      "review_action_item",
+      { id, outcome, actor, disposition, replacement_id },
+      "mcp",
+    );
+    try {
+      const result = await reviewActionItem(supabase, {
+        id,
+        outcome,
+        actor,
+        disposition,
+        evidence,
+        replacement_id,
+      });
+      if (result.status === "error") {
+        return errorToolResponse(`Error reviewing action item: ${result.message}`);
+      }
+      return textToolResponse({ review: result });
+    } catch (err: unknown) {
+      return errorToolResponse(
+        `Error reviewing action item: ${(err as Error).message}`,
       );
     }
   },

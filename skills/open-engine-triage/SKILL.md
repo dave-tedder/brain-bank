@@ -1,6 +1,6 @@
 ---
 name: open-engine-triage
-description: Use when running one OE-12 triage heartbeat as the triage lane - the scheduled morning pass (or a manual "run triage") that reads open action items via list_open_action_items and creates full-packet Standing drafts on the Open Engine board. It then runs stage-4 guarded auto-promote: only drafts that pass the strict server-side allowlist (low-risk, action-item-linked, full-packet, non-local, non-live-surface) move to Agent Todo on their own, at most the daily cap. It never calls the human promote path, never resolves action items, never edits files, never runs git. Skip for manual single-item intake (use create_agent_task_from_action_item directly) and for queue-runner work. Run it ONLY from the runtime registered in its ledger row; other runtimes may read it to diagnose a run but must never execute it.
+description: Use when running one OE-12 triage heartbeat as the triage lane - the scheduled morning pass (or a manual "run triage") that reads the oldest unreviewed open action items via list_open_action_items, creates full-packet Standing drafts on the Open Engine board, and records a durable review (keep or proposal) on every item it read via review_action_item. It then runs stage-4 guarded auto-promote: only drafts that pass the strict server-side allowlist (low-risk, action-item-linked, full-packet, non-local, non-live-surface) move to Agent Todo on their own, at most the daily cap. It never calls the human promote path, never resolves action items, never edits files, never runs git. Skip for manual single-item intake (use create_agent_task_from_action_item directly) and for queue-runner work. CLAUDE RUNTIME ONLY — readable from Codex for diagnosis, never executed there.
 ---
 
 # Open Engine Triage (OE-12)
@@ -31,9 +31,10 @@ with its own ledger row and its own runtime.
 
 Single-runtime setups can ignore this section.
 
-One heartbeat: read open action items, classify, draft the board-eligible
-ones as Standing, report. The briefing (OE-11) is the human surface for
-everything this run produces.
+One heartbeat: read the oldest unreviewed open action items, classify, draft
+the board-eligible ones as Standing, record a review on every item read,
+report. The briefing (OE-11) is the human surface for the drafts; the morning
+digest shows the proposals as tags on its open-action checklist.
 
 Tool names below are bare; the MCP server prefix varies by runtime
 (`mcp__brain-bank__*`, UUID-prefixed connector, etc.). Load via ToolSearch
@@ -45,7 +46,10 @@ if deferred.
   or tool error ends the run with a final `NO_RECEIPT: triage preflight failed
   (<detail>)` message; if the ledger write is available, also write the failure
   there. Never improvise around a missing tool.
-- NEVER: resolve or archive action items; call `promote_agent_task_intake`
+- The ONE write triage makes to an action item is `review_action_item`
+  (step 5): a review, never a status change. A proposal is a tag the operator reads;
+  closing the item stays his.
+- NEVER: resolve, archive, defer or restore action items; call `promote_agent_task_intake`
   (the HUMAN promote path - this rule is the binding control, and it stays
   absolute; the promotion guard only refuses `promoted_by` strings that match
   registered agent codes; it cannot see who is calling, so do not treat it as
@@ -65,10 +69,19 @@ if deferred.
    (e.g. `CLAUDE.local.md`) if one exists and use that as the only
    paused-project source of truth for this run; if no list exists, treat no
    projects as paused.
-2. **Read.** `list_open_action_items` (limit 100). Skip every item with
-   `has_active_draft: true`. Then read the board ONCE: `list_agent_tasks` with
+2. **Read.** `list_open_action_items` with `limit: 100, unreviewed_days: 14`.
+   That returns only open items never reviewed, or last reviewed more than 14
+   days ago, oldest unreviewed first, each with its previous review
+   (`last_reviewed_at`, `last_reviewed_by`, `review_outcome`,
+   `triage_disposition`, `triage_evidence`, `triage_replacement_id`);
+   `unreviewed_total` is the size of the whole window, so
+   `unreviewed_total - count` is what this run did not reach. Never page it with
+   `offset`: a reviewed item leaves the window, so the next read from offset 0
+   already starts at the next oldest. An item with `has_active_draft: true` is
+   not drafted again, but it is still reviewed in step 5. Then read the board
+   ONCE: `list_agent_tasks` with
    `limit: 50, view: "compact"`. This read feeds the duplicate checks (semantic
-   twins, doc-seeded tasks) and step 5's carried-over drafts, so it is required,
+   twins, doc-seeded tasks) and step 6's carried-over drafts, so it is required,
    and the result must actually come back: `limit` is 50, not 100 (the tool
    rejects a larger value outright with "Number must be less than or equal to
    50" instead of clamping; a call carrying 100 leaves the
@@ -110,7 +123,39 @@ if deferred.
      Setting the slug here is what lets finished work land.
    - boundaries always include: "Exit through one honest receipt. No sends,
      no canonical-file edits, no git."
-5. **Stage 4 — guarded auto-promote (auto-promote allowlist below).** AFTER all
+5. **Review every item read.** SKIP is no longer
+   silent: each item this run classified gets exactly one `review_action_item`
+   call with `actor: "triage"`, after drafting, so a failed draft is never
+   recorded as reviewed.
+   - `outcome: "keep"` (no other fields) for an item that is real open work:
+     every BOARD-ELIGIBLE item that now has a draft (this run's or an earlier
+     active one), and every NEEDS-OPERATOR item.
+   - `outcome: "proposal"` for every SKIP item, with `disposition` and
+     `evidence` (one or two plain sentences, 500 characters at most):
+       `stale` — evidence says why it no longer matters;
+       `duplicate` — `replacement_id` is the surviving ACTION ITEM's id, and
+         evidence says why they are the same task. Only another action item can
+         be a replacement. When the twin is a board card instead: a finished or
+         applied card makes it `done` with `card:<task id>`; a card still in
+         flight makes it `keep`, with the card named in the ledger note;
+       `vague` — evidence says what is missing;
+       `done` — evidence MUST start with a pointer: `thought:<id>`,
+         `commit:<sha>`, `pr:<ref>`, `card:<task id>` or `url:<address>`. The
+         tool refuses anything else. Believing it is done without a pointer is
+         a `keep`, with the doubt in the ledger note;
+       `paused` — evidence is the pause tag, e.g.
+         `paused-project:some-project`.
+   - Do NOT review an item you did not finish triaging: a BOARD-ELIGIBLE item
+     past the draft cap, or one whose draft call failed. Left unreviewed it
+     leads the next run; a `keep` would hide it for 14 days undrafted.
+   - A previous review is context, not an instruction. If the item's last
+     review is a `keep` by `operator`, the operator looked at it and kept it: do not
+     propose the same thing again without something new to point at.
+   - Read each reply's `status`. `recorded` counts toward the totals. `refused`
+     or `not_found` (the item closed or changed while the run was going) and
+     any error are counted as `review-failed N` in the ledger line and never
+     retried in-run.
+6. **Stage 4 — guarded auto-promote (auto-promote allowlist below).** AFTER all
    drafting this run, walk TWO sets: the drafts you created in THIS run, and
    your own earlier `triage-agent` Standing drafts created in the last 72 hours
    that are still Standing (you already have these from the step-2
@@ -129,8 +174,11 @@ if deferred.
    drafts and the carried-over ones share the one daily cap. Skip this step only
    when there are neither new drafts nor carried-over `triage-agent` Standing
    drafts from the last 72 hours.
-6. **Report.** `write_agent_ledger` for `triage`:
-   `last_queue_result` = "drafted N / auto-promoted N / needs-operator N / skipped N / capped N",
+7. **Report.** `write_agent_ledger` for `triage`:
+   `last_queue_result` = "reviewed N (keep K, proposals P) / drafted N / auto-promoted N / needs-operator N / skipped N / capped N"
+   (append " / review-failed N" only when N is above zero, and " / unreviewed
+   remaining N" when `unreviewed_total` exceeded what this run read; the
+   "auto-promoted N" wording is read by the sentinel and must not change),
    `last_successful_run` = now (pass it in the `Z` datetime form,
    e.g. `2026-07-08T03:33:39.995Z`; the `+00:00` offset form is rejected as
    an invalid datetime and fails the write), `notes` = one line per
@@ -160,8 +208,9 @@ credentials, no outward-facing sends? Unsure means NO.
 - NEEDS-OPERATOR: real work but fails the agent-executable test (needs the
   operator's judgment, hands, relationships, or approvals).
 - SKIP: stale, duplicate, vague beyond repair, already done, or tied to a
-  PAUSED project. Report only; resolving action items is the auto-resolve
-  pipeline's and the operator's job, not yours.
+  PAUSED project. Each becomes a `proposal` review in step 5 with the matching
+  disposition (`stale`, `duplicate`, `vague`, `done`, `paused`); resolving
+  action items is the auto-resolve pipeline's and the operator's job, not yours.
 
 **Paused projects.** Honor the operator's "Paused Projects" list when one
 exists. Any item whose subject clearly belongs to a paused project goes

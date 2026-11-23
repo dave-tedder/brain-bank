@@ -6,8 +6,9 @@ import { getCompileRunHealthWarning } from "../_shared/compile-run-health.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
 import { authenticateAccessKey } from "../_shared/access-key.ts";
 import {
-  DigestActionRow,
-  renderOpenActionChecklist,
+  buildOpenActionChecklist,
+  type ChecklistInput,
+  type DigestActionRow,
 } from "./action-checklist.ts";
 import {
   formatReconcilerReport,
@@ -19,6 +20,11 @@ import {
   type ArchiveProposalRow,
   renderArchiveProposals,
 } from "./archive-proposals.ts";
+import {
+  type RecheckProposalRow,
+  type RecheckRunRow,
+  renderRecheckProposals,
+} from "./recheck-proposals.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
@@ -174,18 +180,15 @@ async function synthesizeDigest(
     }
   }
 
-  // Cap the open-action dump so a large backlog cannot dominate the prompt.
-  // Newest-first plus an exact total preserves the true scale.
-  const ACTION_ITEM_DIGEST_CAP = 40;
-  const { data: openActions, count: openActionsTotal } = await supabase
-    .from("action_items")
-    .select("id, description, created_at", { count: "exact" })
-    .eq("status", "open")
-    .order("created_at", { ascending: false })
-    .limit(ACTION_ITEM_DIGEST_CAP);
-
-  const openActionRows = (openActions ?? []) as DigestActionRow[];
-  const openActionTotal = openActionsTotal ?? openActionRows.length;
+  // Pull open action items from the action_items table (source of truth).
+  // Loop-closing Task 3.3: every open row with its triage review, so the
+  // checklist can show the proposal tags and split its 40 slots (15 reserved
+  // for dated or client-shaped items). The synthesis prompt still gets only the
+  // exact count. Reads the columns from 20261119b; until that is applied the
+  // checklist falls back to the newest 40 without tags and says so.
+  const openActionsInput = await loadOpenActions();
+  const openActionTotal = openActionsInput.total ??
+    (openActionsInput.rows ?? openActionsInput.legacyRows ?? []).length;
 
   // Loop-closing Task 2.3: the board desk, counted from exact rows, rendered
   // deterministically after the checklist in both daily and weekly digests.
@@ -199,6 +202,10 @@ async function synthesizeDigest(
   // 20261107 and the RPC from 20261119; until 20261119 is applied the job line
   // reads unavailable and the list reads none pending.
   const archiveSection = await loadArchiveProposals();
+  // Loop-closing Task 4.1: pending "looks done" proposals from the 04:00 UTC
+  // re-check, after the archive section. Reads the RPC and the receipt table
+  // from 20261119c; until that is applied both lines read unavailable.
+  const recheckSection = await loadRecheckProposals();
 
   const structuredLines = [
     `Open action item count: ${openActionTotal}`,
@@ -344,8 +351,77 @@ Neither of those is today. Today is the one appointment, then clear.
   });
 
   const synthesized = (data.choices?.[0]?.message?.content ?? "").trim();
-  const checklist = renderOpenActionChecklist(openActionRows, openActionTotal);
-  return [synthesized, checklist, deskLine, archiveSection].filter(Boolean).join("\n\n");
+  const checklist = buildOpenActionChecklist(openActionsInput);
+  return [synthesized, checklist, deskLine, archiveSection, recheckSection].filter(Boolean).join("\n\n");
+}
+
+// Every failure is non-fatal and visible: buildOpenActionChecklist prints what
+// could not be read instead of a list that looks complete.
+const OPEN_ACTION_READ_MAX = 1000;
+const LEGACY_ACTION_ITEM_CAP = 40;
+async function loadOpenActions(): Promise<ChecklistInput> {
+  const input: ChecklistInput = {
+    rows: null,
+    total: null,
+    clientNames: null,
+    legacyRows: null,
+  };
+  try {
+    const { data, count, error } = await supabase
+      .from("action_items")
+      .select(
+        "id, description, created_at, last_reviewed_at, review_outcome, triage_disposition, triage_evidence, triage_replacement_id",
+        { count: "exact" },
+      )
+      .eq("status", "open")
+      .order("created_at", { ascending: true })
+      .order("id", { ascending: true })
+      .limit(OPEN_ACTION_READ_MAX);
+    if (error) {
+      console.error("open action items query failed (non-fatal):", error);
+    } else {
+      input.rows = (data ?? []) as DigestActionRow[];
+      input.total = count ?? null;
+    }
+  } catch (err) {
+    console.error("open action items read failed (non-fatal):", err);
+  }
+  if (input.rows === null) {
+    try {
+      const { data, count, error } = await supabase
+        .from("action_items")
+        .select("id, description, created_at", { count: "exact" })
+        .eq("status", "open")
+        .order("created_at", { ascending: false })
+        .limit(LEGACY_ACTION_ITEM_CAP);
+      if (error) {
+        console.error("open action items legacy query failed (non-fatal):", error);
+      } else {
+        input.legacyRows = (data ?? []) as DigestActionRow[];
+        input.total = count ?? null;
+      }
+    } catch (err) {
+      console.error("open action items legacy read failed (non-fatal):", err);
+    }
+    return input;
+  }
+  try {
+    const { data, count, error } = await supabase
+      .from("clients")
+      .select("name", { count: "exact" });
+    if (error) {
+      console.error("client names query failed (non-fatal):", error);
+    } else {
+      input.clientNames = (data ?? [])
+        .map((c) => String((c as { name?: unknown }).name ?? ""))
+        .filter(Boolean);
+      // A capped read is said, not passed off as the whole client list.
+      input.clientNamesPartial = count === null || count > (data ?? []).length;
+    }
+  } catch (err) {
+    console.error("client names read failed (non-fatal):", err);
+  }
+  return input;
 }
 
 async function loadArchiveProposals(): Promise<string> {
@@ -371,6 +447,30 @@ async function loadArchiveProposals(): Promise<string> {
     console.error("archive job last-run read failed (non-fatal):", err);
   }
   return renderArchiveProposals(rows, run, new Date().toISOString());
+}
+
+async function loadRecheckProposals(): Promise<string> {
+  let rows: RecheckProposalRow[] | null = null;
+  let run: RecheckRunRow | null = null;
+  try {
+    const { data, error } = await supabase.rpc("recheck_pending_proposals", { p_limit: 200 });
+    if (error) console.error("recheck proposals read failed (non-fatal):", error);
+    else rows = (data ?? []) as RecheckProposalRow[];
+  } catch (err) {
+    console.error("recheck proposals read failed (non-fatal):", err);
+  }
+  try {
+    const { data, error } = await supabase
+      .from("action_item_recheck_runs")
+      .select("started_at, status, summary")
+      .order("started_at", { ascending: false })
+      .limit(1);
+    if (error) console.error("recheck last-run read failed (non-fatal):", error);
+    else run = (Array.isArray(data) && data[0]) ? data[0] as RecheckRunRow : { started_at: null, status: null };
+  } catch (err) {
+    console.error("recheck last-run read failed (non-fatal):", err);
+  }
+  return renderRecheckProposals(rows, run, new Date().toISOString());
 }
 
 async function loadDeskLine(): Promise<string> {
