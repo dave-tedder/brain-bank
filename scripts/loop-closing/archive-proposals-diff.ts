@@ -42,7 +42,12 @@
 //   loaded        the row counts SQL loaded, and the fragment decision rows it
 //                 holds, must equal what the TypeScript reads from the snapshot
 //                 (Codex re-review of PR 24: the loader once skipped decisions.json
-//                 while the TypeScript read its fragment rows)
+//                 while the TypeScript read its fragment rows); client_ids, the
+//                 items carrying a Task 5.3 client_id, is one of those counts
+//   client_id     not a comparison of its own: a COVER line says how many items
+//                 carry a client_id and how many due rows exist only because of
+//                 it (what the TypeScript would propose with client_id cleared),
+//                 so a reader sees the due sets compared rows the rule decides
 //
 // The accepted exception (the operator, 2026-11-18): a session NUMBER shaped like an ISO
 // date, e.g. "session 2026-11-02 x 2026-12-30" captured 2026-11-02, is a dated
@@ -208,7 +213,7 @@ export const KNOWN_SPLITS: Array<{ text: string; captured_at: string; ts: boolea
 
 export type DueRow = { item_id: string; reason: string; due_at: string; action: string };
 export type SqlOut = {
-  loaded: { thoughts: number; items: number; clients: number; cards: number; fragments: number };
+  loaded: { thoughts: number; items: number; client_ids: number; clients: number; cards: number; fragments: number };
   fragments: Array<{ item_id: string; item_generation: number | null }>;
   work_report: Array<{ id: string; v: boolean }>;
   deadline: Array<{ id: string; v: string | null }>;
@@ -288,6 +293,15 @@ export function loadSnapshot(dir: string): Snapshot {
     }
     fragments.push({ item_id: String(d.item_id), item_generation: (d.item_generation ?? null) as number | null });
   }
+  // client_id (Task 5.3) decides an exemption, so every item must carry it, null
+  // or a string: a snapshot exported before the column existed would otherwise
+  // read as all-null. Same rule as build_load_sql in archive-proposals-sql-test.sh.
+  f["items.json"].forEach((r, i) => {
+    const c = "client_id" in r ? r.client_id : undefined;
+    if (!(c === null || typeof c === "string")) {
+      unsupported.push(`items.json row #${i} has client_id ${c === undefined ? "missing" : JSON.stringify(c)?.slice(0, 80)}`);
+    }
+  });
   return {
     items: f["items.json"] as unknown as SnapItem[],
     thoughts: new Map(thoughtsArr.map((t) => [t.id, t])),
@@ -308,10 +322,10 @@ const isoMoment = (m: string) => {
   return Number.isNaN(t) ? null : new Date(t).toISOString();
 };
 
-function tsDue(snap: Snapshot, moment: string): DueRow[] {
+function tsDue(snap: Snapshot, moment: string, clearClientIds = false): DueRow[] {
   const byId = new Map(snap.items.map((i) => [i.id, i]));
   return archiveDueRows(
-    snap.items,
+    clearClientIds ? snap.items.map((i) => ({ ...i, client_id: null })) : snap.items,
     (it) => {
       const full = byId.get(it.id)!;
       const src = full.source_thought_id ? snap.thoughts.get(full.source_thought_id) : undefined;
@@ -328,6 +342,17 @@ function tsDue(snap: Snapshot, moment: string): DueRow[] {
   );
 }
 
+const clientIdCount = (snap: Snapshot) =>
+  snap.items.filter((i) => i.client_id !== null && i.client_id !== undefined).length;
+
+/** Due rows that exist only because an item carries a client_id: what the
+ * TypeScript would propose at this moment with every client_id cleared, minus
+ * what it proposes as the items stand. */
+export function clientIdOnlyExempt(snap: Snapshot, moment: string): DueRow[] {
+  const real = new Set(tsDue(snap, moment).map((r) => r.item_id));
+  return tsDue(snap, moment, true).filter((r) => !real.has(r.item_id));
+}
+
 /** The output a perfect SQL mirror would produce: the TypeScript reference in
  * the SQL output's shape. Used by the self-test and its unit test only. */
 export function referenceSqlOut(snap: Snapshot, moments: string[]): SqlOut {
@@ -336,6 +361,7 @@ export function referenceSqlOut(snap: Snapshot, moments: string[]): SqlOut {
     loaded: {
       thoughts: snap.thoughtCount,
       items: snap.items.length,
+      client_ids: clientIdCount(snap),
       clients: snap.clientNames.length,
       cards: snap.cardCount,
       fragments: snap.fragments.length,
@@ -421,6 +447,7 @@ export function compare(snap: Snapshot, sql: SqlOut, moments: string[]): Compare
   const want = {
     thoughts: snap.thoughtCount,
     items: snap.items.length,
+    client_ids: clientIdCount(snap),
     clients: snap.clientNames.length,
     cards: snap.cardCount,
     fragments: snap.fragments.length,
@@ -560,6 +587,15 @@ export function compare(snap: Snapshot, sql: SqlOut, moments: string[]): Compare
       diffs,
     );
   }
+  {
+    const carriers = snap.items.filter((i) => i.status === "open" && i.client_id !== null && i.client_id !== undefined).length;
+    if (carriers === 0) {
+      lines.push("NOTE no open item carries a client_id: the client_id rule is not exercised by this snapshot");
+    } else {
+      const per = sql.due.map((d) => `${clientIdOnlyExempt(snap, d.moment).length} at ${isoMoment(d.moment)}`).join(", ");
+      lines.push(`COVER client_id: ${carriers} open items carry one; due only without it: ${per}`);
+    }
+  }
   lines.push(failures > 0 ? `ARCHIVE PROPOSALS DIFF FAILED (${failures})` : "ARCHIVE PROPOSALS DIFF PASSED");
   return { code: failures > 0 ? 1 : 0, lines };
 }
@@ -632,6 +668,11 @@ export function selftest(snap: Snapshot, base: SqlOut, moments: string[]): { ok:
   expect("SQL loaded one item fewer", 3, (s) => {
     s.loaded.items -= 1;
   });
+  // The loader once dropping client_id would load every item as unattributed.
+  expect("SQL loaded no client_id", 3, (s) => {
+    if (s.loaded.client_ids === 0) return false;
+    s.loaded.client_ids = 0;
+  });
   expect("SQL loaded no fragment rows", 3, (s) => {
     if (s.fragments.length === 0) return false;
     s.fragments = [];
@@ -683,6 +724,18 @@ export function selftest(snap: Snapshot, base: SqlOut, moments: string[]): { ok:
     const r = s.due[withRows].rows[0];
     r.reason = r.reason === "age_standard" ? "age_work_report" : "age_standard";
   });
+  // A SQL due set that ignored client_id: one row the client_id rule exempts
+  // appears in it.
+  expect("a row exempt only by client_id added to a due set", 1, (s) => {
+    for (const d of s.due) {
+      const extra = clientIdOnlyExempt(snap, d.moment);
+      if (extra.length) {
+        d.rows.push(extra[0]);
+        return;
+      }
+    }
+    return false;
+  });
   if (withRows < 0) lines.push("NOTE no moment has a due row: the due set compares only empty sets here");
   lines.push(ok ? "DIFF SELFTEST PASSED" : "DIFF SELFTEST FAILED");
   return { ok, lines };
@@ -699,6 +752,7 @@ export function emitSnapshot(out: string) {
     resolved_at: null, resolution_note: null, closed_at: null, close_reason: null,
     deferred_at: null, defer_reason: null, reopened_at: null, reopen_generation: 0,
     archive_proposed_at: null, archive_review_outcome: null, archive_reviewed_at: null,
+    client_id: null,
   };
   // Family A: each edge case as a SOURCE thought of a neutral 40-day item, so the
   // classifier picks the clock (30 days for a work report, 60 otherwise).
@@ -741,6 +795,36 @@ export function emitSnapshot(out: string) {
     [15, { description: "accepted yet open", created_at: ago(100), archive_proposed_at: "2026-11-20T05:30:00.000Z",
            archive_review_outcome: "accepted", archive_reviewed_at: "2026-11-25T00:00:00.000Z" }],
   ];
+  // Family D: the client_id exemption (Task 5.3), each next to a null twin.
+  // Mira is client 3 below; a lone "Mira" matches one client, so the text rule
+  // alone does not exempt #20.
+  const mira = `f3000000-0000-4000-8000-${hex(3)}`;
+  st.push(
+    [16, { description: "send the aftercare sheet", created_at: ago(100), client_id: mira }],
+    [17, { description: "send the aftercare sheet", created_at: ago(100) }],
+    [18, { description: "send the proof by 2026-11-01", created_at: ago(20), client_id: mira }],
+    [19, { description: "send the proof by 2026-11-01", created_at: ago(20) }],
+    [20, { description: "ask Mira about the swatch", created_at: ago(100), client_id: mira }],
+    [21, { description: "ask Mira about the swatch", created_at: ago(100) }],
+    [22, { description: "fragment flagged with a client", source_thought_id: neutral, created_at: ago(40), client_id: mira }],
+    [23, { description: "proposed, then given a client", created_at: ago(100), client_id: mira,
+           archive_proposed_at: "2026-12-01T05:30:00.000Z" }],
+    // The text rule with no client_id: a full name, kept for rows from before 5.3.
+    [24, { description: "design the sleeve for Paul Reyes", created_at: ago(100) }],
+    // Codex review of PR 39 (P2, 2026-11-22): a keep older than 90 days. With a
+    // client_id the item stays exempt; its null twin is age_standard/repropose.
+    [25, { description: "send the deposit reminder", created_at: ago(200), client_id: mira,
+           archive_proposed_at: "2026-07-20T05:30:00.000Z", archive_review_outcome: "kept",
+           archive_reviewed_at: "2026-08-01T00:00:00.000Z" }],
+    [26, { description: "send the deposit reminder", created_at: ago(200),
+           archive_proposed_at: "2026-07-20T05:30:00.000Z", archive_review_outcome: "kept",
+           archive_reviewed_at: "2026-08-01T00:00:00.000Z" }],
+    // Codex review of PR 39 (P3, 2026-11-22): a client_id on a row that is not
+    // open. Never due either way, but the loaded client_id count includes it, so a
+    // loader that dropped client_id on non-open rows is INCOMPLETE, not a pass.
+    [27, { description: "paused, with a client", created_at: ago(200), status: "deferred", deferred_at: ago(150),
+           defer_reason: "pause:test", client_id: mira }],
+  );
   for (const [n, f] of st) items.push({ ...base, id: c(n), source_thought_id: null, ...f });
   const cards = [
     { id: "f6000000-0000-4000-8000-000000000003", status: "Agent Todo", archived_at: null, linked_action_item_id: c(3) },
@@ -754,6 +838,7 @@ export function emitSnapshot(out: string) {
   const decisions = [
     frag("f7000000-0000-4000-8000-000000000001", c(1), 0),
     frag("f7000000-0000-4000-8000-000000000002", c(2), 0),
+    frag("f7000000-0000-4000-8000-000000000022", c(22), 0),
   ];
   const clients = ["Jordan Lee", "Jordan Morrow", "Paul Reyes", "Mira", "İpek Kaya", "Ipek Demir", "\u212Aira Lee"]
     .map((name, i) => ({ id: `f3000000-0000-4000-8000-${hex(i)}`, name }));

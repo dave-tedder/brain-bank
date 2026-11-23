@@ -14,6 +14,9 @@
 //   other     closed after the cutoff some other way (wont_do, expired, unknown)
 // Limits: card links and client rows are today's, not the cutoff's; no item
 // in the pre-sweep set had been reopened, since reopened_at did not exist.
+// client_id (Task 5.3, 2026-11-22) is read from the row as it is today: it is
+// set only at insert and never backfilled, so every pre-sweep row carries null
+// unless someone set it by hand. A snapshot without the column refuses.
 
 import {
   archiveDueAt,
@@ -41,6 +44,13 @@ if (!dir) {
 }
 const load = (f: string) => JSON.parse(Deno.readTextFileSync(`${dir}/${f}`));
 const items: Row[] = load("items.json");
+for (const [i, r] of items.entries()) {
+  const c = (r as unknown as Record<string, unknown>).client_id;
+  if (!(c === null || typeof c === "string")) {
+    console.error(`unsupported snapshot: items.json row #${i} has client_id ${c === undefined ? "missing" : JSON.stringify(c)}`);
+    Deno.exit(1);
+  }
+}
 const thoughts = new Map<string, { content: string; created_at: string }>(
   load("thoughts.json").map((t: { id: string; content: string; created_at: string }) => [t.id, t]),
 );
@@ -77,7 +87,7 @@ function label(r: Row): "junk" | "done" | "real" | "other" {
 type Out = { id: string; label: string; reason: string; age: number; description: string };
 const proposed: Out[] = [];
 const byBand: Record<string, Record<string, number>> = {};
-let exemptClient = 0, exemptCard = 0, exemptCanary = 0;
+let exemptClient = 0, exemptClientId = 0, exemptCard = 0, exemptCanary = 0;
 for (const r of preSweep) {
   // Evaluate as the item stood at the cutoff: open, never proposed or reopened.
   const asOf: ArchivePolicyItem = {
@@ -87,6 +97,7 @@ for (const r of preSweep) {
     archive_proposed_at: null,
     archive_review_outcome: null,
     archive_reviewed_at: null,
+    client_id: r.client_id,
   };
   const src = r.source_thought_id ? thoughts.get(r.source_thought_id) : undefined;
   const ctx = {
@@ -104,6 +115,7 @@ for (const r of preSweep) {
   if (!due) {
     if (ctx.linkedToOpenCard) exemptCard += 1;
     else if (isClientShaped(r.description, clientNames)) exemptClient += 1;
+    else if (r.client_id !== null) exemptClientId += 1;
     else exemptCanary += 1;
     continue;
   }
@@ -117,7 +129,7 @@ const summary = {
   cutoff: CUTOFF.toISOString(),
   pre_sweep_queue: preSweep.length,
   by_age_band: byBand,
-  exempt: { card: exemptCard, client_shaped: exemptClient, canary_or_other: exemptCanary },
+  exempt: { card: exemptCard, client_shaped: exemptClient, client_id: exemptClientId, canary_or_other: exemptCanary },
   proposed: proposed.length,
   proposed_by_label: {
     junk: count(proposed, "junk"),

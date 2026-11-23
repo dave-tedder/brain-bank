@@ -16,7 +16,12 @@
 // Policy, in evaluation order (plan Task 3.2, "Interfaces"):
 //   1. Exempt (null): status other than open (deferred is exempt), the
 //      perpetual canary, an item linked to an unarchived non-terminal card, an
-//      item reopened within the last 90 days, and a client-shaped item.
+//      item reopened within the last 90 days, a client-shaped item (by its
+//      text), and an item carrying a client_id (Task 5.3's column, set at insert
+//      when the text names exactly one client). The client_id rule is IN
+//      ADDITION to the text rule, never instead of it: rows from before Task 5.3
+//      carry no client_id (nothing backfills them), and a client delete sets it
+//      back to null, so those items are judged by their text alone.
 //   2. Deadline: an ISO date (YYYY-MM-DD) with by/before/until/due/after among
 //      the three tokens before it is a deadline; due at the latest such date
 //      plus 14 days, reason deadline_passed. A bare date is a reference and the
@@ -54,6 +59,8 @@ export interface ArchivePolicyItem {
   archive_proposed_at: string | null;
   archive_review_outcome: string | null;
   archive_reviewed_at: string | null;
+  /** action_items.client_id (Task 5.3). Non-null exempts the item. */
+  client_id: string | null;
 }
 
 export interface ArchivePolicyContext {
@@ -173,6 +180,7 @@ export function archiveDueAt(
     if (r > now.getTime() - REOPEN_EXEMPT_DAYS * DAY_MS) return null;
   }
   if (isClientShaped(item.description, ctx.clientNames)) return null;
+  if (item.client_id !== null && item.client_id !== undefined) return null;
 
   const deadline = deadlineFrom(item.description);
   if (deadline !== null) {

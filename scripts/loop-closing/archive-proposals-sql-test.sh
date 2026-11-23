@@ -44,9 +44,11 @@
 # canned transcripts without a database, and every run does so before trusting one.
 #
 # What it proves:
-#   1. archive-proposals-sql-test.sql (A01-A26, B01-B11, W01-W13, U01-U14, G01-G04): the policy, the
+#   1. archive-proposals-sql-test.sql (A01-A26, B01-B11, W01-W13, U01-U14, K01-K13, G01-G04): the policy, the
 #      writer, review state through Task 3.6's real review_proposal, the reopen
-#      exemption and generation, grants, the schedule and the digest's last-run read.
+#      exemption and generation, the client_id exemption (K, applied from
+#      20261122_archive_proposals_client_id.sql on top of the job migration),
+#      grants, the schedule and the digest's last-run read.
 #   2. Schedules on real second connections:
 #      C1 an item closed by an uncommitted transaction: the job waits on it (read
 #         from pg_stat_activity), and once it commits the job skips it.
@@ -89,9 +91,14 @@ M_CLOSE="$ROOT/supabase/migrations/20261106_action_items_close_reason.sql"
 M_ARCHIVE="$ROOT/supabase/migrations/20261109a_action_items_archive_proposals.sql"
 M_REVIEW="$ROOT/supabase/migrations/20261109b_review_proposal_rpc.sql"
 M_JOB="$ROOT/supabase/migrations/20261119_action_items_archive_proposal_job.sql"
+# Task 3.2 follow-up to Task 5.3: re-creates archive_proposals_due with the
+# client_id exemption. Applied right after M_JOB, as production applies it. The
+# two are applied as ONE file (job.sql) so that a mutant aimed at the due body
+# changes the copy that wins, never only the copy that is then replaced.
+M_CLIENT_JOB="$ROOT/supabase/migrations/20261122_archive_proposals_client_id.sql"
 TEST_SQL="$HERE/archive-proposals-sql-test.sql"
 
-MUTATIONS="no_prelock no_recompute pending_reproposed kept_never_reproposes repropose_keeps_review card_done_exempts card_archived_exempts no_card_exemption reopen_exempt_off client_one_match client_fullname_off canary_off deferred_included deadline_no_clause_break deadline_window_4 deadline_grace_off wr_future_header_counts wr_threshold_1 fragment_ignored fragment_any_generation work_report_age_60 status_written grant_anon schedule_wrong last_run_oldest exclusive_boundary wr_locale_boundary wr_alnum_boundary wr_boundary_no_underscore ws_locale_commit ws_locale_deadline ws_no_feff window_chars lower_locale_tokens lower_locale_partial lower_locale_canary js_lower_no_dotted_i js_lower_no_kelvin"
+MUTATIONS="client_id_off client_id_inverted client_id_replaces_text client_id_kept_repropose no_prelock no_recompute pending_reproposed kept_never_reproposes repropose_keeps_review card_done_exempts card_archived_exempts no_card_exemption reopen_exempt_off client_one_match client_fullname_off canary_off deferred_included deadline_no_clause_break deadline_window_4 deadline_grace_off wr_future_header_counts wr_threshold_1 fragment_ignored fragment_any_generation work_report_age_60 status_written grant_anon schedule_wrong last_run_oldest exclusive_boundary wr_locale_boundary wr_alnum_boundary wr_boundary_no_underscore ws_locale_commit ws_locale_deadline ws_no_feff window_chars lower_locale_tokens lower_locale_partial lower_locale_canary js_lower_no_dotted_i js_lower_no_kelvin"
 MUTANT_DEADLINE="${OBAP_MUTANT_DEADLINE:-300}"
 
 # SQLSTATE prefixes that mean the statement was interrupted or the server could
@@ -433,10 +440,19 @@ def rows(name, key=None, nullable=False):
     return v
 ins("public.thoughts", ["id", "content", "created_at"], rows("thoughts.json", "id"), "public.thoughts")
 ins("public.clients", ["id", "name"], rows("clients.json", "name"), "public.clients")
+items = rows("items.json", "id")
+# client_id (Task 5.3) decides an exemption, so every item must carry it, null or
+# a string: a snapshot exported before the column existed would otherwise load
+# as all-null and judge every client item as unattributed. Same rule as
+# loadSnapshot in archive-proposals-diff.ts.
+for i, r in enumerate(items):
+    c = r["client_id"] if "client_id" in r else MISSING
+    if not (c is None or isinstance(c, str)):
+        refuse(f"items.json row #{i} has client_id {short(c)}")
 ins("public.action_items", ["id", "source_thought_id", "description", "status", "created_at", "resolved_at",
     "resolution_note", "closed_at", "close_reason", "deferred_at", "defer_reason", "reopened_at",
-    "reopen_generation", "archive_proposed_at", "archive_review_outcome", "archive_reviewed_at"],
-    rows("items.json", "id"), "public.action_items")
+    "reopen_generation", "archive_proposed_at", "archive_review_outcome", "archive_reviewed_at", "client_id"],
+    items, "public.action_items")
 ins("public.agent_tasks", ["id", "status", "archived_at", "linked_action_item_id"],
     rows("cards.json", "linked_action_item_id", nullable=True), "public.agent_tasks")
 # decisions.json: the policy reads only current-generation fragment rows, so
@@ -575,6 +591,9 @@ refuse:cards.json is not an array: 0|cards.json|0
 refuse:thoughts.json row #0 is not an object: "t1"|thoughts.json|["t1"]
 refuse:thoughts.json row #0 has id 5|thoughts.json|[{"id": 5, "content": "x", "created_at": "2026-01-01T00:00:00Z"}]
 refuse:items.json row #0 has id missing|items.json|[{"description": "x"}]
+refuse:items.json row #0 has client_id missing|items.json|[{"id": "i1", "description": "x"}]
+refuse:items.json row #1 has client_id 5|items.json|[{"id": "i1", "description": "x", "client_id": null}, {"id": "i2", "description": "y", "client_id": 5}]
+ok|items.json|[{"id": "i1", "description": "x", "client_id": null}, {"id": "i2", "description": "y", "client_id": "c1"}]
 refuse:clients.json row #0 has name null|clients.json|[{"id": "c1", "name": null}]
 refuse:cards.json row #0 has linked_action_item_id ["i1"]|cards.json|[{"id": "k1", "status": "Agent Todo", "archived_at": null, "linked_action_item_id": ["i1"]}]
 ok|cards.json|[{"id": "k1", "status": "Agent Todo", "archived_at": null, "linked_action_item_id": null}]
@@ -681,7 +700,11 @@ create table public.action_items (
   resolved_at timestamptz,
   resolution_note text,
   deferred_at timestamptz,
-  defer_reason text
+  defer_reason text,
+  -- Task 5.3 (20261121b_action_items_client_id.sql), the same definition. That
+  -- migration also needs the CRM tables this stub does not have, so the
+  -- column is declared here rather than by applying the file.
+  client_id uuid null references public.clients(id) on delete set null
 );
 create table public.agent_tasks (
   id uuid primary key default gen_random_uuid(),
@@ -717,7 +740,7 @@ for f in "$M_MCP_LOG" "$M_DECISIONS" "$M_CLOSE" "$M_ARCHIVE" "$M_REVIEW"; do
     || never "prior migration failed: $(basename "$f"): $(head -3 "$WORK/prior.out")"
 done
 
-SRC="$WORK/job.sql"; cp "$M_JOB" "$SRC"
+SRC="$WORK/job.sql"; { cat "$M_JOB"; printf '\n'; cat "$M_CLIENT_JOB"; } > "$SRC"
 mj() { # old, new: literal replace, every occurrence; a mutant that changes nothing never ran
   python3 - "$SRC" "$1" "$2" <<'PY' || never "mutant did not change the target: $(printf '%s' "$1" | head -1)"
 import sys
@@ -729,6 +752,17 @@ PY
 }
 case "$MUTATE" in
   "") ;;
+  # Task 3.2 follow-up to Task 5.3. The client_id predicate dropped, inverted,
+  # and made to REPLACE the text rule instead of adding to it.
+  client_id_off) mj "    and a.client_id is null
+" "";;
+  client_id_inverted) mj "    and a.client_id is null" "    and a.client_id is not null";;
+  client_id_replaces_text) mj "    and not public.archive_policy_client_shaped(a.description)
+" "";;
+  # Codex review of PR 39 (P2, 2026-11-22), the reviewer's exact predicate: a
+  # kept item with a client_id slips through, so a keep older than 90 days is
+  # re-proposed. K12/K13 catch it.
+  client_id_kept_repropose) mj "    and a.client_id is null" "    and (a.client_id is null or a.archive_review_outcome is not distinct from 'kept')";;
   # C1/C2: without the pre-lock the write's snapshot predates a concurrent close or run.
   no_prelock) mj "  select coalesce(array_agg(locked.id), '{}') into v_locked from (
     select id from public.action_items
@@ -842,6 +876,7 @@ if [ "$MODE" = diff ]; then
       'loaded', jsonb_build_object(
         'thoughts', (select count(*) from public.thoughts),
         'items', (select count(*) from public.action_items),
+        'client_ids', (select count(*) from public.action_items where client_id is not null),
         'clients', (select count(*) from public.clients),
         'cards', (select count(*) from public.agent_tasks),
         'fragments', (select count(*) from public.auto_resolve_decisions where layer = 'fragment')),

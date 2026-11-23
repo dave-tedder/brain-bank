@@ -6,7 +6,7 @@
 // (--allow-run: the CLI tests below run the checker as its own process, because
 // the exit code the shell sees is the thing under test.)
 import { assert, assertEquals } from "jsr:@std/assert@1.0.19";
-import { ADVERSARIAL, compare, emitSnapshot, loadSnapshot, referenceSqlOut, selftest } from "./archive-proposals-diff.ts";
+import { ADVERSARIAL, clientIdOnlyExempt, compare, emitSnapshot, loadSnapshot, referenceSqlOut, selftest } from "./archive-proposals-diff.ts";
 import { isClientShaped } from "../../supabase/functions/_shared/archive-policy.ts";
 
 function synthetic() {
@@ -30,8 +30,55 @@ Deno.test("the reference output passes, with positive coverage at every rule", (
   assert(out.client.some((c) => c.v) && out.client.some((c) => !c.v));
   assert(out.deadline.some((c) => c.v !== null));
   assert(out.work_report.some((c) => c.v) && out.work_report.some((c) => !c.v));
-  assertEquals(out.fragments.length, 2);
+  assertEquals(out.fragments.length, 3);
+  assert(out.loaded.client_ids > 0, "no item carries a client_id");
+  assert(r.lines.some((l) => l.startsWith("COVER client_id: ")), r.lines.join("\n"));
   Deno.removeSync(dir, { recursive: true });
+});
+
+// Task 3.2 follow-up to Task 5.3: the due sets compared must include rows that
+// the client_id rule alone decides, or a SQL mirror without the predicate would
+// pass the diff.
+Deno.test("client_id: the synthetic snapshot has due rows exempt only by client_id, and a SQL due set holding one FAILs", () => {
+  const { dir, snap, moments } = synthetic();
+  const c = (n: number) => `f5000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+  const only = clientIdOnlyExempt(snap, moments[0]).map((r) => r.item_id).sort();
+  // 16 standard, 18 deadline, 20 lone first name, 22 fragment-flagged, 23 pending,
+  // 25 kept more than 90 days ago (Codex review of PR 39, P2).
+  assertEquals(only, [c(16), c(18), c(20), c(22), c(23), c(25)].sort());
+  const reasons = clientIdOnlyExempt(snap, moments[0]).map((r) => `${r.reason}/${r.action}`).sort();
+  assertEquals(reasons, ["age_standard/pending", "age_standard/propose", "age_standard/propose", "age_standard/repropose", "age_work_report/propose", "deadline_passed/propose"]);
+  const base = referenceSqlOut(snap, moments);
+  // Their null twins are in the reference due set; the client_id items are not.
+  const due0 = new Set(base.due[0].rows.map((r) => r.item_id));
+  for (const n of [17, 19, 21, 26]) assert(due0.has(c(n)), `twin ${n} not due`);
+  for (const n of [16, 18, 20, 22, 23, 24, 25]) assert(!due0.has(c(n)), `${n} due`);
+  // The kept null twin is re-proposed at every moment; its carrier never is.
+  for (const d of base.due) {
+    assert(d.rows.some((r) => r.item_id === c(26) && r.action === "repropose"), `26 not repropose at ${d.moment}`);
+    assert(!d.rows.some((r) => r.item_id === c(25)), `25 due at ${d.moment}`);
+  }
+  const bad = JSON.parse(JSON.stringify(base));
+  bad.due[0].rows.push(clientIdOnlyExempt(snap, moments[0])[0]);
+  const r = compare(snap, bad, moments);
+  assertEquals(r.code, 1, r.lines.join("\n"));
+  assert(r.lines.some((l) => l.includes("sql only:")), r.lines.join("\n"));
+  const noIds = JSON.parse(JSON.stringify(base));
+  noIds.loaded.client_ids = 0;
+  assertEquals(compare(snap, noIds, moments).code, 3);
+  Deno.removeSync(dir, { recursive: true });
+});
+
+Deno.test("client_id: a snapshot where no item carries one still compares, with a NOTE", () => {
+  const s = synthetic();
+  const items = JSON.parse(Deno.readTextFileSync(`${s.dir}/items.json`));
+  for (const i of items) i.client_id = null;
+  Deno.writeTextFileSync(`${s.dir}/items.json`, JSON.stringify(items));
+  const snap = loadSnapshot(s.dir);
+  const r = compare(snap, referenceSqlOut(snap, s.moments), s.moments);
+  assertEquals(r.code, 0, r.lines.join("\n"));
+  assert(r.lines.some((l) => l.startsWith("NOTE no open item carries a client_id")), r.lines.join("\n"));
+  Deno.removeSync(s.dir, { recursive: true });
 });
 
 Deno.test("selftest: every guard holds on the reference output", () => {
@@ -176,6 +223,8 @@ Deno.test("a snapshot row that is not an object, or whose key has the wrong type
     ["thoughts.json", ["t1", ...rows("thoughts.json")], "thoughts.json row #0 is not an object: \"t1\""],
     ["thoughts.json", [{ ...rows("thoughts.json")[0], id: 5 }], "thoughts.json row #0 has id 5"],
     ["items.json", [{ description: "x" }], "items.json row #0 has id missing"],
+    ["items.json", [{ id: "i1", description: "x" }], "items.json row #0 has client_id missing"],
+    ["items.json", [{ ...rows("items.json")[0], client_id: 5 }], "items.json row #0 has client_id 5"],
     ["clients.json", [{ id: "c1", name: null }], "clients.json row #0 has name null"],
     ["cards.json", [{ id: "k1", status: "Agent Todo", archived_at: null, linked_action_item_id: ["i1"] }], 'cards.json row #0 has linked_action_item_id ["i1"]'],
   ];

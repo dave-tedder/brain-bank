@@ -27,6 +27,7 @@ function item(over: Partial<ArchivePolicyItem> = {}): ArchivePolicyItem {
     archive_proposed_at: null,
     archive_review_outcome: null,
     archive_reviewed_at: null,
+    client_id: null,
     ...over,
   };
 }
@@ -125,6 +126,71 @@ Deno.test("client shape: one-word client names and single-match first names do n
   assertEquals(isClientShaped("chris asked about it", CLIENTS), false); // not capitalised
   assertEquals(isClientShaped("Jo asked", ["Jo Ann", "Jo Bee"]), false); // under three letters
   assertEquals(isClientShaped("paulreyes tag", CLIENTS), false); // not whole tokens
+});
+
+// --- client_id (Task 5.3) exempts, in addition to the text rule ---
+// Task 5.3 sets action_items.client_id at insert when an item's text names
+// exactly one client, including a lone first name only one client has: the
+// case the text rule deliberately does not exempt ("ask Mira" above). Rows from
+// before Task 5.3 carry no client_id, so the text rule stays for them.
+const CLIENT_ID = "c0000000-0000-4000-8000-000000000001";
+
+Deno.test("client_id: a 61-day standard item with a client_id and no name in its text is exempt", () => {
+  const desc = "send the aftercare sheet and the deposit link";
+  assertEquals(isClientShaped(desc, CLIENTS), false); // the text rule alone would not exempt it
+  assertEquals(archiveDueAt(item({ description: desc, created_at: daysAgo(61), client_id: CLIENT_ID }), ctx(), NOW), null);
+});
+
+Deno.test("client_id: the same item with client_id null is due (age_standard)", () => {
+  const desc = "send the aftercare sheet and the deposit link";
+  const d = archiveDueAt(item({ description: desc, created_at: daysAgo(61), client_id: null }), ctx(), NOW);
+  assertEquals(d?.reason, "age_standard");
+  assert(d!.dueAt.getTime() <= NOW.getTime());
+});
+
+Deno.test("client_id: a unique first name the text rule does not exempt is exempt once client_id is set", () => {
+  const desc = "ask Mira about the swatch sheet";
+  assert(isDue(item({ description: desc, created_at: daysAgo(200) }), ctx()));
+  assertEquals(archiveDueAt(item({ description: desc, created_at: daysAgo(200), client_id: CLIENT_ID }), ctx(), NOW), null);
+});
+
+Deno.test("client_id: still exempts a deadline-passed item and a work-report item", () => {
+  const dl = "send the proof by 2026-10-01";
+  assertEquals(archiveDueAt(item({ description: dl, created_at: daysAgo(20) }), ctx(), NOW)?.reason, "deadline_passed");
+  assert(isDue(item({ description: dl, created_at: daysAgo(20) }), ctx()));
+  assertEquals(archiveDueAt(item({ description: dl, created_at: daysAgo(20), client_id: CLIENT_ID }), ctx(), NOW), null);
+
+  assertEquals(archiveDueAt(item({ created_at: daysAgo(31) }), ctx({ sourceIsWorkReport: true }), NOW)?.reason, "age_work_report");
+  assert(isDue(item({ created_at: daysAgo(31) }), ctx({ sourceIsWorkReport: true })));
+  assertEquals(archiveDueAt(item({ created_at: daysAgo(31), client_id: CLIENT_ID }), ctx({ sourceIsWorkReport: true }), NOW), null);
+  assertEquals(archiveDueAt(item({ created_at: daysAgo(31), client_id: CLIENT_ID }), ctx({ fragmentFlagged: true }), NOW), null);
+});
+
+Deno.test("client_id: null with a client named in the text is still exempt (the text rule is kept)", () => {
+  const full = "TODO: create a design for the backyard garden for Paul Reyes's pergola";
+  assertEquals(archiveDueAt(item({ description: full, created_at: daysAgo(400), client_id: null }), ctx(), NOW), null);
+  assertEquals(archiveDueAt(item({ description: "nudge Jordan if nothing arrives", created_at: daysAgo(400), client_id: null }), ctx(), NOW), null);
+});
+
+Deno.test("client_id: the other exemptions and the review state are unchanged around it", () => {
+  // Canary, deferred and a linked card stay exempt with or without a client_id.
+  for (const client_id of [null, CLIENT_ID]) {
+    assertEquals(archiveDueAt(item({ description: "Perpetual auto-resolve canary (do NOT resolve)", created_at: daysAgo(400), client_id }), ctx(), NOW), null);
+    assertEquals(archiveDueAt(item({ status: "deferred", created_at: daysAgo(400), client_id }), ctx(), NOW), null);
+    assertEquals(archiveDueAt(item({ created_at: daysAgo(400), client_id }), ctx({ linkedToOpenCard: true }), NOW), null);
+  }
+  // The due set drops a client_id item whatever its review state, and keeps its twin.
+  const rows = archiveDueRows(
+    [
+      item({ id: "a0000000-0000-4000-8000-000000000000", created_at: daysAgo(90), client_id: CLIENT_ID }),
+      item({ id: "b0000000-0000-4000-8000-000000000000", created_at: daysAgo(90) }),
+      item({ id: "c0000000-0000-4000-8000-000000000000", created_at: daysAgo(90), client_id: CLIENT_ID, archive_proposed_at: daysAgo(5) }),
+      item({ id: "d0000000-0000-4000-8000-000000000000", created_at: daysAgo(200), client_id: CLIENT_ID, archive_proposed_at: daysAgo(100), archive_review_outcome: "kept", archive_reviewed_at: daysAgo(95) }),
+    ],
+    () => ctx(),
+    NOW,
+  );
+  assertEquals(rows.map((r) => `${r.item_id}/${r.action}`), ["b0000000-0000-4000-8000-000000000000/propose"]);
 });
 
 // --- Deadline parsing ---

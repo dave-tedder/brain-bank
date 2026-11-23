@@ -386,6 +386,143 @@ select pg_temp.ok('U14 the writer keeps the U+FEFF deadline, the client and the 
    where id::text between 'a0000000-0000-4000-8000-000000000204' and 'a0000000-0000-4000-8000-000000000208'));
 
 -- ---------------------------------------------------------------------------
+-- K: client_id (Task 5.3) exempts an open item, IN ADDITION to the text rule
+-- (20261122_archive_proposals_client_id.sql). Read through the due function
+-- at now0, then through the real writer, then with the client_id cleared by
+-- hand and by deleting the client (on delete set null).
+-- ---------------------------------------------------------------------------
+insert into public.clients (id, name) values ('c5000000-0000-4000-8000-000000000001', 'Quinn Harlow');
+create function pg_temp.due_row(p_id uuid) returns text language sql as $$
+  select string_agg(d.reason || '/' || d.action, ',') from public.archive_proposals_due(pg_temp.now0()) d where d.item_id = p_id
+$$;
+select pg_temp.mk('b5000000-0000-4000-8000-000000000001', 'send the aftercare sheet', 61);
+select pg_temp.mk('b5000000-0000-4000-8000-000000000002', 'send the aftercare sheet', 61);
+select pg_temp.mk('b5000000-0000-4000-8000-000000000003', 'ask Mira about the deposit', 200);
+select pg_temp.mk('b5000000-0000-4000-8000-000000000004', 'send the proof by 2026-10-01', 20);
+select pg_temp.mk('b5000000-0000-4000-8000-000000000005', 'send the proof by 2026-10-01', 20);
+select pg_temp.mk('b5000000-0000-4000-8000-000000000006', 'reply to the vendor', 31, 'open', 'e1000000-0000-4000-8000-000000000001');
+select pg_temp.mk('b5000000-0000-4000-8000-000000000007', 'reply to the vendor', 31, 'open', 'e1000000-0000-4000-8000-000000000001');
+select pg_temp.mk('b5000000-0000-4000-8000-000000000008', 'design the sleeve for paul reyes', 200);
+select pg_temp.mk('b5000000-0000-4000-8000-000000000009', 'send the aftercare sheet', 61);
+update public.action_items set client_id = (select id from public.clients where name = 'Mira')
+where id in ('b5000000-0000-4000-8000-000000000001', 'b5000000-0000-4000-8000-000000000003',
+             'b5000000-0000-4000-8000-000000000004', 'b5000000-0000-4000-8000-000000000006');
+update public.action_items set client_id = 'c5000000-0000-4000-8000-000000000001'
+where id = 'b5000000-0000-4000-8000-000000000009';
+
+select pg_temp.ok('K01 a 61-day standard item with a client_id and no name in its text is not due',
+  pg_temp.due_row('b5000000-0000-4000-8000-000000000001') is null,
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000001'), ''));
+select pg_temp.ok('K02 the same item with client_id null is due, age_standard/propose',
+  pg_temp.due_row('b5000000-0000-4000-8000-000000000002') = 'age_standard/propose',
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000002'), 'absent'));
+select pg_temp.ok('K03 a unique first name (A13 is proposed without a client_id) is not due with one',
+  pg_temp.due_row('b5000000-0000-4000-8000-000000000003') is null,
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000003'), ''));
+select pg_temp.ok('K04 client_id exempts a deadline-passed item; its null twin is deadline_passed',
+  pg_temp.due_row('b5000000-0000-4000-8000-000000000004') is null
+  and pg_temp.due_row('b5000000-0000-4000-8000-000000000005') = 'deadline_passed/propose',
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000004'), '') || ' | '
+  || coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000005'), 'absent'));
+select pg_temp.ok('K05 client_id exempts a work-report item; its null twin is age_work_report',
+  pg_temp.due_row('b5000000-0000-4000-8000-000000000006') is null
+  and pg_temp.due_row('b5000000-0000-4000-8000-000000000007') = 'age_work_report/propose',
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000006'), '') || ' | '
+  || coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000007'), 'absent'));
+select pg_temp.ok('K06 client_id null with a full client name in the text is still exempt (text rule kept)',
+  (select client_id is null from public.action_items where id = 'b5000000-0000-4000-8000-000000000008')
+  and pg_temp.due_row('b5000000-0000-4000-8000-000000000008') is null,
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000008'), ''));
+
+create temp table krun as select public.run_archive_proposals(pg_temp.now0()) as n;
+select pg_temp.ok('K07 the writer proposes the null twins and nothing carrying a client_id',
+  pg_temp.proposed('b5000000-0000-4000-8000-000000000002')
+  and pg_temp.proposed('b5000000-0000-4000-8000-000000000005')
+  and pg_temp.proposed('b5000000-0000-4000-8000-000000000007')
+  and not pg_temp.proposed('b5000000-0000-4000-8000-000000000001')
+  and not pg_temp.proposed('b5000000-0000-4000-8000-000000000003')
+  and not pg_temp.proposed('b5000000-0000-4000-8000-000000000004')
+  and not pg_temp.proposed('b5000000-0000-4000-8000-000000000006')
+  and not pg_temp.proposed('b5000000-0000-4000-8000-000000000009')
+  and (select count(*) from public.auto_resolve_decisions
+       where layer = 'archive' and item_id in ('b5000000-0000-4000-8000-000000000001',
+         'b5000000-0000-4000-8000-000000000003', 'b5000000-0000-4000-8000-000000000004',
+         'b5000000-0000-4000-8000-000000000006', 'b5000000-0000-4000-8000-000000000009')) = 0);
+
+update public.action_items set client_id = null where id = 'b5000000-0000-4000-8000-000000000001';
+select pg_temp.ok('K08 the same item with its client_id cleared is due again, age_standard/propose',
+  pg_temp.due_row('b5000000-0000-4000-8000-000000000001') = 'age_standard/propose',
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000001'), 'absent'));
+select pg_temp.ok('K09 before its client is deleted, the Quinn item is not due',
+  (select client_id = 'c5000000-0000-4000-8000-000000000001' from public.action_items where id = 'b5000000-0000-4000-8000-000000000009')
+  and pg_temp.due_row('b5000000-0000-4000-8000-000000000009') is null,
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000009'), ''));
+delete from public.clients where id = 'c5000000-0000-4000-8000-000000000001';
+select pg_temp.ok('K10 deleting the client sets client_id null and the item is judged by its text again: due',
+  (select client_id is null from public.action_items where id = 'b5000000-0000-4000-8000-000000000009')
+  and pg_temp.due_row('b5000000-0000-4000-8000-000000000009') = 'age_standard/propose',
+  coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000009'), 'absent'));
+
+-- K11-K13 (Codex review of PR 39, P2, 2026-11-22): a KEPT item that carries a
+-- client_id is not re-proposed when its keep is older than 90 days; its null
+-- control is. A filter that let kept rows through ("a.client_id is null or
+-- a.archive_review_outcome is not distinct from 'kept'") passed K01-K10 and the
+-- synthetic diff. Both items are proposed by the real writer while client_id is
+-- null, kept through Task 3.6's real review_proposal, and their keeps aged to 91
+-- days (review_proposal stamps the real clock, as B03/B04 do); then the carrier
+-- gains a client_id, as an item proposed before this migration would carry one.
+select pg_temp.mk('b5000000-0000-4000-8000-000000000011', 'send the deposit reminder', 61);
+select pg_temp.mk('b5000000-0000-4000-8000-000000000012', 'send the deposit reminder', 61);
+create temp table krun2 as select public.run_archive_proposals(pg_temp.now0()) as n;
+create temp table kkeep11 as
+  select status from public.review_proposal('b5000000-0000-4000-8000-000000000011', 'keep', 'operator', 'mcp-shared-key');
+create temp table kkeep12 as
+  select status from public.review_proposal('b5000000-0000-4000-8000-000000000012', 'keep', 'operator', 'mcp-shared-key');
+update public.action_items set archive_reviewed_at = pg_temp.now0() - interval '91 days'
+where id in ('b5000000-0000-4000-8000-000000000011', 'b5000000-0000-4000-8000-000000000012');
+update public.action_items set client_id = (select id from public.clients where name = 'Mira')
+where id = 'b5000000-0000-4000-8000-000000000011';
+create function pg_temp.kstate(p_id uuid) returns text language sql as $$
+  select format('%s outcome=%s reviewed=%s client=%s kept=%s proposed=%s', p_id, archive_review_outcome,
+    archive_reviewed_at, client_id, pg_temp.rows(p_id, 'kept'), pg_temp.rows(p_id))
+  from public.action_items where id = p_id
+$$;
+select pg_temp.ok('K11 fixture: both were proposed by the writer, kept through review_proposal, keeps aged 91 days; only the carrier has a client_id',
+  (select status from kkeep11) = 'recorded' and (select status from kkeep12) = 'recorded'
+  and (select bool_and(archive_review_outcome = 'kept' and archive_reviewed_at = pg_temp.now0() - interval '91 days'
+                       and archive_proposed_at = pg_temp.now0())
+       from public.action_items where id in ('b5000000-0000-4000-8000-000000000011', 'b5000000-0000-4000-8000-000000000012'))
+  and (select client_id is not null from public.action_items where id = 'b5000000-0000-4000-8000-000000000011')
+  and (select client_id is null from public.action_items where id = 'b5000000-0000-4000-8000-000000000012')
+  and pg_temp.rows('b5000000-0000-4000-8000-000000000011', 'kept') = 1 and pg_temp.rows('b5000000-0000-4000-8000-000000000011') = 0
+  and pg_temp.rows('b5000000-0000-4000-8000-000000000012', 'kept') = 1 and pg_temp.rows('b5000000-0000-4000-8000-000000000012') = 0,
+  pg_temp.kstate('b5000000-0000-4000-8000-000000000011') || ' | ' || pg_temp.kstate('b5000000-0000-4000-8000-000000000012'));
+select pg_temp.ok('K12 due set: the kept carrier with a client_id is not due; its null control is age_standard/repropose',
+  pg_temp.due_row('b5000000-0000-4000-8000-000000000011') is null
+  and pg_temp.due_row('b5000000-0000-4000-8000-000000000012') = 'age_standard/repropose',
+  'carrier ' || coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000011'), 'absent')
+  || ', control ' || coalesce(pg_temp.due_row('b5000000-0000-4000-8000-000000000012'), 'absent'));
+create temp table kdec_before as
+  select i.id, (select count(*) from public.auto_resolve_decisions d where d.layer = 'archive' and d.item_id = i.id) as n
+  from (values ('b5000000-0000-4000-8000-000000000011'::uuid), ('b5000000-0000-4000-8000-000000000012'::uuid)) i(id);
+create temp table krun3 as select public.run_archive_proposals(pg_temp.now0()) as n;
+create function pg_temp.knew(p_id uuid) returns bigint language sql as $$
+  select (select count(*) from public.auto_resolve_decisions d where d.layer = 'archive' and d.item_id = p_id)
+       - (select n from kdec_before where id = p_id)
+$$;
+select pg_temp.ok('K13 the writer: one new decision for the null control (re-proposed), none for the carrier (still kept)',
+  pg_temp.knew('b5000000-0000-4000-8000-000000000012') = 1
+  and pg_temp.knew('b5000000-0000-4000-8000-000000000011') = 0
+  and pg_temp.rows('b5000000-0000-4000-8000-000000000012') = 1
+  and (select archive_review_outcome is null and archive_proposed_at = pg_temp.now0()
+       from public.action_items where id = 'b5000000-0000-4000-8000-000000000012')
+  and (select archive_review_outcome = 'kept' from public.action_items where id = 'b5000000-0000-4000-8000-000000000011')
+  and (select n from krun3) >= 1,
+  format('control new=%s, carrier new=%s, run=%s; ', pg_temp.knew('b5000000-0000-4000-8000-000000000012'),
+    pg_temp.knew('b5000000-0000-4000-8000-000000000011'), (select n from krun3))
+  || pg_temp.kstate('b5000000-0000-4000-8000-000000000011') || ' | ' || pg_temp.kstate('b5000000-0000-4000-8000-000000000012'));
+
+-- ---------------------------------------------------------------------------
 -- Grants, schedule and the digest's read.
 -- ---------------------------------------------------------------------------
 select pg_temp.ok('G01 anon and authenticated cannot run or read the job',
