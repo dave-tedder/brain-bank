@@ -27,6 +27,11 @@
 //      (dedup_semantic_candidates, read BEFORE the insert) is inserted AND
 //      proposed through ONE record_decisions call (dedup/proposed/
 //      semantic_overlap, the new id, the candidate as survivor, the score).
+
+//   15. LAYER 2 claim indices on the ingest copy: a fractional claim (1.5,
+//      and a bare 2.5) and a claim of 0 are ignored without a throw, the later
+//      valid claims (2 and 3) still resolve through the guarded transition with
+//      their resolved rows, and the index-0 candidate gets its L2 not_claimed row.
 //
 //   deno run --allow-net --allow-env --allow-read scripts/loop-closing/ingest-probe-harness.ts
 //
@@ -57,7 +62,7 @@ const pending: Promise<unknown>[] = [];
 const scenario = {
   metadata: {} as Record<string, unknown>,
   candidates: [] as Array<Record<string, unknown>>,
-  resolved: [] as Array<{ num: number; reason: string }>,
+  resolved: [] as Array<{ num: number; reason: string } | number>,
   updateAffected: [] as Array<{ id: string }>,
   openItems: null as Array<{ id: string; description: string }> | null,
   doneMatched: [] as number[],
@@ -492,6 +497,48 @@ expectClaimed(
 );
 scenario.openItems = null;
 origLog("probe 14 ok: ingest copy inserted both numbered items (design 1, design 2) and wrote no dedup row");
+
+// --- Probe 15: invalid LAYER 2 claim indices are ignored; later claims still run. ---
+// The (mocked) model answers with a fractional claim (1.5), a claim of 0 and a
+// bare fractional number (2.5) BEFORE two valid claims (2, 3). Before the fix
+// the 1.5 claim read candidateItems[0.5] (undefined) and threw, which ended the
+// claim loop: no later claim resolved. Now the invalid claims are skipped, the
+// two valid claims resolve, and candidate 1 (index 0), which no valid claim
+// names, gets its L2 not_claimed row and nothing else.
+recorded.length = 0; logs.length = 0; returnedItems.length = 0;
+const cand15 = [
+  { id: crypto.randomUUID(), description: "send Sam the probe fifteen deposit link" },
+  { id: crypto.randomUUID(), description: "book the probe fifteen koi consult with Jordan" },
+  { id: crypto.randomUUID(), description: "order the probe fifteen needle cartridges" },
+].map((c) => ({ ...c, source_thought_id: crypto.randomUUID(), src_project: "brain-bank", src_topics: ["brain-bank"], src_people: [] }));
+scenario.metadata = { people: [], action_items: [], dates_mentioned: [], topics: ["brain-bank"], type: "observation", project: "Brain Bank", priority: "normal" };
+scenario.openItems = null; scenario.semanticCandidates = [];
+scenario.candidates = cand15;
+scenario.resolved = [
+  { num: 1.5, reason: cand15[0].description },
+  { num: 0, reason: cand15[0].description },
+  2.5,
+  { num: 2, reason: cand15[1].description },
+  { num: 3, reason: cand15[2].description },
+];
+scenario.updateAffected = [{ id: cand15[1].id }];
+expect(await postSlackMessage("Loop-closing probe 15: booked the probe fifteen koi consult with Jordan and ordered the probe fifteen needle cartridges.") === 200, "probe 15 HTTP");
+const rpc15 = recorded.filter((r) => r.table === "rpc/transition_action_item").map((r) => (r.body as Record<string, unknown>).p_item_id);
+const rows15 = inserts("auto_resolve_decisions").map((d) => [d.layer, d.outcome, d.reason, d.item_id]);
+const threw15 = logs.filter((l) => l.includes("checkAutoResolve failed"));
+expectClaimed(
+  claimVerdict("probe-15-claims", () =>
+    JSON.stringify(rpc15) === JSON.stringify([cand15[1].id, cand15[2].id]) &&
+    JSON.stringify(rows15) === JSON.stringify([
+      ["L2", "dropped", "not_claimed", cand15[0].id],
+      ["resolved", "resolved", null, cand15[1].id],
+      ["resolved", "resolved", null, cand15[2].id],
+    ]) &&
+    threw15.length === 0),
+  `probe 15 claim indices (1.5, 0 and 2.5 ignored; 2 and 3 resolve; candidate 1 not_claimed): transitions=${JSON.stringify(rpc15)} rows=${JSON.stringify(rows15)} threw=${JSON.stringify(threw15)}`,
+);
+scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = [];
+origLog("probe 15 ok: ingest copy ignored claims 1.5, 0 and 2.5 without a throw, resolved candidates 2 and 3, wrote candidate 1's not_claimed row");
 
 console.log = origLog; console.error = origErr;
 console.log("INGEST PROBE PASSED");

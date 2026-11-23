@@ -24,6 +24,12 @@
 //      with a dedup/dropped/exact_batch row naming the survivor the insert
 //      returned; a reworded copy of a recent open item is inserted AND proposed
 //      through ONE record_decisions call (dedup/proposed/semantic_overlap).
+
+//   I/J. LAYER 2 claim indices through REST /capture (I) and the MCP
+//      capture_thought tool (J): a fractional claim (1.5, and a bare 2.5) and a
+//      claim of 0 are ignored without a throw, the later valid claims (2 and 3)
+//      still resolve through the guarded transition with their resolved rows,
+//      and the index-0 candidate gets its L2 not_claimed row.
 //
 //   deno run --config scripts/loop-closing/closeout-capture-probe.deno.json --no-lock --allow-net --allow-env --allow-read scripts/loop-closing/closeout-capture-probe-harness.ts
 // The config is required: without it the run dies before any probe, because the
@@ -57,7 +63,7 @@ const returnedItems: Array<{ id: string; description: string }> = [];
 const scenario = {
   metadata: {} as Record<string, unknown>,
   candidates: [] as Array<Record<string, unknown>>,
-  resolved: [] as Array<{ num: number; reason: string }>,
+  resolved: [] as Array<{ num: number; reason: string } | number>,
   updateAffected: [] as Array<{ id: string }>,
   semanticCandidates: [] as Array<Record<string, unknown>>,
 };
@@ -393,6 +399,71 @@ expectClaimed(
   `probe H: action_items rows (both numbered items insert, no dedup row): ${JSON.stringify(itemsH)} ${JSON.stringify(dedupH)}`,
 );
 origLog("probe H ok: REST /capture inserted both numbered items (design 1, design 2) and wrote no dedup row");
+
+// --- Probes I and J: invalid LAYER 2 claim indices are ignored; later claims still run. ---
+// The (mocked) model answers with a fractional claim (1.5), a claim of 0 and a
+// bare fractional number (2.5) BEFORE two valid claims (2, 3). Before the fix
+// the 1.5 claim read candidateItems[0.5] (undefined) and threw, which ended the
+// claim loop: no later claim resolved. Now the invalid claims are skipped, the
+// two valid claims resolve, and candidate 1 (index 0), which no valid claim
+// names, gets its L2 not_claimed row and nothing else.
+function armClaimIndexScenario(tag: string) {
+  const cands = [
+    { id: crypto.randomUUID(), description: `send Sam the ${tag} deposit link` },
+    { id: crypto.randomUUID(), description: `book the ${tag} koi consult with Jordan` },
+    { id: crypto.randomUUID(), description: `order the ${tag} needle cartridges` },
+  ].map((c) => ({ ...c, source_thought_id: crypto.randomUUID(), src_project: "brain-bank", src_topics: ["brain-bank"], src_people: [] }));
+  scenario.metadata = { people: [], action_items: [], dates_mentioned: [], topics: ["brain-bank"], type: "observation", project: "Brain Bank", priority: "normal" };
+  scenario.semanticCandidates = [];
+  scenario.candidates = cands;
+  scenario.resolved = [
+    { num: 1.5, reason: cands[0].description },
+    { num: 0, reason: cands[0].description },
+    2.5,
+    { num: 2, reason: cands[1].description },
+    { num: 3, reason: cands[2].description },
+  ];
+  scenario.updateAffected = [{ id: cands[1].id }];
+  return cands;
+}
+function claimIndexOutcome() {
+  return {
+    transitions: recorded.filter((r) => r.table === "rpc/transition_action_item").map((r) => (r.body as Record<string, unknown>).p_item_id),
+    rows: inserts("auto_resolve_decisions").map((d) => [d.layer, d.outcome, d.reason, d.item_id]),
+    threw: logs.filter((l) => l.includes("checkAutoResolve failed")),
+  };
+}
+const claimIndexExpected = (cands: Array<{ id: string }>) => ({
+  transitions: [cands[1].id, cands[2].id],
+  rows: [
+    ["L2", "dropped", "not_claimed", cands[0].id],
+    ["resolved", "resolved", null, cands[1].id],
+    ["resolved", "resolved", null, cands[2].id],
+  ],
+  threw: [],
+});
+
+reset();
+const candsI = armClaimIndexScenario("probe I");
+const resI = await postRest("Loop-closing probe I: booked the probe I koi consult with Jordan and ordered the probe I needle cartridges.", ["brain-bank"]);
+expect(resI.status === 200 && resI.body.status === "captured", `probe I HTTP ${resI.status} ${JSON.stringify(resI.body).slice(0, 200)}`);
+const outI = claimIndexOutcome();
+expectClaimed(
+  claimVerdict("claim-index-rest", () =>
+    JSON.stringify(outI) === JSON.stringify(claimIndexExpected(candsI)) &&
+    JSON.stringify(resI.body.auto_resolved) === JSON.stringify([candsI[1].description, candsI[2].description])),
+  `probe I: claim indices (1.5, 0 and 2.5 ignored; 2 and 3 resolve; candidate 1 not_claimed): ${JSON.stringify(outI)} auto_resolved=${JSON.stringify(resI.body.auto_resolved)}`,
+);
+origLog("probe I ok: REST /capture ignored claims 1.5, 0 and 2.5 without a throw, resolved candidates 2 and 3, wrote candidate 1's not_claimed row");
+
+reset();
+const candsJ = armClaimIndexScenario("probe J");
+const resJ = await postMcpCapture("Loop-closing probe J: booked the probe J koi consult with Jordan and ordered the probe J needle cartridges.", ["brain-bank"]);
+expect(resJ.status === 200 && resJ.text.startsWith("Captured as"), `probe J HTTP ${resJ.status} text=${resJ.text.slice(0, 200)}`);
+const outJ = claimIndexOutcome();
+expect(JSON.stringify(outJ) === JSON.stringify(claimIndexExpected(candsJ)), `probe J: claim indices (1.5, 0 and 2.5 ignored; 2 and 3 resolve; candidate 1 not_claimed): ${JSON.stringify(outJ)}`);
+scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = [];
+origLog("probe J ok: MCP capture_thought ignored claims 1.5, 0 and 2.5 without a throw, resolved candidates 2 and 3, wrote candidate 1's not_claimed row");
 
 console.log = origLog; console.error = origErr;
 console.log("CLOSEOUT CAPTURE PROBE PASSED");

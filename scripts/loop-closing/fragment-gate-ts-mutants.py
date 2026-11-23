@@ -241,6 +241,12 @@ def SUPPRESS_EDITS(rel: str, client: str):
              "  rows.splice(0, rows.length, ...rows.filter((r) => !recent.some((c) => c.source_thought_id !== thoughtId && semanticOverlap(r.description, c.description) === \"maybe\")));\n")]
 
 
+# LAYER 2 claim-index guard in checkAutoResolve (both capture files).
+CLAIM_GUARD = "    if (!Number.isInteger(idx) || idx < 0 || idx >= candidateItems.length) continue;"
+CLAIM_GUARD_NO_INTEGER = "    if (idx < 0 || idx >= candidateItems.length) continue;"
+CLAIM_GUARD_NO_LOWER = "    if (!Number.isInteger(idx) || idx >= candidateItems.length) continue;"
+
+
 # name: (file, old, new, check, expected failure: a test name, or a probe label)
 MUTANTS = {
     # The plan's required mutant: rule (b) deleted.
@@ -445,6 +451,15 @@ MUTANTS = {
     "module_exports_prefixes": (CH, "const MECHANICAL_CAPTURE_PREFIXES = [", "export const MECHANICAL_CAPTURE_PREFIXES = [", "fg", T_SINGLE_SOURCE),
     "module_top_level_write": (CH, "export function isMechanicalCapture(", 'MECHANICAL_CAPTURE_PREFIXES.push("[Reviewer]");\n\nexport function isMechanicalCapture(', "fg", T_SINGLE_SOURCE),
     "ingest_namespace_import": (IT, IT_IMPORT, IT_IMPORT + 'import * as CaptureHelpers from "../_shared/capture-helpers.ts";\n', "fg", T_SINGLE_SOURCE),
+    # LAYER 2 claim indices (claim-index-integer PR): the Number.isInteger guard
+    # removed, and the lower bound removed, in each capture file. Probe 15
+    # (ingest) and probe I (REST /capture) put claims 1.5, 0 and 2.5 before two
+    # valid claims; either mutant lets one invalid claim index an undefined
+    # candidate, the loop throws, and the valid claims never resolve.
+    "claim_index_integer_off_ingest_probe": (IT, CLAIM_GUARD, CLAIM_GUARD_NO_INTEGER, "ingest", "probe 15 claim indices"),
+    "claim_index_integer_off_mcp_probe": (MCPF, CLAIM_GUARD, CLAIM_GUARD_NO_INTEGER, "mcp", "probe I: claim indices"),
+    "claim_index_lower_bound_off_ingest_probe": (IT, CLAIM_GUARD, CLAIM_GUARD_NO_LOWER, "ingest", "probe 15 claim indices"),
+    "claim_index_lower_bound_off_mcp_probe": (MCPF, CLAIM_GUARD, CLAIM_GUARD_NO_LOWER, "mcp", "probe I: claim indices"),
 }
 
 
@@ -659,6 +674,10 @@ CLAIMS = {
     "module_exports_prefixes": "single-source-helpers",
     "module_top_level_write": "single-source-helpers",
     "ingest_namespace_import": "single-source-helpers",
+    "claim_index_integer_off_ingest_probe": "probe-15-claims",
+    "claim_index_integer_off_mcp_probe": "claim-index-rest",
+    "claim_index_lower_bound_off_ingest_probe": "probe-15-claims",
+    "claim_index_lower_bound_off_mcp_probe": "claim-index-rest",
 }
 
 

@@ -536,7 +536,10 @@ For each match you return, the "reason" field must quote the specific phrase in 
   // shared across the batch — intentional, do not move inside loop
   for (const claim of claims) {
     const idx = claim.num - 1;
-    if (idx < 0 || idx >= candidateItems.length) continue;
+    // A claim index must be a whole number in range. A fractional `num`
+    // (1.5) passed the range check, read candidateItems[0.5] as undefined and
+    // threw on the missing item, ending this loop before the later valid claims.
+    if (!Number.isInteger(idx) || idx < 0 || idx >= candidateItems.length) continue;
     const item = candidateItems[idx];
     if (claim.reason === "") {
       console.log(
