@@ -31,6 +31,12 @@
 //      still resolve through the guarded transition with their resolved rows,
 //      and the index-0 candidate gets its L2 not_claimed row.
 //
+//   L/N. (loop-closing Task 5.3) client identity per item through REST /capture
+//      (L) and the MCP capture_thought tool (N).
+//   M. (loop-closing Task 5.3) REST /event: a created session proposes closing
+//      the client's scheduling item through one record_decisions call; an
+//      update re-runs the matcher for the same pair; nothing resolves.
+//
 //   deno run --config scripts/loop-closing/closeout-capture-probe.deno.json --no-lock --allow-net --allow-env --allow-read scripts/loop-closing/closeout-capture-probe-harness.ts
 // The config is required: without it the run dies before any probe, because the
 // function's pinned zod 3.24.2 has no ./v3 subpath.
@@ -66,6 +72,12 @@ const scenario = {
   resolved: [] as Array<{ num: number; reason: string } | number>,
   updateAffected: [] as Array<{ id: string }>,
   semanticCandidates: [] as Array<Record<string, unknown>>,
+  // Task 5.3: clients (name read, find_client, the CRM id), the client's
+  // open items the booking matcher reads, and the business_events rows the
+  // REST /event route writes and the matcher re-reads.
+  clients: [] as Array<{ id: string; name: string; crm_id?: string }>,
+  clientItems: [] as Array<Record<string, unknown>>,
+  events: [] as Array<Record<string, unknown>>,
 };
 
 const origLog = console.log, origErr = console.error;
@@ -111,11 +123,63 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
       if (table === "rpc/transition_action_item") return json(scenario.updateAffected.length);
       if (table === "rpc/dedup_semantic_candidates") return json(scenario.semanticCandidates);
       if (table === "rpc/record_decisions") return json(Array.isArray((body as { p_rows?: unknown[] })?.p_rows) ? (body as { p_rows: unknown[] }).p_rows.length : null);
+      if (table === "rpc/sync_booking_proposals") return json(Array.isArray((body as { p_rows?: unknown[] })?.p_rows) ? (body as { p_rows: unknown[] }).p_rows.length : null);
+      // Task 5.3 correction 3: the roster and a client's open items are ONE
+      // call each, answered as one jsonb value with its count.
+      if (table === "rpc/client_roster") {
+        const sorted = [...scenario.clients].sort((a, b) => (a.id < b.id ? -1 : 1));
+        return json({ read_at: new Date().toISOString(), total: sorted.length, clients: sorted.map((c) => ({ id: c.id, name: c.name })) });
+      }
+      if (table === "rpc/booking_match_read") {
+        // Task 5.3 correction 4: the matcher's one read (event, roster with
+        // the CRM keys, every open item that carries a client).
+        const eid = (body as { p_event_id?: string })?.p_event_id;
+        const ev = scenario.events.find((e) => e.id === eid);
+        const clients = [...scenario.clients].sort((a, b) => (a.id < b.id ? -1 : 1));
+        const items = scenario.clientItems.filter((i) => i.client_id && i.status === "open").sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
+        return json({
+          read_at: new Date().toISOString(),
+          event: ev ? { id: ev.id, title: ev.title ?? null, event_type: ev.event_type ?? null, date_start: ev.date_start ?? null, metadata: ev.metadata ?? null } : null,
+          clients_total: clients.length,
+          clients: clients.map((c) => ({ id: c.id, name: c.name, crm_id: c.crm_id ?? null })),
+          items_total: items.length,
+          items: items.map((i) => ({ id: i.id, client_id: i.client_id, description: i.description, created_at: i.created_at, status: i.status })),
+        });
+      }
       return json(null);
     }
     if (table === "thoughts" && method === "POST") {
       const row = { id: crypto.randomUUID() };
       return json(single ? row : [row]);
+    }
+    if (table === "clients" && method === "GET") {
+      const cb = u.searchParams.get("metadata->>crm_id");
+      if (cb && cb.startsWith("eq.")) {
+        return json(scenario.clients.filter((c) => c.crm_id === cb.slice(3)).map((c) => ({ id: c.id })));
+      }
+      // Otherwise only the foreign-key re-check reads the table (id in (...)).
+      const ids = (u.searchParams.get("id") ?? "").replace(/^in\.\(|\)$/g, "").split(",").filter(Boolean);
+      return json(scenario.clients.filter((c) => ids.includes(c.id)).map((c) => ({ id: c.id })));
+    }
+    if (table === "business_events") {
+      if (method === "POST") {
+        const row = { id: crypto.randomUUID(), ...(body as Record<string, unknown>) };
+        scenario.events.push(row);
+        return json(single ? { id: row.id } : [{ id: row.id }], 201);
+      }
+      if (method === "PATCH") {
+        const id = (u.searchParams.get("id") ?? "").replace(/^eq\./, "");
+        for (const ev of scenario.events) if (ev.id === id) Object.assign(ev, body as Record<string, unknown>);
+        return json([], 200);
+      }
+      const id = u.searchParams.get("id");
+      if (id) return json(scenario.events.filter((ev) => `eq.${ev.id}` === id));
+      const cs = u.searchParams.get("metadata");
+      if (cs && cs.startsWith("cs.")) {
+        const want = JSON.parse(cs.slice(3)) as Record<string, unknown>;
+        return json(scenario.events.filter((ev) => Object.entries(want).every(([k, v]) => (ev.metadata as Record<string, unknown> | null)?.[k] === v)));
+      }
+      return json([]);
     }
     if (table === "action_items" && method === "PATCH") return json(scenario.updateAffected);
     if (table === "action_items" && method === "POST") {
@@ -400,6 +464,92 @@ expectClaimed(
 );
 origLog("probe H ok: REST /capture inserted both numbered items (design 1, design 2) and wrote no dedup row");
 
+// --- Probes L and N (loop-closing Task 5.3): client identity per item through
+// REST /capture (L) and the MCP capture_thought tool (N), i.e. the shared
+// copy. Each item's own text is searched; client_id is set only when
+// find_client's query returns exactly one row.
+const ALICIA_L = "a11c1a00-0000-4000-8000-0000000000a1";
+const JAKE_L = "1a4e0000-0000-4000-8000-0000000000a1";
+const CLIENTS_L = [
+  { id: ALICIA_L, name: "Alicia Brennan", crm_id: "cb-alicia-probe" },
+  { id: JAKE_L, name: "Jordan Marlow" },
+  { id: "1a4e0000-0000-4000-8000-0000000000a2", name: "Jordan Ruiz" },
+];
+function assertClientIds(label: string, items: string[]) {
+  const rows = inserts("action_items");
+  expectClaimed(
+    claimVerdict("client-ids", () =>
+      JSON.stringify(rows.map((r) => [r.description, "client_id" in r ? r.client_id : "absent"])) ===
+        JSON.stringify([[items[0], ALICIA_L], [items[1], JAKE_L], [items[2], "absent"]])),
+    `${label}: client_id per item: ${JSON.stringify(rows)}`,
+  );
+}
+reset();
+scenario.clients = CLIENTS_L; scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = []; scenario.semanticCandidates = [];
+const ITEMS_L = ["Schedule tattoo appointment for Alicia Brennan", "Send Jordan Marlow the probe L floor plan sketch", "nudge Jordan if nothing arrives"];
+scenario.metadata = { people: ["Alicia Brennan", "Jordan Marlow"], action_items: ITEMS_L, dates_mentioned: [], topics: ["koi"], type: "task", project: null, priority: "normal" };
+returnedItems.length = 0;
+const pl = await postRest("Loop-closing probe L: bookings and sketches for Alicia Brennan and Jordan Marlow still to do.", ["koi"]);
+expect(pl.status === 200 && pl.body.status === "captured", `probe L HTTP ${pl.status} ${JSON.stringify(pl.body).slice(0, 200)}`);
+assertClientIds("probe L", ITEMS_L);
+origLog("probe L ok: REST /capture set client_id per item (Alicia, Jordan Marlow) and left nudge Jordan (two clients) without one");
+
+reset();
+const ITEMS_N = ["Schedule tattoo appointment for Alicia Brennan probe N", "Send Jordan Marlow the probe N floor plan sketch", "nudge Jordan if nothing arrives probe N"];
+scenario.metadata = { people: ["Alicia Brennan", "Jordan Marlow"], action_items: ITEMS_N, dates_mentioned: [], topics: ["koi"], type: "task", project: null, priority: "normal" };
+returnedItems.length = 0;
+const pn = await postMcpCapture("Loop-closing probe N: bookings and sketches for Alicia Brennan and Jordan Marlow still to do.", ["koi"]);
+expect(pn.status === 200 && pn.text.startsWith("Captured as"), `probe N HTTP ${pn.status} text=${pn.text.slice(0, 200)}`);
+assertClientIds("probe N", ITEMS_N);
+origLog("probe N ok: MCP capture_thought set client_id per item and left nudge Jordan without one");
+
+// --- Probe M (loop-closing Task 5.3): REST /event, the open-brain-mcp event
+// writer the Dash-Bot bridge and the calendar sync use. A created session for
+// a client proposes closing her scheduling item through ONE
+// sync_booking_proposals call (calendar/proposed/booking_match, typed event
+// evidence, no thought id, the item's client and the event snapshot); an
+// update of the same event (found by gcal id) syncs again for the same pair
+// with the new snapshot, which the database turns into a support refresh
+// with no new row (proven on a real cluster by client-identity-sql-test.sh);
+// and nothing resolves.
+reset();
+const ITEM_M = "5c4ed000-0000-4000-8000-0000000000a1";
+scenario.clientItems = [
+  { id: ITEM_M, description: "Schedule tattoo appointment for Alicia Brennan", status: "open", client_id: ALICIA_L, created_at: "2026-11-20T14:00:00Z" },
+  { id: "5c4ed000-0000-4000-8000-0000000000a2", description: "send Alicia the design", status: "open", client_id: ALICIA_L, created_at: "2026-11-20T14:00:00Z" },
+];
+scenario.events = [];
+async function postEvent(payload: Record<string, unknown>) {
+  const res = await realFetch(`http://127.0.0.1:${PORT}/event`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-brain-key": ACCESS_KEY },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json();
+  await drain();
+  return { status: res.status, body };
+}
+const EVENT_M = { title: "Tattoo session: Alicia Brennan", event_type: "tattoo_session", date_start: "2099-01-16", metadata: { gcal_event_id: "probe-m@google.com", source: "dash-bot-create" } };
+const m1 = await postEvent(EVENT_M);
+expect(m1.status === 200 && m1.body.status === "created" && typeof m1.body.id === "string", `probe M create HTTP ${m1.status} ${JSON.stringify(m1.body)}`);
+const callsM1 = recorded.filter((r) => r.table === "rpc/sync_booking_proposals").map((r) => r.body as { p_event_id: string; p_snapshot: Record<string, unknown>; p_rows: Array<Record<string, unknown>> });
+expectClaimed(
+  claimVerdict("event-proposes", () =>
+    callsM1.length === 1 && callsM1[0].p_event_id === m1.body.id && callsM1[0].p_snapshot.title === "Tattoo session: Alicia Brennan" &&
+    typeof (callsM1[0] as { p_read_at?: unknown }).p_read_at === "string" &&
+    JSON.stringify(callsM1[0].p_rows.map((r) => [r.layer, r.outcome, r.reason, r.item_id, r.evidence_event_id, r.thought_id, r.evidence_thought_id, r.quote, r.client_id, r.item_description])) ===
+      JSON.stringify([["calendar", "proposed", "booking_match", ITEM_M, m1.body.id, null, null, "Tattoo session: Alicia Brennan on 2099-01-16", ALICIA_L, "Schedule tattoo appointment for Alicia Brennan"]])),
+  `probe M: booking proposal through sync_booking_proposals: ${JSON.stringify(callsM1)}`,
+);
+const m2 = await postEvent({ ...EVENT_M, location: "Studio B" });
+expect(m2.status === 200 && m2.body.status === "updated" && m2.body.id === m1.body.id, `probe M update HTTP ${m2.status} ${JSON.stringify(m2.body)}`);
+const callsM2 = recorded.filter((r) => r.table === "rpc/sync_booking_proposals").map((r) => r.body as { p_event_id: string; p_snapshot: Record<string, unknown>; p_rows: Array<Record<string, unknown>> });
+expect(callsM2.length === 2 && JSON.stringify(callsM2[1].p_rows.map((r) => [r.item_id, r.evidence_event_id])) === JSON.stringify([[ITEM_M, m1.body.id]]),
+  `probe M: the update re-runs the matcher for the same pair: ${JSON.stringify(callsM2)}`);
+expect(recorded.filter((r) => r.table === "rpc/transition_action_item" || (r.table === "action_items" && r.method === "PATCH")).length === 0,
+  `probe M: nothing resolves: ${JSON.stringify(recorded.map((r) => `${r.method} ${r.table}`))}`);
+scenario.clients = []; scenario.clientItems = []; scenario.events = [];
+origLog("probe M ok: REST /event proposed the client's scheduling item through one sync call on create, re-ran it on update, and resolved nothing");
 // --- Probes I and J: invalid LAYER 2 claim indices are ignored; later claims still run. ---
 // The (mocked) model answers with a fractional claim (1.5), a claim of 0 and a
 // bare fractional number (2.5) BEFORE two valid claims (2, 3). Before the fix

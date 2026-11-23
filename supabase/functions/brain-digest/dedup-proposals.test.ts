@@ -86,7 +86,7 @@ Deno.test("dedup section: the digest reads dedup_pending_proposals and joins the
   assertEquals(src.split("const dedupSection = await loadDedupProposals();").length - 1, 1);
   claim(
     "dedup-digest-section-joined",
-    src.includes("[synthesized, checklist, deskLine, archiveSection, recheckSection, fragmentSection, dedupSection].filter(Boolean)"),
+    src.includes("[synthesized, checklist, deskLine, archiveSection, recheckSection, fragmentSection, dedupSection, calendarSection].filter(Boolean)"),
     true,
     "the section is joined into the digest body",
   );

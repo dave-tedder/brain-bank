@@ -21,6 +21,9 @@
 //      ingest copy, with the original probe's item and the MCP probe's item
 //      already open: the Slack probe item, carrying its own token, is still
 //      inserted and gets its suspect row, and "deploy" is dropped.
+//   16. (loop-closing Task 5.3) client identity per item on the ingest copy:
+//      a multi-client capture sets each item's own client_id, and an item
+//      whose name matches two clients gets none.
 //   13. (loop-closing Task 5.2) dedup on the ingest copy: two identical strings
 //      in one batch insert once with a dedup/dropped/exact_batch row naming the
 //      survivor the insert returned; a reworded copy of a recent open item
@@ -70,6 +73,8 @@ const scenario = {
   proposalItems: [] as Array<{ item_id: string; description: string }>,
   reviewAnswers: [] as Array<Array<{ status: string; message: string; decision_id: string | null }>>,
   semanticCandidates: [] as Array<Record<string, unknown>>,
+  // Task 5.3: the clients table the name read and find_client query answer from.
+  clients: [] as Array<{ id: string; name: string }>,
 };
 // Rows the action_items insert returned (Task 5.1 asks for id, description).
 const returnedItems: Array<{ id: string; description: string }> = [];
@@ -129,6 +134,12 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
       if (table === "rpc/review_proposal") return json(scenario.reviewAnswers.shift() ?? []);
       if (table === "rpc/dedup_semantic_candidates") return json(scenario.semanticCandidates);
       if (table === "rpc/record_decisions") return json(Array.isArray((body as { p_rows?: unknown[] })?.p_rows) ? (body as { p_rows: unknown[] }).p_rows.length : null);
+      // Task 5.3 correction 3: the roster is ONE client_roster call, answered
+      // from scenario.clients in id order with its count and a read time.
+      if (table === "rpc/client_roster") {
+        const sorted = [...scenario.clients].sort((a, b) => (a.id < b.id ? -1 : 1));
+        return json({ read_at: new Date().toISOString(), total: sorted.length, clients: sorted.map((c) => ({ id: c.id, name: c.name })) });
+      }
       if (table === "rpc/transition_action_item") {
         if (scenario.transitionAnswers.length) {
           const answer = scenario.transitionAnswers.shift()!;
@@ -147,6 +158,12 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
     // filter in the ingest copy changes behavior here (Codex review 1, F2).
     if (table === "action_items" && method === "GET" && scenario.openItems) {
       return json(u.searchParams.get("status") === "eq.open" ? scenario.openItems : []);
+    }
+    // Task 5.3: the clients table itself is read only by the foreign-key
+    // re-check (id in (...)).
+    if (table === "clients" && method === "GET") {
+      const ids = (u.searchParams.get("id") ?? "").replace(/^in\.\(|\)$/g, "").split(",").filter(Boolean);
+      return json(scenario.clients.filter((c) => ids.includes(c.id)).map((c) => ({ id: c.id })));
     }
     if (table === "action_items" && method === "PATCH") throw new Error("direct action_items status update: every writer must use transition_action_item");
     if (table === "action_items" && method === "POST") {
@@ -498,6 +515,35 @@ expectClaimed(
 scenario.openItems = null;
 origLog("probe 14 ok: ingest copy inserted both numbered items (design 1, design 2) and wrote no dedup row");
 
+// --- Probe 16 (loop-closing Task 5.3): client identity per item on the ingest copy. ---
+// A multi-client capture: each item's own text is searched, and client_id is
+// set only when find_client's query returns exactly one row. Alicia and Jordan
+// Marlow's items get their own ids; "nudge Jordan" matches two clients and gets
+// none; an item naming no client carries no client_id key at all.
+recorded.length = 0; logs.length = 0; returnedItems.length = 0;
+const ALICIA16 = "a11c1a00-0000-4000-8000-000000000015";
+const JAKE16 = "1a4e0000-0000-4000-8000-000000000015";
+scenario.clients = [
+  { id: ALICIA16, name: "Alicia Brennan" },
+  { id: JAKE16, name: "Jordan Marlow" },
+  { id: "1a4e0000-0000-4000-8000-000000000016", name: "Jordan Ruiz" },
+];
+const ITEMS16 = ["Schedule tattoo appointment for Alicia Brennan", "Send Jordan Marlow the floor plan sketch", "nudge Jordan if nothing arrives", "deploy the probe 16 reminder email"];
+scenario.metadata = { people: ["Alicia Brennan", "Jordan Marlow"], action_items: ITEMS16, dates_mentioned: [], topics: ["koi"], type: "task", project: null, priority: "normal" };
+scenario.openItems = []; scenario.semanticCandidates = []; scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = [];
+expect(await postSlackMessage("Loop-closing probe 16: bookings and sketches for Alicia Brennan and Jordan Marlow still to do.") === 200, "probe 16 HTTP");
+const items16 = inserts("action_items");
+expectClaimed(
+  claimVerdict("probe-16-client-ids", () =>
+    JSON.stringify(items16.map((r) => [r.description, "client_id" in r ? r.client_id : "absent"])) ===
+      JSON.stringify([[ITEMS16[0], ALICIA16], [ITEMS16[1], JAKE16], [ITEMS16[2], "absent"], [ITEMS16[3], "absent"]])),
+  `probe 16 client_id per item: ${JSON.stringify(items16)}`,
+);
+const roster16 = recorded.filter((r) => r.table === "rpc/client_roster" || r.table === "clients");
+expect(roster16.length === 1 && roster16[0].table === "rpc/client_roster" && JSON.stringify(roster16[0].body) === JSON.stringify({ p_max: 20000 }),
+  `probe 16 one client_roster read and no clients table read: ${JSON.stringify(roster16.map((r) => [r.table, r.body]))}`);
+scenario.openItems = null; scenario.clients = [];
+origLog("probe 16 ok: ingest copy set client_id per item (Alicia, Jordan Marlow), left nudge Jordan (two clients) and the no-name item without one");
 // --- Probe 15: invalid LAYER 2 claim indices are ignored; later claims still run. ---
 // The (mocked) model answers with a fractional claim (1.5), a claim of 0 and a
 // bare fractional number (2.5) BEFORE two valid claims (2, 3). Before the fix

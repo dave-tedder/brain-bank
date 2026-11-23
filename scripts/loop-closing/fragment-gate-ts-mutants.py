@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Loop-closing Tasks 5.1 and 5.2: TypeScript-side mutants of the fragment gate
-and of dedup at insert (batch-local exact dedup; semantic dedup proposals).
+"""Loop-closing Tasks 5.1, 5.2 and 5.3: TypeScript-side mutants of the fragment
+gate, of dedup at insert (batch-local exact dedup; semantic dedup proposals),
+and of client identity and booking proposals (Task 5.3).
 
     python3 scripts/loop-closing/fragment-gate-ts-mutants.py            # every mutant
     python3 scripts/loop-closing/fragment-gate-ts-mutants.py NAME ...   # some
@@ -88,6 +89,11 @@ IT = "supabase/functions/ingest-thought/index.ts"
 BD = "supabase/functions/brain-digest/index.ts"
 DD = "supabase/functions/_shared/dedup.ts"
 DDP = "supabase/functions/brain-digest/dedup-proposals.ts"
+# Task 5.3.
+IC = "supabase/functions/_shared/item-client.ts"
+BM = "supabase/functions/_shared/booking-match.ts"
+CBS = "supabase/functions/external-crm-sync/index.ts"
+CDP = "supabase/functions/brain-digest/calendar-proposals.ts"
 
 CHECKS = {
     "mv": ["deno", "test", "--no-lock", "--no-check", "--allow-read", "--allow-env", "supabase/functions/_shared/metadata-validation.test.ts"],
@@ -95,6 +101,10 @@ CHECKS = {
     "dg": ["deno", "test", "--no-lock", "--no-check", "--allow-read", "--allow-env", "supabase/functions/brain-digest/fragment-proposals.test.ts"],
     "dd": ["deno", "test", "--no-lock", "--no-check", "--allow-read", "--allow-env", "supabase/functions/_shared/dedup.test.ts"],
     "dgd": ["deno", "test", "--no-lock", "--no-check", "--allow-read", "--allow-env", "supabase/functions/brain-digest/dedup-proposals.test.ts"],
+    "ic": ["deno", "test", "--no-lock", "--no-check", "--allow-read", "--allow-env", "supabase/functions/_shared/item-client.test.ts"],
+    "bm": ["deno", "test", "--no-lock", "--no-check", "--allow-read", "--allow-env", "supabase/functions/_shared/booking-match.test.ts"],
+    "dgc": ["deno", "test", "--no-lock", "--no-check", "--allow-read", "--allow-env", "supabase/functions/brain-digest/calendar-proposals.test.ts"],
+    "cbs": ["deno", "test", "--no-lock", "--no-check", "--allow-read", "--allow-env", "supabase/functions/external-crm-sync/index_test.ts"],
     "ingest": ["deno", "run", "--allow-net", "--allow-env", "--allow-read", "scripts/loop-closing/ingest-probe-harness.ts"],
     "mcp": ["deno", "run", "--config", "scripts/loop-closing/closeout-capture-probe.deno.json", "--no-lock", "--allow-net", "--allow-env", "--allow-read", "scripts/loop-closing/closeout-capture-probe-harness.ts"],
 }
@@ -133,6 +143,69 @@ T_DGD_JOIN = "dedup section: the digest reads dedup_pending_proposals and joins 
 # Correction 3 of PR 33: those helpers have ONE copy now, in CH; the copy
 # parity (T_MIRROR_HELPERS, claim mirror-helpers) is gone, and the inventory
 # allows no reached per-file binding at all.
+# Task 5.3.
+T_MIRROR_53 = "mirror 5.3: both copies assign client identity to the final rows after the batch dedup and before the insert"
+T_IC_EXACT = "client identity 5.3: client_id only when find_client's rule finds exactly one client"
+T_IC_TWO = "client identity 5.3: two different clients named in one item give no id"
+T_IC_SURNAME = "client identity 5.3: a surname in the text that matches no client blocks the first-name fallback"
+T_IC_FORM = "client identity 5.3: every client sharing a matched name form counts, so a shared form is unresolved"
+T_IC_UNICODE = "client identity 5.3: names are compared as text, never as a pattern, and Unicode letters count"
+T_IC_CAP = "client identity 5.3: a server row cap cannot shorten the roster, and a partial or over-cap answer resolves nothing"
+T_IC_SPACES = "client identity 5.3: every Unicode space, separator and format character gives the ASCII answer"
+T_IC_NEIGHBOUR = "client identity 5.3: a capitalised word next to a name is part of the name unless it is a scheduling or title word"
+T_BM_SPAN = "booking match 5.3: the client's name is masked only where it is mentioned, so its own date still counts"
+T_BM_READERR = "booking match 5.3: a client read error skips the sync, so existing support stays"
+T_BM_STALE = "booking match 5.3: a stale snapshot changes nothing and the match runs again from a fresh read"
+T_IC_ROSTER = "client identity 5.3: the roster is one read of client_roster, so the 2,001st client resolves"
+T_IC_FK = "client identity 5.3: a client deleted before the insert is cleared and the batch retried once"
+T_IC_FK_E2E = "client identity 5.3, shared capture path: a client deleted before the insert keeps every item"
+T_MIRROR_PIN = "mirror 5.3: both capture files import the client helpers, unaliased, from _shared/item-client.ts and declare neither"
+T_BM_EQUAL = "booking match 5.3: an item dated on the event's own day is proposed (the date bound is inclusive)"
+T_BM_NAMES = "booking match 5.3: a client's name is not a month, and a month-only phrase is a date"
+T_BM_ITEMS = "booking match 5.3: the client's open items are one read, whatever the server row cap"
+T_BM_ITEMS_PARTIAL = "booking match 5.3: a partial or over-cap item answer proposes nothing and sends no sync"
+T_BM_POSSESSIVE = "booking match 5.3: a possessive of the client's name is the client, not a month"
+T_BM_DATESPACES = "booking match 5.3: every Unicode space gives the ASCII date, predicate and proposal"
+T_BM_SUPERSEDED = "booking match 5.3: a matcher whose reads are older than an applied sync changes nothing"
+T_BM_HYPHEN = "booking match 5.3: a hyphenated first name's possessive is the client, not a month"
+T_BM_ONESNAP = "booking match 5.3: the event's the CRM key and title resolve from the same read"
+T_BM_ONEREAD = "booking match 5.3: a match is one read, and its time is the sync's read time"
+T_IC_EQUIV = "client identity 5.3: a name written another equivalent way in a second roster row makes it ambiguous"
+T_IC_ODD = "client identity 5.3: no invisible or combining code point at any position of a name makes an unresolved text resolve"
+T_IC_ODDSAMPLE = "client identity 5.3: a sample of odd code points at every position of every fixture never changes the client"
+T_BM_COMPOUND = "booking match 5.3: a compound first name's possessive is masked however its words are joined"
+T_BM_TODAY = "booking match 5.3: today is the UTC date of the match's own read, never a caller's clock"
+T_IC_BETWEEN = "client identity 5.3: a default-ignorable code point between first and last name of any fixture resolves nothing"
+T_IC_CONFUSABLE = "client identity 5.3: roster names that look the same however they are encoded are ambiguous (UTS #39 skeleton)"
+T_IC_GUARD = "client identity 5.3: a blocker reached by the first-name rule is never the answer"
+T_BM_EXACTPOSS = "booking match 5.3: a possessive masks only the exact part of the name it spells, and a trailing apostrophe counts"
+T_BM_REASSIGN = "booking match 5.3: a reassigned, cancelled or moved event withdraws its support, so the proposal is no longer shown"
+T_IC_MULTI = "client identity 5.3, shared capture path: a multi-client capture assigns client_id per item"
+T_IC_JAKE = "client identity 5.3, shared capture path: nudge Jordan gets client_id null when find_client's rule finds 2 clients"
+T_BM_PRED = "booking match 5.3: the scheduling predicate, after Task 5.1's prefix normalisation"
+T_BM_ALICIA = "booking match 5.3: Schedule tattoo appointment for Alicia Brennan with her 2027-01-16 session proposes"
+T_BM_DESIGN = "booking match 5.3: send Alicia the design with the same event does not propose (predicate)"
+T_BM_DATE = "booking match 5.3: Reschedule Alicia Brennan to March does not propose against an event before the item's date"
+T_BM_CANCEL = "booking match 5.3: a cancelled event proposes nothing"
+T_BM_NULL = "booking match 5.3: an item with client_id null (nudge Jordan) is never proposed"
+T_BM_MULTI = "booking match 5.3: one event matching several items writes them in ONE sync call"
+T_BM_ONLY = "booking match 5.3: proposals only, nothing resolves and no item is written"
+T_CBS = "external-crm-sync upsert_event 5.3: a pushed session proposes the client's scheduling item, and the response is unchanged"
+T_DGC_LINES = "calendar section: header, then <id> <desc> matches <event title> on <date> (decision <id>), one line per proposal"
+T_DGC_JOIN = "calendar section: the digest reads calendar_pending_proposals and joins the section after the dedup section"
+ASSIGN_SHARED = "  await assignItemClients(db, rows);\n"
+ASSIGN_INGEST = "  await assignItemClients(supabase, rows);\n"
+EXACTLY_ONE = "    if (ids.length !== 1) return null;"
+FIRST_MATCH = "    if (ids.length === 0) return null;"
+PREDICATE = "  /^(schedule|book|reschedule|set up|arrange)\\b.*\\b(appointment|session|consult|consultation)\\b/i;"
+DATE_RULE = "    if (own !== null && own > start) continue;"
+RESOLVE_PATH = (
+    "    return done(status, typeof written === \"number\" ? written : 0);",
+    "    for (const r of rows) {\n"
+    "      await db.rpc!(\"transition_action_item\", { p_item_id: r.item_id, p_from_statuses: [\"open\"], p_to_status: \"resolved\", p_actor: \"booking-match\", p_close_reason: \"done\" });\n"
+    "    }\n"
+    "    return done(status, typeof written === \"number\" ? written : 0);",
+)
 T_MIRROR_HELPERS_INV = "mirror 5.2: neither extraction body reaches a module-level binding of its own file, and open-brain-mcp's wrapper passes the imported mechanical test"
 T_SINGLE_SOURCE = "mirror 5.2: the per-file capture helpers have one copy, in _shared/capture-helpers.ts, which every capture file imports and none declares"
 CH = "supabase/functions/_shared/capture-helpers.ts"
@@ -275,8 +348,8 @@ MUTANTS = {
     "gate_removed_shared": (CP, GATE_SHARED, "  const rows = guarded\n", "mv", T_PLAN_E2E),
     "gate_removed_shared_probe": (CP, GATE_SHARED, "  const rows = guarded\n", "mcp", "probe D: action_items rows"),
     "suspects_not_recorded_shared": (CP, "  await recordPronounSuspects(\n    db,", "  if (false) await recordPronounSuspects(\n    db,", "mv", T_PLAN_E2E),
-    "insert_no_select_shared": (CP, "  const { data: inserted, error } = await db.from(\"action_items\").insert(rows)\n    .select(\"id, description\");",
-        "  const { data: inserted, error } = await db.from(\"action_items\").insert(rows);", "mv", T_PLAN_E2E),
+    "insert_no_select_shared": (CP, "    () => db.from(\"action_items\").insert(rows).select(\"id, description\"),",
+        "    () => db.from(\"action_items\").insert(rows),", "mv", T_PLAN_E2E),
     "dedup_before_gate_shared": (CP,
         "  const rows = (await applyFragmentGate(db, thoughtId, guarded))\n    .filter((row) =>\n      !existingNormalized.has(normalizeActionText(row.description))\n    )\n",
         "  const rows = (await applyFragmentGate(db, thoughtId, guarded.filter((row) =>\n      !existingNormalized.has(normalizeActionText(row.description))\n    )))\n",
@@ -372,7 +445,7 @@ MUTANTS = {
     "locator_open_filter_unwrapped": (FGT_PATH, "    const [k, v] = c.arguments.map((a) => skipErased(a));", "    const [k, v] = c.arguments.map((a) => a);", "fg", T_TYPE_ERASURE),
     "locator_select_by_offset": (FGT_PATH, "    selectedAfterDedup: dedup < insert && selectsInsert,", "    selectedAfterDedup: dedup < insert && select === insert,", "fg", T_TYPE_ERASURE),
     # The digest.
-    "digest_section_unwired": (BD, "recheckSection, fragmentSection, dedupSection].filter(Boolean)", "recheckSection, dedupSection].filter(Boolean)", "dg", T_DIGEST),
+    "digest_section_unwired": (BD, "recheckSection, fragmentSection, dedupSection, calendarSection].filter(Boolean)", "recheckSection, dedupSection, calendarSection].filter(Boolean)", "dg", T_DIGEST),
     # ---------------------------------------------------------------------
     # Task 5.2: dedup at insert.
     # The plan's mutation: semanticOverlap returns a suppressing value.
@@ -415,7 +488,7 @@ MUTANTS = {
     "describe_order_swapped": (DD, "  return `constraints differ: ${side(onlySurvivor)} vs ${side(onlyItem)}`;", "  return `constraints differ: ${side(onlyItem)} vs ${side(onlySurvivor)}`;", "dd", T_DD_LIVE),
     "constraint_env_dropped": (DD, "    if (ENVIRONMENT_WORDS.has(w) || NEGATION_WORDS.has(w)) out.add(w);", "    if (NEGATION_WORDS.has(w)) out.add(w);", "dd", T_DD_LIVE),
     # The digest.
-    "dedup_digest_unwired": (BD, "fragmentSection, dedupSection].filter(Boolean)", "fragmentSection].filter(Boolean)", "dgd", T_DGD_JOIN),
+    "dedup_digest_unwired": (BD, "fragmentSection, dedupSection, calendarSection].filter(Boolean)", "fragmentSection, calendarSection].filter(Boolean)", "dgd", T_DGD_JOIN),
     "dedup_digest_wording_dropped": (DDP, "(${describeConstraints(r.description, survivorText)}${status})", "(constraints agree${status})", "dgd", T_DGD_LINES),
     # Codex review 1 of PR 33, R4: Codex's fresh-02 mutant (digits stripped
     # from the normalizer). Correction 3 retargeted all four: the normalizer is
@@ -451,6 +524,155 @@ MUTANTS = {
     "module_exports_prefixes": (CH, "const MECHANICAL_CAPTURE_PREFIXES = [", "export const MECHANICAL_CAPTURE_PREFIXES = [", "fg", T_SINGLE_SOURCE),
     "module_top_level_write": (CH, "export function isMechanicalCapture(", 'MECHANICAL_CAPTURE_PREFIXES.push("[Reviewer]");\n\nexport function isMechanicalCapture(', "fg", T_SINGLE_SOURCE),
     "ingest_namespace_import": (IT, IT_IMPORT, IT_IMPORT + 'import * as CaptureHelpers from "../_shared/capture-helpers.ts";\n', "fg", T_SINGLE_SOURCE),
+    # ---------------------------------------------------------------------
+    # Task 5.3: client identity per item, booking proposals.
+    # The exactly-one rule changed to first-match (unit, shared e2e, both
+    # entrypoint probes).
+    "client_first_match": (IC, EXACTLY_ONE, FIRST_MATCH, "ic", T_IC_EXACT),
+    "client_first_match_e2e": (IC, EXACTLY_ONE, FIRST_MATCH, "ic", T_IC_JAKE),
+    "client_first_match_ingest_probe": (IC, EXACTLY_ONE, FIRST_MATCH, "ingest", "probe 16 client_id per item"),
+    "client_first_match_mcp_probe": (IC, EXACTLY_ONE, FIRST_MATCH, "mcp", "probe L: client_id per item"),
+    # Two different clients named in one item stop agreeing.
+    "client_disagreement_ignored": (IC, "    if (chosen !== null && chosen !== ids[0]) return null;\n", "", "ic", T_IC_TWO),
+    # Codex review 1 of PR 38, finding 1: the surname check removed; a shared
+    # name form resolved to its first client; one id kept per name form.
+    "surname_fallback_restored": (IC, "    if (runsIntoName(s, words, i, i)) return { kind: \"ambiguous\" };\n", "", "ic", T_IC_SURNAME),
+    "shared_form_first_id": (IC, "    chosen = m.ids.length === 1 ? m.ids[0] : null;", "    chosen = m.ids[0] ?? null;", "ic", T_IC_FORM),
+    "form_keeps_one_id": (IC, "    if (!ids.includes(c.id)) ids.push(c.id);", "    if (ids.length === 0) ids.push(c.id);", "ic", T_IC_FORM),
+    # Finding 7: ASCII-only words; one roster page.
+    "ascii_only_words": (IC, "const WORD_RE = /[^ \\p{P}\\p{S}]+(?:['\\-][^ \\p{P}\\p{S}]+)*/gu;", "const WORD_RE = /[A-Za-z0-9]+(?:['\\-][A-Za-z0-9]+)*/g;", "ic", T_IC_UNICODE),
+    # Correction 3, strategy B: the one-statement roster. A partial answer
+    # accepted; an over-cap answer read as an empty roster (no client, so
+    # support is withdrawn, where it must be a read error).
+    "roster_partial_accepted": (IC, "  if (clients.length !== answer.total) {\n", "  if (false) {\n", "ic", T_IC_CAP),
+    "roster_rows_dropped": (IC, "  const clients = (answer.clients as Array<{ id: unknown; name: unknown }>).map(",
+        "  const clients = (answer.clients as Array<{ id: unknown; name: unknown }>).slice(0, 2000).map(", "ic", T_IC_ROSTER),
+    # Correction 3, strategy A: one normalisation at entry. Skipped in the
+    # identity rule; ASCII spaces only; the zero-width space deleted (it is a
+    # word break, so words would join).
+    "normalize_skipped": (IC, "  const s = normalizeText(text);\n  const words = nameWords(s);", "  const s = String(text ?? \"\");\n  const words = nameWords(s);", "ic", T_IC_SPACES),
+    "spaces_ascii_only": (IC, "const SPACES = /[\\p{Z}\\t\\n\\v\\f\\r\\u0085]+/gu;", "const SPACES = /[ \\t]+/g;", "ic", T_IC_SPACES),
+    # Correction 4, finding 2: composition before the format characters are
+    # removed (an invisible character keeps an accent decomposed).
+    # Correction 5, the allowlist: an ignorable letter accepted as a name
+    # letter; a roster name with an odd word left as an ordinary client; a
+    # blocker chosen; the mark-free blocker check removed; a text word with a
+    # letter and an odd code point no longer ambiguous.
+    "ignorable_letter_allowed": (IC, "    if (NAME_LETTER.test(ch) && !IGNORABLE.test(ch)) continue;", "    if (NAME_LETTER.test(ch)) continue;", "ic", T_IC_ODD),
+    "odd_roster_not_blocked": (IC, "    if (c.id.startsWith(BLOCKER) || !nameWords(n).some((w) => w.odd)) {", "    if (true) {", "ic", T_IC_ODD),
+    "blocker_bare_check_removed": (IC, "  if (blockers.length > 0) {\n", "  if (false) {\n", "ic", T_IC_ODD),
+    "odd_text_word_allowed": (IC, "  if (words.some((w) => w.odd)) return { kind: \"ambiguous\" };\n", "", "ic", T_IC_ODDSAMPLE),
+    # Correction 6 (Codex re-review 5): the final blocker guard removed
+    # (reinstated: an "İl" first name reaches it); an odd word without a
+    # letter allowed; String.prototype.trim (drops an edge U+FEFF); format
+    # characters kept in a blocker's visible spelling; confusable skeletons
+    # ignored; a trailing apostrophe not a possessive.
+    "blocker_chosen": (IC, "  return chosen === null || chosen.startsWith(BLOCKER) ? null : chosen;", "  return chosen;", "ic", T_IC_GUARD),
+    "odd_letterless_word_allowed": (IC, "  if (words.some((w) => w.odd)) return { kind: \"ambiguous\" };", "  if (words.some((w) => w.odd && /\\p{L}/u.test(s.slice(w.start, w.fullEnd)))) return { kind: \"ambiguous\" };", "ic", T_IC_BETWEEN),
+    "trim_drops_feff": (IC, "    .replace(/^ +| +$/g, \"\")\n", "    .trim()\n", "ic", T_IC_CONFUSABLE),
+    "format_kept_in_visible": (IC, "const INVISIBLE = /[\\p{Default_Ignorable_Code_Point}\\p{Cf}\\p{Co}\\p{Cn}\\p{Cs}\\p{Cc}]/gu;", "const INVISIBLE = /[\\p{Default_Ignorable_Code_Point}\\p{Co}\\p{Cn}\\p{Cs}\\p{Cc}]/gu;", "ic", T_IC_CONFUSABLE),
+    "confusables_ignored": (IC, "  if (confusable.size === 0) return out;", "  return out;", "ic", T_IC_CONFUSABLE),
+    "trailing_apostrophe_ignored": (IC, "    const trailing = raw === m[0] &&", "    const trailing = false && raw === m[0] &&", "bm", T_BM_EXACTPOSS),
+    # Round 2, finding 1: the first word exempt again; the neighbour list ignored.
+    "neighbour_first_word_exempt": (IC, "  if (i > 0 && foreign(words[i - 1])", "  if (i > 1 && foreign(words[i - 1])", "ic", T_IC_NEIGHBOUR),
+    "neighbour_list_ignored": (IC, "  const foreign = (w: Word) => w.capitalised && !(w.tokens.length === 1 && NAME_NEIGHBOURS.has(w.tokens[0]));",
+        "  const foreign = (w: Word) => w.capitalised;", "ic", T_IC_NEIGHBOUR),
+    # Finding 3: the foreign-key retry removed, or clearing every id.
+    "fk_retry_removed": (IC, "  if (cleared === 0) return first;", "  return first;", "ic", T_IC_FK),
+    "fk_retry_clears_all": (IC, "    if (typeof r.client_id === \"string\" && !alive.has(r.client_id)) {", "    if (typeof r.client_id === \"string\") {", "ic", T_IC_FK),
+    "fk_retry_unwired_shared": (CP, "  const { data: inserted, error } = await retryWithoutMissingClients(\n    db,\n    rows,\n    () => db.from(\"action_items\").insert(rows).select(\"id, description\"),\n  );",
+        "  const { data: inserted, error } = await db.from(\"action_items\").insert(rows).select(\"id, description\");", "ic", T_IC_FK_E2E),
+    "fk_retry_unwired_ingest": (IT, "  const { data: inserted, error } = await retryWithoutMissingClients(\n    supabase,\n    rows,\n    () => supabase.from(\"action_items\").insert(rows).select(\"id, description\"),\n  );",
+        "  const { data: inserted, error } = await supabase.from(\"action_items\").insert(rows).select(\"id, description\");", "fg", T_MIRROR_BODY),
+    # Finding 9: the ingest copy reaching another resolver (an alias, another module).
+    "ingest_import_alias": (IT, "import {\n  assignItemClients,\n  retryWithoutMissingClients,\n} from \"../_shared/item-client.ts\";",
+        "import {\n  assignItemClients as resolveAllClients,\n  resolveClient as assignItemClients,\n  retryWithoutMissingClients,\n} from \"../_shared/item-client.ts\";", "fg", T_MIRROR_PIN),
+    "ingest_import_other_module": (IT, "} from \"../_shared/item-client.ts\";", "} from \"../_shared/item-client-alternate.ts\";", "fg", T_MIRROR_PIN),
+    # Per capture instead of per item: every row gets the first row's client.
+    "client_per_capture": (IC, "      const id = resolveIn(row.description, prepared);",
+        "      const id = resolveIn(rows[0].description, prepared);", "ic", T_IC_MULTI),
+    # Mirror divergence: each copy without the call, or with it after the insert.
+    "client_unwired_shared": (CP, ASSIGN_SHARED, "", "ic", T_IC_MULTI),
+    "client_unwired_shared_probe": (CP, ASSIGN_SHARED, "", "mcp", "probe L: client_id per item"),
+    "client_unwired_ingest": (IT, ASSIGN_INGEST, "", "fg", T_MIRROR_BODY),
+    "client_unwired_ingest_probe": (IT, ASSIGN_INGEST, "", "ingest", "probe 16 client_id per item"),
+    "client_after_insert_ingest": ([(IT, ASSIGN_INGEST, ""), (IT, "  // Pronoun-object suspects are inserted, then proposed for review (Task 5.1).\n  await recordPronounSuspects(\n    supabase,",
+        ASSIGN_INGEST + "  // Pronoun-object suspects are inserted, then proposed for review (Task 5.1).\n  await recordPronounSuspects(\n    supabase,")], None, None, "fg", T_MIRROR_53),
+    "client_after_insert_shared": ([(CP, ASSIGN_SHARED, ""), (CP, "  // Pronoun-object suspects are inserted, then proposed for review (Task 5.1).\n  await recordPronounSuspects(\n    db,",
+        ASSIGN_SHARED + "  // Pronoun-object suspects are inserted, then proposed for review (Task 5.1).\n  await recordPronounSuspects(\n    db,")], None, None, "fg", T_MIRROR_53),
+    # The predicate loosened: always true, no object, unanchored, not normalised.
+    "predicate_always": (BM, "  return SCHEDULING_PREDICATE.test(normalizeItemPrefix(normalizeText(description)));", "  return String(description ?? \"\").length > 0;", "bm", T_BM_DESIGN),
+    "predicate_no_object": (BM, PREDICATE, "  /^(schedule|book|reschedule|set up|arrange)\\b/i;", "bm", T_BM_PRED),
+    "predicate_unanchored": (BM, PREDICATE, PREDICATE.replace("/^(", "/(", 1), "bm", T_BM_PRED),
+    "predicate_not_normalised": (BM, "  return SCHEDULING_PREDICATE.test(normalizeItemPrefix(normalizeText(description)));", "  return SCHEDULING_PREDICATE.test(normalizeText(description));", "bm", T_BM_PRED),
+    # The date order flipped, and the date rule removed.
+    "date_order_flipped": (BM, DATE_RULE, "    if (own !== null && own < start) continue;", "bm", T_BM_DATE),
+    "date_rule_removed": (BM, DATE_RULE, "", "bm", T_BM_DATE),
+    # Finding 9: the date bound made exclusive.
+    "date_bound_exclusive": (BM, DATE_RULE, "    if (own !== null && own >= start) continue;", "bm", T_BM_EQUAL),
+    # Finding 6: a client's name read as a month; "for May" ignored.
+    "name_read_as_month": (BM, "    const own = itemDate(item.description, item.created_at, clientNames);", "    const own = itemDate(item.description, item.created_at);", "bm", T_BM_NAMES),
+    "may_phrase_ignored": (BM, " && !MAY_PREPOSITION.test(text.slice(0, m.index!))) continue;", ") continue;", "bm", T_BM_NAMES),
+    # Correction 3, strategy B: the one-statement item read. A partial answer
+    # accepted; an over-cap answer read as no items (support withdrawn).
+    # Correction 4: the one match read. A partial list accepted, or an
+    # over-cap list read as empty (clients: no client, support withdrawn;
+    # items: no match, support withdrawn), or rows dropped.
+    "match_partial_accepted": (BM, "    if (rows.length !== total) {\n", "    if (false) {\n", "bm", T_BM_READERR),
+    "items_partial_accepted": (BM, "    if (rows.length !== total) {\n", "    if (false) {\n", "bm", T_BM_ITEMS_PARTIAL),
+    "match_overcap_as_empty": (BM, "      console.error(`booking match: ${total} ${what} is more than the read returns; nothing proposed`);\n      return null;\n",
+        "      return [];\n", "bm", T_BM_READERR),
+    "items_overcap_as_empty": (BM, "      console.error(`booking match: ${total} ${what} is more than the read returns; nothing proposed`);\n      return null;\n",
+        "      return [];\n", "bm", T_BM_ITEMS_PARTIAL),
+    "items_rows_dropped": (BM, "    items: whole<MatchItem>(a.items, a.items_total, \"open items\"),", "    items: whole<MatchItem>(a.items, a.items_total, \"open items\")?.slice(0, 1000) ?? null,", "bm", T_BM_ITEMS),
+    # Correction 4, finding 1: the the CRM key ignored (the title decides);
+    # finding 3: a second read for the sync's time.
+    "crm_key_ignored": (BM, "  if (typeof cb === \"string\" && cb.trim() !== \"\") {\n    const ids = [...new Set(clients", "  if (false) {\n    const ids = [...new Set(clients", "bm", T_BM_ONESNAP),
+    "second_read_for_sync": (BM, "    const readAt = read.readAt;", "    const readAt = (await readMatchInputs(db, eventId))?.readAt ?? read.readAt;", "bm", T_BM_ONEREAD),
+    # Correction 3, finding C: the possessive left unmasked; strategy A: the
+    # date text and the predicate text not normalised.
+    "possessive_not_masked": (BM, "      if (w.possessive && inName(w.tokens)) {", "      if (false) {", "bm", T_BM_POSSESSIVE),
+    # Correction 4, finding 4: a possessive masked only when it is one token.
+    "possessive_single_token": (BM, "      if (w.possessive && inName(w.tokens)) {", "      if (w.possessive && w.tokens.length === 1 && inName(w.tokens)) {", "bm", T_BM_HYPHEN),
+    # Correction 6: the run before a possessive matched token by token in any
+    # order (a separate "June" before "June's" masked with it).
+    "possessive_unordered": (BM, "      const inName = (run: string[]) => run.length > 0 && ft.some((_, p) => run.every((t, k) => ft[p + k] === t));",
+        "      const inName = (run: string[]) => run.length > 0 && run.every((t) => ft.includes(t));", "bm", T_BM_EXACTPOSS),
+    # Correction 5: the run of name words before a possessive not masked; today
+    # taken from the process clock.
+    "possessive_run_not_masked": (BM, "          a > 0 && !words[a - 1].possessive && out.slice(words[a - 1].end, words[a].start) === \" \" &&", "          false && a > 0 && !words[a - 1].possessive && out.slice(words[a - 1].end, words[a].start) === \" \" &&", "bm", T_BM_COMPOUND),
+    "today_from_process_clock": (BM, "    const today = readInstant.toISOString().slice(0, 10);", "    const today = new Date().toISOString().slice(0, 10);", "bm", T_BM_TODAY),
+    "date_text_not_normalised": (BM, "  let out = normalizeText(text);", "  let out = String(text ?? \"\");", "bm", T_BM_DATESPACES),
+    "predicate_text_not_normalised": (BM, "  return SCHEDULING_PREDICATE.test(normalizeItemPrefix(normalizeText(description)));",
+        "  return SCHEDULING_PREDICATE.test(normalizeItemPrefix(description));", "bm", T_BM_DATESPACES),
+    # Correction 3, finding D: the read time taken at sync time, so an older
+    # reader looks as new as the newest.
+    "read_at_from_sync_time": (BM, "    const readAt = read.readAt;", "    const readAt = \"2100-01-01T00:00:00.000Z\";", "bm", T_BM_SUPERSEDED),
+    # Round 2, findings 2, 3, 4: whole-name masking, read errors, stale snapshots.
+    "mask_partial_name": (BM, "      if (k === ft.length && j > i) blank(", "      if (j > i) blank(", "bm", T_BM_SPAN),
+    # (The roster and the CRM lookup read errors are one read since
+    # correction 4: its failure is "read_failed", asserted by read-error-no-sync.)
+    "stale_not_rerun": (BM, "  return first.status === \"stale_snapshot\" ? await matchOnce(db, eventId) : first;", "  return first;", "bm", T_BM_STALE),
+    # Finding 4: an ineligible event returns before the sync, so old support stays.
+    "ineligible_skips_sync": (BM, "      status = `skipped_${why}`;", "      return done(`skipped_${why}`);", "bm", T_BM_REASSIGN),
+    "no_client_skips_sync": (BM, "        status = \"no_client\";", "        return done(\"no_client\");", "bm", T_BM_REASSIGN),
+    # The cancelled check removed, and the status read ignored.
+    "cancelled_check_removed": (BM, "  if (!isActiveEvent(event)) return \"cancelled\";\n", "", "bm", T_BM_CANCEL),
+    "cancelled_status_ignored": (BM, "  return s !== \"cancelled\" && s !== \"canceled\";", "  return s !== \"canceled\";", "bm", T_BM_CANCEL),
+    # (Candidates by text instead of by client_id: the filter is in SQL since
+    # correction 3, planted there as open_items_any_client.)
+    # The proposal path changed to resolve, and the outcome made a closing one.
+    "proposal_resolves": (BM, RESOLVE_PATH[0], RESOLVE_PATH[1], "bm", T_BM_ONLY),
+    "proposal_outcome_resolved": (BM, "      outcome: \"proposed\",\n      reason: \"booking_match\",", "      outcome: \"resolved\",\n      reason: \"booking_match\",", "bm", T_BM_ALICIA),
+    # One row per call instead of one call for the event.
+    "proposal_first_row_only": (BM, "        p_rows: rows.map((r) => ({ ...toInsertPayload(r), client_id: r.client_id, item_description: r.item_description })),",
+        "        p_rows: rows.slice(0, 1).map((r) => ({ ...toInsertPayload(r), client_id: r.client_id, item_description: r.item_description })),", "bm", T_BM_MULTI),
+    # The event writers unwired.
+    "matcher_unwired_client_bank": (CBS, "      await proposeBookingMatches(supabase, result.body.id);\n", "", "cbs", T_CBS),
+    "matcher_unwired_rest_event": (MCPF, "    await proposeBookingMatches(supabase, inserted.id);\n", "", "mcp", "probe M: booking proposal through sync_booking_proposals"),
+    # The digest.
+    "calendar_digest_unwired": (BD, "dedupSection, calendarSection].filter(Boolean)", "dedupSection].filter(Boolean)", "dgc", T_DGC_JOIN),
+    "calendar_digest_decision_dropped": (CDP, " on ${date} (decision ${r.decision_id.slice(0, 8)})`;", " on ${date}`;", "dgc", T_DGC_LINES),
     # LAYER 2 claim indices (claim-index-integer PR): the Number.isInteger guard
     # removed, and the lower bound removed, in each capture file. Probe 15
     # (ingest) and probe I (REST /capture) put claims 1.5, 0 and 2.5 before two
@@ -550,7 +772,11 @@ TEST_FILE = {"mv": "supabase/functions/_shared/metadata-validation.test.ts",
              "fg": "supabase/functions/_shared/fragment-gate.test.ts",
              "dg": "supabase/functions/brain-digest/fragment-proposals.test.ts",
              "dd": "supabase/functions/_shared/dedup.test.ts",
-             "dgd": "supabase/functions/brain-digest/dedup-proposals.test.ts"}
+             "dgd": "supabase/functions/brain-digest/dedup-proposals.test.ts",
+             "ic": "supabase/functions/_shared/item-client.test.ts",
+             "bm": "supabase/functions/_shared/booking-match.test.ts",
+             "dgc": "supabase/functions/brain-digest/calendar-proposals.test.ts",
+             "cbs": "supabase/functions/external-crm-sync/index_test.ts"}
 HARNESS_FILE = {"ingest": "scripts/loop-closing/ingest-probe-harness.ts",
                 "mcp": "scripts/loop-closing/closeout-capture-probe-harness.ts"}
 
@@ -674,6 +900,82 @@ CLAIMS = {
     "module_exports_prefixes": "single-source-helpers",
     "module_top_level_write": "single-source-helpers",
     "ingest_namespace_import": "single-source-helpers",
+    # Task 5.3.
+    "client_first_match": "jake-two-rows-null",
+    "client_first_match_e2e": "jake-null-e2e",
+    "client_first_match_ingest_probe": "probe-16-client-ids",
+    "client_first_match_mcp_probe": "client-ids",
+    "client_disagreement_ignored": "two-clients-null",
+    "client_per_capture": "multi-client-per-item",
+    "client_unwired_shared": "multi-client-per-item",
+    "client_unwired_shared_probe": "client-ids",
+    "client_unwired_ingest": "mirror-body",
+    "client_unwired_ingest_probe": "probe-16-client-ids",
+    "client_after_insert_ingest": "client-order",
+    "client_after_insert_shared": "client-order",
+    "predicate_always": "predicate-blocks",
+    "predicate_no_object": "predicate-cases",
+    "predicate_unanchored": "predicate-cases",
+    "predicate_not_normalised": "predicate-cases",
+    "date_order_flipped": "date-order",
+    "date_rule_removed": "date-order",
+    "cancelled_check_removed": "cancelled-nothing",
+    "cancelled_status_ignored": "cancelled-nothing",
+    "proposal_resolves": "proposal-only",
+    "proposal_outcome_resolved": "alicia-proposes",
+    "proposal_first_row_only": "one-call-several-items",
+    "matcher_unwired_client_bank": "cbs-upsert-proposes",
+    "matcher_unwired_rest_event": "event-proposes",
+    "calendar_digest_unwired": "calendar-digest-section-joined",
+    "calendar_digest_decision_dropped": "calendar-digest-lines",
+    "surname_fallback_restored": "surname-blocks-fallback",
+    "shared_form_first_id": "shared-form-unresolved",
+    "form_keeps_one_id": "shared-form-unresolved",
+    "ascii_only_words": "literal-and-unicode-names",
+    "fk_retry_removed": "fk-retry-keeps-batch",
+    "fk_retry_clears_all": "fk-retry-keeps-batch",
+    "fk_retry_unwired_shared": "fk-race-e2e",
+    "fk_retry_unwired_ingest": "mirror-body",
+    "ingest_import_alias": "client-import-pinned",
+    "ingest_import_other_module": "client-import-pinned",
+    "date_bound_exclusive": "equal-date-proposes",
+    "name_read_as_month": "names-and-month-phrases",
+    "may_phrase_ignored": "names-and-month-phrases",
+    "roster_partial_accepted": "roster-partial-refused",
+    "roster_rows_dropped": "roster-one-read",
+    "normalize_skipped": "spaces-identical",
+    "spaces_ascii_only": "spaces-identical",
+    "items_partial_accepted": "items-partial-refused",
+    "match_partial_accepted": "read-error-no-sync",
+    "match_overcap_as_empty": "read-error-no-sync",
+    "ignorable_letter_allowed": "no-odd-resolves",
+    "odd_roster_not_blocked": "no-odd-resolves",
+    "blocker_bare_check_removed": "no-odd-resolves",
+    "odd_text_word_allowed": "odd-sample-never-changes",
+    "blocker_chosen": "blocker-never-chosen",
+    "odd_letterless_word_allowed": "ignorable-between-names",
+    "trim_drops_feff": "confusables-ambiguous",
+    "format_kept_in_visible": "confusables-ambiguous",
+    "confusables_ignored": "confusables-ambiguous",
+    "trailing_apostrophe_ignored": "exact-possessive-span",
+    "possessive_unordered": "exact-possessive-span",
+    "possessive_run_not_masked": "compound-possessive-masked",
+    "today_from_process_clock": "today-from-read",
+    "crm_key_ignored": "client-one-snapshot",
+    "second_read_for_sync": "one-read-per-match",
+    "possessive_single_token": "hyphenated-possessive-masked",
+    "items_overcap_as_empty": "items-partial-refused",
+    "items_rows_dropped": "items-one-read",
+    "possessive_not_masked": "possessive-masked",
+    "date_text_not_normalised": "date-spaces-identical",
+    "predicate_text_not_normalised": "date-spaces-identical",
+    "read_at_from_sync_time": "older-read-superseded",
+    "neighbour_first_word_exempt": "neighbour-rule",
+    "neighbour_list_ignored": "neighbour-rule",
+    "mask_partial_name": "name-span-masked",
+    "stale_not_rerun": "stale-reruns",
+    "ineligible_skips_sync": "reassigned-withdrawn",
+    "no_client_skips_sync": "reassigned-withdrawn",
     "claim_index_integer_off_ingest_probe": "probe-15-claims",
     "claim_index_integer_off_mcp_probe": "claim-index-rest",
     "claim_index_lower_bound_off_ingest_probe": "probe-15-claims",
@@ -1026,6 +1328,21 @@ NEGATIVE_CONTROLS = {
     "nc_ingest_probe13_other_assertion": ("batch_dedup_off_ingest_probe", None,
         replace_once(IH, '=== 200, "probe 13 HTTP");', '=== 299, "probe 13 HTTP");'),
         "probe 13's HTTP assertion fails first, so its exact_batch claim never runs"),
+    # Task 5.3: the booking test cannot load its module; the the CRM
+    # handler test cannot read index.ts; an earlier untagged assertion in the
+    # booking test fails before the date-order claim; probe 16's HTTP check
+    # fails before its client-id claim.
+    "nc_bm_module_missing": ("date_order_flipped", None, delete(BM),
+        "booking-match.test.ts cannot load (booking-match.ts deleted)"),
+    "nc_cbs_without_allow_read": ("matcher_unwired_client_bank", without("--allow-read"), None,
+        "the the CRM handler test cannot read external-crm-sync/index.ts"),
+    "nc_bm_untagged_earlier_assertion": ("date_order_flipped", None,
+        replace_once("supabase/functions/_shared/booking-match.test.ts", "  await run(db);\n  claim(\n    \"date-order\",",
+            "  await run(db);\n  assertEquals(calendarRows(db).length, -1, \"negative control: an untagged assertion\");\n  claim(\n    \"date-order\","),
+        "an untagged assertion fails before the date-order claim runs"),
+    "nc_ingest_probe16_other_assertion": ("client_first_match_ingest_probe", None,
+        replace_once(IH, '=== 200, "probe 16 HTTP");', '=== 299, "probe 16 HTTP");'),
+        "probe 16's HTTP assertion fails first, so its client-id claim never runs"),
     "nc_ingest_without_allow_net": ("gate_removed_ingest_probe", without("--allow-net"), None,
         "the ingest handler cannot start its server, so no probe runs"),
     "nc_ingest_other_assertion": ("gate_removed_ingest_probe", None,

@@ -68,7 +68,7 @@ Deno.test("applyFragmentGate: keeps rows unchanged and in order, one valid decis
     { description: "deploy", status: "open", source_thought_id: T },
     { description: "send Sam the explainer PDF", status: "open", source_thought_id: T },
     { description: "finalize what we're", status: "open", source_thought_id: T },
-    { description: "TODO: send her the koi sketch", status: "open", source_thought_id: T },
+    { description: "TODO: send her the floor plan sketch", status: "open", source_thought_id: T },
   ];
   const kept = await applyFragmentGate(db, T, input);
   assertEquals(kept, [input[1], input[3]]);
@@ -1116,6 +1116,89 @@ Deno.test("mirror 5.2: both copies run the batch-local dedup after the open-item
       { label: "ingest", ordered: true, calls: [1, 1, 1, 1] },
     ],
     "open-item dedup < batch keep < candidate read < insert < suspects < exact_batch rows < semantic proposals, once each, in both copies",
+  );
+});
+
+// Loop-closing Task 5.3's order facts, found by tree shape like the two above:
+// client identity is assigned to the final rows after the batch-local dedup
+// and the empty-batch return, and before the semantic candidate read and the
+// insert, once, on the rows the insert sends.
+function clientOrderFacts(fn: ts.Node, client: string) {
+  const at = (needle: string) => treeFind(fn, needle).at;
+  const pos = {
+    batchKeep: at("batch.keep(row.description)"),
+    emptyReturn: at("rows.length === 0"),
+    assign: at(`await assignItemClients(${client}, rows)`),
+    candidates: at(`loadSemanticCandidates(${client})`),
+    insert: at(`${client}.from("action_items").insert(rows)`),
+  };
+  return {
+    missing: Object.entries(pos).filter(([, v]) => v < 0).map(([k]) => k),
+    ordered: pos.batchKeep < pos.emptyReturn && pos.emptyReturn < pos.assign && pos.assign < pos.candidates &&
+      pos.candidates < pos.insert,
+    calls: callsTo(fn, "assignItemClients").length,
+  };
+}
+
+Deno.test("mirror 5.3: both copies assign client identity to the final rows after the batch dedup and before the insert", () => {
+  const facts = [
+    ["shared", sharedFn(), "db"],
+    ["ingest", ingestFn(), "supabase"],
+  ].map(([label, fn, client]) => {
+    const f = clientOrderFacts(fn as ts.FunctionDeclaration, client as string);
+    setup(f.missing.length === 0, `${label}: the 5.3 sites are found: missing ${f.missing}`);
+    return { label, ordered: f.ordered, calls: f.calls };
+  });
+  claim(
+    "client-order",
+    facts,
+    [
+      { label: "shared", ordered: true, calls: 1 },
+      { label: "ingest", ordered: true, calls: 1 },
+    ],
+    "batch keep < empty-batch return < assignItemClients(client, rows) < candidate read < insert, once, in both copies",
+  );
+});
+
+// Loop-closing Task 5.3 (Codex review 1 of PR 38, finding 9): the order test
+// above sees a call to assignItemClients, not the function it reaches. Both
+// capture files must import assignItemClients and retryWithoutMissingClients,
+// unaliased, from the ONE module _shared/item-client.ts, and declare neither
+// name themselves, so the two copies cannot reach two different resolvers.
+const CLIENT_HELPERS = ["assignItemClients", "retryWithoutMissingClients"];
+function clientHelperBindings(rel: string): Array<[string, string, string]> {
+  const sf = parseTs(read(rel), rel);
+  const out: Array<[string, string, string]> = [];
+  for (const st of sf.statements) {
+    if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier) && st.importClause) {
+      const target = new URL(st.moduleSpecifier.text, new URL(rel, ROOT)).pathname.slice(ROOT.pathname.length);
+      const nb = st.importClause.namedBindings;
+      if (st.importClause.name && CLIENT_HELPERS.includes(st.importClause.name.text)) out.push([st.importClause.name.text, target, "default"]);
+      if (nb && ts.isNamespaceImport(nb) && target.endsWith("/item-client.ts")) out.push([`* as ${nb.name.text}`, target, "namespace"]);
+      if (nb && ts.isNamedImports(nb)) {
+        for (const el of nb.elements) {
+          if (CLIENT_HELPERS.includes(el.name.text) || CLIENT_HELPERS.includes(el.propertyName?.text ?? "")) {
+            out.push([el.name.text, target, el.propertyName?.text ?? el.name.text]);
+          }
+        }
+      }
+    }
+  }
+  for (const n of findAll(sf, (x) => ts.isFunctionDeclaration(x) || ts.isVariableDeclaration(x) || ts.isClassDeclaration(x))) {
+    const name = (n as ts.FunctionDeclaration).name;
+    if (name && ts.isIdentifier(name) && CLIENT_HELPERS.includes(name.text)) out.push([name.text, rel, "declared here"]);
+  }
+  return out.filter(([local, , imported]) => CLIENT_HELPERS.includes(local) || CLIENT_HELPERS.includes(imported) || local.startsWith("* as"))
+    .sort();
+}
+
+Deno.test("mirror 5.3: both capture files import the client helpers, unaliased, from _shared/item-client.ts and declare neither", () => {
+  const want = CLIENT_HELPERS.map((n) => [n, "supabase/functions/_shared/item-client.ts", n]).sort();
+  claim(
+    "client-import-pinned",
+    { shared: clientHelperBindings(SHARED), ingest: clientHelperBindings(INGEST) },
+    { shared: want, ingest: want },
+    "one module, one export per name, no alias, no local declaration, in both capture files",
   );
 });
 

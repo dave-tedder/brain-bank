@@ -43,6 +43,7 @@ import {
   recordBatchDuplicates,
 } from "./dedup.ts";
 import { LOG_TRUNC, normalizeActionText } from "./capture-helpers.ts";
+import { assignItemClients, retryWithoutMissingClients } from "./item-client.ts";
 
 export { normalizeActionText };
 
@@ -255,11 +256,20 @@ export async function extractAndStoreActionItems(
     .filter((row) => batch.keep(row.description));
 
   if (rows.length === 0) return;
+  // Client identity per item (Task 5.3): client_id is set only when the
+  // item's own text names exactly one client (_shared/item-client.ts).
+  await assignItemClients(db, rows);
   // Semantic dedup candidates (Task 5.2), read BEFORE the insert so each is
   // older than every row this batch inserts. Never throws.
   const recent = await loadSemanticCandidates(db);
-  const { data: inserted, error } = await db.from("action_items").insert(rows)
-    .select("id, description");
+  // Task 5.3: a client deleted between assignment and this insert fails the
+  // whole insert on the foreign key; it is retried once without the ids that
+  // no longer exist, so the batch is never lost (_shared/item-client.ts).
+  const { data: inserted, error } = await retryWithoutMissingClients(
+    db,
+    rows,
+    () => db.from("action_items").insert(rows).select("id, description"),
+  );
   if (error) {
     console.error("Action item insert error:", error);
     return;

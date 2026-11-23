@@ -30,6 +30,7 @@ import {
   renderFragmentProposals,
 } from "./fragment-proposals.ts";
 import { type DedupProposalRow, renderDedupProposals } from "./dedup-proposals.ts";
+import { type CalendarProposalRow, renderCalendarProposals } from "./calendar-proposals.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
@@ -219,6 +220,10 @@ async function synthesizeDigest(
   // fragment section. Reads the RPC from 20261120c; until that is applied the
   // section reads unavailable. Omitted when nothing is pending.
   const dedupSection = await loadDedupProposals();
+  // Loop-closing Task 5.3: pending booking proposals, after the dedup
+  // section. Reads the RPC from 20261121b; until that is applied the section
+  // reads unavailable. Omitted when nothing is pending.
+  const calendarSection = await loadCalendarProposals();
 
   const structuredLines = [
     `Open action item count: ${openActionTotal}`,
@@ -365,7 +370,7 @@ Neither of those is today. Today is the one appointment, then clear.
 
   const synthesized = (data.choices?.[0]?.message?.content ?? "").trim();
   const checklist = buildOpenActionChecklist(openActionsInput);
-  return [synthesized, checklist, deskLine, archiveSection, recheckSection, fragmentSection, dedupSection].filter(Boolean).join("\n\n");
+  return [synthesized, checklist, deskLine, archiveSection, recheckSection, fragmentSection, dedupSection, calendarSection].filter(Boolean).join("\n\n");
 }
 
 // Every failure is non-fatal and visible: buildOpenActionChecklist prints what
@@ -508,6 +513,18 @@ async function loadDedupProposals(): Promise<string> {
     console.error("dedup proposals read failed (non-fatal):", err);
   }
   return renderDedupProposals(rows);
+}
+
+async function loadCalendarProposals(): Promise<string> {
+  let rows: CalendarProposalRow[] | null = null;
+  try {
+    const { data, error } = await supabase.rpc("calendar_pending_proposals", { p_limit: 200 });
+    if (error) console.error("calendar proposals read failed (non-fatal):", error);
+    else rows = (data ?? []) as CalendarProposalRow[];
+  } catch (err) {
+    console.error("calendar proposals read failed (non-fatal):", err);
+  }
+  return renderCalendarProposals(rows);
 }
 
 async function loadDeskLine(): Promise<string> {

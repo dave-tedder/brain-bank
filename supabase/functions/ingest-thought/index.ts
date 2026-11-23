@@ -43,6 +43,10 @@ import {
   proposeSemanticDuplicates,
   recordBatchDuplicates,
 } from "../_shared/dedup.ts";
+import {
+  assignItemClients,
+  retryWithoutMissingClients,
+} from "../_shared/item-client.ts";
 import { transitionActionItem } from "../_shared/action-item-transition.ts";
 import {
   parseReviewCommand,
@@ -451,12 +455,21 @@ async function extractAndStoreActionItems(
     .filter((row) => batch.keep(row.description));
 
   if (rows.length === 0) return;
+  // Client identity per item (Task 5.3): client_id is set only when the
+  // item's own text names exactly one client (_shared/item-client.ts).
+  await assignItemClients(supabase, rows);
   // Semantic dedup candidates (Task 5.2), read BEFORE the insert so each is
   // older than every row this batch inserts. Never throws.
   const recent = await loadSemanticCandidates(supabase);
 
-  const { data: inserted, error } = await supabase.from("action_items").insert(rows)
-    .select("id, description");
+  // Task 5.3: a client deleted between assignment and this insert fails the
+  // whole insert on the foreign key; it is retried once without the ids that
+  // no longer exist, so the batch is never lost (_shared/item-client.ts).
+  const { data: inserted, error } = await retryWithoutMissingClients(
+    supabase,
+    rows,
+    () => supabase.from("action_items").insert(rows).select("id, description"),
+  );
   if (error) {
     console.error("Action item insert error:", error);
     return;

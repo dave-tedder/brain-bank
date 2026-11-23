@@ -170,6 +170,12 @@ const db = {
   },
   rpc(fn: string, args: Record<string, unknown>) {
     rpcCalls.push(fn);
+    // Task 5.3 (correction 3): the capture path reads the client roster
+    // through client_roster. This harness has no clients table (client
+    // identity is not under test here), so the read answers an error without
+    // sending SQL, and assignItemClients leaves every item without a client,
+    // as the earlier table read did here (it could not run on this adapter).
+    if (fn === "client_roster") return Promise.resolve({ data: null, error: { code: "42P01", message: "no clients table in the dedup harness" } });
     const named = Object.entries(args).map(([k, v]) => `${ident(k)} => ${lit(v)}`).join(", ");
     if (SCALAR_RPCS.has(fn)) {
       if (BRIDGE_INJECT === "bridge_scalar_column") {

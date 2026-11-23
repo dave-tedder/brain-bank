@@ -5,7 +5,9 @@
 //
 //   POST /external-crm-sync/upsert_client   keyed on clients.metadata.crm_id
 //   POST /external-crm-sync/upsert_event    keyed on business_events.metadata.crm_appointment_id,
-//                                          then metadata.gcal_event_id in either form
+//                                          then metadata.gcal_event_id in either form; a
+//                                          booking then PROPOSES closing the client's
+//                                          scheduling items (_shared/booking-match.ts)
 //   POST /external-crm-sync/capture_intake  a new inbound request (an intake) as a thought,
 //                                          keyed on thoughts.metadata.crm_intake_id;
 //                                          built through the shared capture pipeline
@@ -57,6 +59,7 @@ import {
   upsertClient,
   upsertEvent,
 } from "./_sync.ts";
+import { proposeBookingMatches } from "../_shared/booking-match.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
@@ -242,6 +245,15 @@ Deno.serve(async (req: Request): Promise<Response> => {
       : op === "upsert_event"
       ? await upsertEvent(store, body)
       : await captureIntake(store, pipeline, body);
+    // After a business_events insert or update, a booking proposes closing the
+    // client's scheduling items. Proposals only; never throws, and never
+    // changes the response.
+    if (
+      op === "upsert_event" && (result.status === 200 || result.status === 201) &&
+      typeof result.body.id === "string"
+    ) {
+      await proposeBookingMatches(supabase, result.body.id);
+    }
     // Log the op and outcome only. Payloads carry contact details and intake
     // text, and must never reach the function logs.
     const outcome = typeof result.body.status === "string"

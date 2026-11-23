@@ -81,7 +81,7 @@ Deno.test("fragment section: the digest reads fragment_pending_proposals and joi
   assertEquals(src.split("const fragmentSection = await loadFragmentProposals();").length - 1, 1);
   claim(
     "digest-section-joined",
-    src.includes("[synthesized, checklist, deskLine, archiveSection, recheckSection, fragmentSection, dedupSection].filter(Boolean)"),
+    src.includes("[synthesized, checklist, deskLine, archiveSection, recheckSection, fragmentSection, dedupSection, calendarSection].filter(Boolean)"),
     true,
     "the section is joined into the digest body",
   );

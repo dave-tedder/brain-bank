@@ -40,6 +40,7 @@ import {
 } from "../_shared/capture-pipeline.ts";
 import { buildRestEventUpdate } from "./_rest_event.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import { proposeBookingMatches } from "../_shared/booking-match.ts";
 import {
   type CompletionWarning,
   evaluateCompletion,
@@ -1310,6 +1311,9 @@ async function handleRestEvent(req: Request): Promise<Response> {
           .update(buildRestEventUpdate(body, existing[0].metadata))
           .eq("id", existing[0].id);
         if (error) return jsonResponse({ error: error.message }, 500);
+        // Loop-closing Task 5.3: a booking proposes closing the client's
+        // scheduling items (proposals only; never throws).
+        await proposeBookingMatches(supabase, existing[0].id);
         return jsonResponse({ status: "updated", id: existing[0].id });
       }
     }
@@ -1331,6 +1335,8 @@ async function handleRestEvent(req: Request): Promise<Response> {
     if (error || !inserted) {
       return jsonResponse({ error: error?.message || "unknown error" }, 500);
     }
+    // Loop-closing Task 5.3, as on the update path above.
+    await proposeBookingMatches(supabase, inserted.id);
     return jsonResponse({ status: "created", id: inserted.id });
   } catch (err: unknown) {
     return jsonResponse({ error: (err as Error).message }, 500);

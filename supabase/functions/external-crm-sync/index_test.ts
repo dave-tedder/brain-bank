@@ -45,6 +45,10 @@ import {
   routeProjectFromContent,
 } from "../_shared/metadata-validation.ts";
 import { authenticatePushKey } from "./_auth.ts";
+import { proposeBookingMatches } from "../_shared/booking-match.ts";
+import { FakeDb } from "../../../scripts/loop-closing/client-identity-fake.ts";
+// Runtime-bound claims for the TS mutant sweep (Codex re-review 2, N1).
+import { claim } from "../../../scripts/loop-closing/claim.ts";
 import {
   captureIntake,
   SYNC,
@@ -285,4 +289,152 @@ Deno.test("external-crm-sync capture_intake: control, the pushed record is extra
   const rows = writes[0].rows as Array<Record<string, unknown>>;
   assertEquals(rows.map((r) => r.description), MODEL_METADATA.action_items);
   assert(rows.every((r) => r.source_thought_id === THOUGHT_ID && r.status === "open"));
+});
+
+// ---------------------------------------------------------------------------
+// Loop-closing Task 5.3: an upsert_event push PROPOSES closing the client's
+// scheduling items, through the same cut-out Deno.serve callback, the real
+// upsertEvent and SupabaseSyncStore, and the real proposeBookingMatches, over
+// an in-memory database (scripts/loop-closing/client-identity-fake.ts) whose
+// sync_booking_proposals re-states 20261121b's (support, same-booking skip,
+// record_decisions and the calendar lifetime unique). The session date is
+// far in the future so the real clock the handler uses always reads it as
+// upcoming.
+// ---------------------------------------------------------------------------
+
+const CB_ALICIA = "a11c1a00-0000-4000-8000-0000000000c1";
+const CB_APPT = "appt-5-3-0001";
+const SCHED_ITEM = "5c4ed000-0000-4000-8000-0000000000c1";
+
+function bookingDb() {
+  return new FakeDb({
+    clients: [{ id: CB_ALICIA, name: "Alicia Brennan", last_contact: "2026-11-01T00:00:00Z", metadata: { crm_id: "cb-alicia" } }],
+    action_items: [
+      { id: SCHED_ITEM, description: "Schedule tattoo appointment for Alicia Brennan", status: "open", client_id: CB_ALICIA, created_at: "2026-11-20T14:00:00Z" },
+      { id: "5c4ed000-0000-4000-8000-0000000000c2", description: "send Alicia the design", status: "open", client_id: CB_ALICIA, created_at: "2026-11-20T14:00:00Z" },
+    ],
+  });
+}
+
+async function push(db: FakeDb, op: string, payload: Record<string, unknown>) {
+  const env: Record<string, unknown> = {
+    supabase: db,
+    authenticatePushKey: (headers: Headers) => authenticatePushKey(headers, PUSH_KEY),
+    captureIntake,
+    contentHash,
+    coerceMetadata,
+    routeProjectFromContent,
+    SYNC,
+    UniqueViolation,
+    upsertClient,
+    upsertEvent,
+    proposeBookingMatches,
+    getEmbedding: () => Promise.resolve([0.25, 0.5]),
+    extractMetadata: () => Promise.resolve(structuredClone(MODEL_METADATA)),
+    loadKnownSlugs: () => Promise.resolve(new Set<string>()),
+    loadRouteMap: () => Promise.resolve(new Map<string, string[]>()),
+  };
+  const { makeHandler } = await importTs(
+    `export function makeHandler(env: any) {\n  const { ${
+      Object.keys(env).join(", ")
+    } } = env;\n  const registered: Array<(req: Request) => Promise<Response>> = [];\n  const Deno = { serve(h: (req: Request) => Promise<Response>) { registered.push(h); } };\n${BODY_SRC}\n  if (registered.length !== 1) throw new Error("Deno.serve callbacks in index.ts: " + registered.length);\n  return registered[0];\n}\n`,
+  );
+  const handler = makeHandler(env) as (req: Request) => Promise<Response>;
+  const errors: string[] = [];
+  const realError = console.error;
+  const realLog = console.log;
+  console.error = (...a: unknown[]) => errors.push(a.map(String).join(" "));
+  console.log = () => {};
+  try {
+    const response = await handler(
+      new Request(`https://synthetic.invalid/functions/v1/external-crm-sync/${op}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-push-key": PUSH_KEY },
+        body: JSON.stringify(payload),
+      }),
+    );
+    return { status: response.status, body: await response.json(), errors };
+  } finally {
+    console.error = realError;
+    console.log = realLog;
+  }
+}
+
+const sessionPush = (over: Record<string, unknown> = {}) => ({
+  crm_appointment_id: CB_APPT,
+  crm_client_id: "cb-alicia",
+  event_type: "tattoo_session",
+  title: "Tattoo session: Alicia Brennan",
+  date_start: "2099-01-16",
+  status: "scheduled",
+  ...over,
+});
+const calendarOf = (db: FakeDb) =>
+  db.tables.auto_resolve_decisions.filter((d) => d.layer === "calendar").map((d) => ({
+    item_id: d.item_id, evidence_event_id: d.evidence_event_id, outcome: d.outcome, reason: d.reason, quote: d.quote,
+  }));
+
+Deno.test("external-crm-sync upsert_event 5.3: a pushed session proposes the client's scheduling item, and the response is unchanged", async () => {
+  const db = bookingDb();
+  const res = await push(db, "upsert_event", sessionPush());
+  assertEquals(res.status, 201);
+  assertEquals(Object.keys(res.body).sort(), ["id", "status"]);
+  assertEquals(res.body.status, "created");
+  assertEquals(res.errors, []);
+  claim(
+    "cbs-upsert-proposes",
+    calendarOf(db),
+    [{ item_id: SCHED_ITEM, evidence_event_id: res.body.id, outcome: "proposed", reason: "booking_match", quote: "Tattoo session: Alicia Brennan on 2099-01-16" }],
+    "one booking proposal on the scheduling item, naming the event the push wrote",
+  );
+  assertEquals(db.tables.action_items.map((a) => a.status), ["open", "open"], "nothing resolves");
+});
+
+Deno.test("external-crm-sync upsert_event 5.3: the same push again updates the event and never proposes twice", async () => {
+  const db = bookingDb();
+  const first = await push(db, "upsert_event", sessionPush());
+  const second = await push(db, "upsert_event", sessionPush({ title: "Tattoo session: Alicia Brennan (2)" }));
+  assertEquals([first.status, second.status], [201, 200]);
+  assertEquals(second.body, { status: "updated", id: first.body.id });
+  claim("cbs-refire-once", calendarOf(db).length, 1, "a re-fired upsert of the same event writes no second proposal");
+  assertEquals(db.rpcCalls.filter((c) => c.fn === "sync_booking_proposals").length, 2, "the matcher ran on both writes");
+});
+
+Deno.test("external-crm-sync upsert_event 5.3: a re-push for another client withdraws the support, so the proposal is no longer shown", async () => {
+  const db = bookingDb();
+  db.tables.clients.push({ id: "1a4e0000-0000-4000-8000-0000000000c9", name: "Jordan Marlow", metadata: { crm_id: "cb-jake" } });
+  await push(db, "upsert_event", sessionPush());
+  const before = db.tables.calendar_proposal_support.length;
+  await push(db, "upsert_event", sessionPush({ crm_client_id: "cb-jake", title: "Consultation: Jordan Marlow", event_type: "consultation" }));
+  claim(
+    "cbs-reassigned-withdrawn",
+    { before, after: db.tables.calendar_proposal_support.length, decisions: calendarOf(db).length },
+    { before: 1, after: 0, decisions: 1 },
+    "the reassigned booking no longer supports Alicia's item",
+  );
+});
+
+Deno.test("external-crm-sync upsert_event 5.3: a cancelled push proposes nothing", async () => {
+  const db = bookingDb();
+  const res = await push(db, "upsert_event", sessionPush({ event_type: "cancelled_session", status: "cancelled" }));
+  assertEquals(res.status, 201);
+  assertEquals(calendarOf(db), []);
+});
+
+Deno.test("external-crm-sync upsert_event 5.3: a failed proposal write is logged and the push still answers created", async () => {
+  const db = bookingDb();
+  db.failNext["rpc/sync_booking_proposals"] = [{ code: "23514", message: "check violation" }];
+  const res = await push(db, "upsert_event", sessionPush());
+  assertEquals(res.status, 201);
+  assertEquals(res.body.status, "created");
+  assertEquals(res.errors.length, 1);
+  assert(res.errors[0].startsWith("booking match: sync_booking_proposals failed"), res.errors[0]);
+});
+
+Deno.test("external-crm-sync upsert_client 5.3: a client push runs no booking match", async () => {
+  const db = bookingDb();
+  const res = await push(db, "upsert_client", { crm_id: "cb-new", name: "New Person" });
+  assert(res.status === 200 || res.status === 201, `status ${res.status}`);
+  assertEquals(db.reads.filter((r) => r.table === "business_events"), []);
+  assertEquals(db.rpcCalls, []);
 });
