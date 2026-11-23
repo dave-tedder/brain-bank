@@ -35,8 +35,9 @@
 # the one the table names, and its first FAIL/NEVER-RAN line matches the
 # table's pattern.
 #
-# Database lock: the caller (the evidence runner) takes /tmp/ob-db.lock; this
-# script never touches it. The /tmp/obrp. prefix is the one deadline.py's
+# Database lock: the caller takes the shared database lock, e.g.
+# `python3 scripts/loop-closing/db-lock.py run --label <name> -- bash <this>`;
+# this script never touches it. The /tmp/obrp. prefix is the one deadline.py's
 # reaper recognises.
 export LC_ALL=C
 set -u

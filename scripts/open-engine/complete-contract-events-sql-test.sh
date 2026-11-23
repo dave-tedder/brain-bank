@@ -22,11 +22,11 @@
 #      error that is not one of its assertions; it exited 0 without its PASSED
 #      line. Nothing was judged, so nothing was caught.
 #
-# The cluster lock: /tmp/ob-db.lock is taken with mkdir before a cluster starts
-# (waiting up to OBCE_LOCK_WAIT_MIN minutes, default 150, polling each minute)
-# and removed after, only by the run that created it. --all-mutations and
-# --inject-selftest hold it once for the whole sweep (OBCE_LOCK_HELD=1 tells
-# the per-case runs not to take it again).
+# The cluster lock: the shared database lock (scripts/loop-closing/db-lock.sh,
+# an flock the operating system frees when this run dies) is taken before a
+# cluster starts, waiting up to OB_DB_LOCK_WAIT_MIN minutes (default 150).
+# --all-mutations and --inject-selftest hold it once for the whole sweep; the
+# per-case runs see OB_DB_LOCK_HELD and use that hold instead of waiting on it.
 export LC_ALL=C
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -35,7 +35,7 @@ DEADLINE_PY="$ROOT/scripts/loop-closing/deadline.py"
 MIGRATION="$ROOT/supabase/migrations/20261121c_complete_contract_events.sql"
 METRICS="$ROOT/scripts/loop-closing/complete-contract-metrics.sql"
 TEST_SQL="$HERE/complete-contract-events-sql-test.sql"
-LOCK=/tmp/ob-db.lock
+. "$ROOT/scripts/loop-closing/db-lock.sh"
 INITDB_BIN="${OBCE_INITDB:-initdb}"
 CASE_DEADLINE="${OBCE_CASE_DEADLINE:-240}"
 INTERRUPTION_PREFIXES="08 53 54 57 58 XX 55P03"
@@ -106,20 +106,9 @@ T
 }
 
 take_lock() {
-  [ "${OBCE_LOCK_HELD:-}" = 1 ] && return 0
-  local waited=0 max=$(( ${OBCE_LOCK_WAIT_MIN:-150} ))
-  until mkdir "$LOCK" 2>/dev/null; do
-    if [ "$waited" -ge "$max" ]; then echo "NEVER-RAN: $LOCK is held by another run; waited $waited minute(s)"; exit 2; fi
-    echo "waiting for $LOCK (held by another run), minute $waited" >&2
-    sleep 60; waited=$((waited + 1))
-  done
-  printf 'complete-contract-events-sql-test pid %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK/owner"
-  LOCK_MINE=1
-  export OBCE_LOCK_HELD=1
+  ob_db_lock_acquire complete-contract-events-sql-test || { echo "NEVER-RAN: $OB_DB_LOCK_ERROR"; exit 2; }
 }
-release_lock() {
-  if [ "${LOCK_MINE:-0}" = 1 ]; then rm -f "$LOCK/owner"; rmdir "$LOCK" 2>/dev/null; LOCK_MINE=0; fi
-}
+release_lock() { ob_db_lock_release; }
 
 case "${1:-}" in
   --all-mutations)

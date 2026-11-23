@@ -8,8 +8,8 @@
 # head). The witness and its psql adapter are copied from THIS checkout into
 # <tree>/scripts/loop-closing/, so both heads run the same scenarios through
 # their own code. Prints the witness's W<n> lines. Exit 0
-# when WITNESS COMPLETE, 2 otherwise (NEVER-RAN). The caller holds
-# /tmp/ob-db.lock.
+# when WITNESS COMPLETE, 2 otherwise (NEVER-RAN). The caller holds the shared
+# database lock (scripts/loop-closing/db-lock.py run ... -- bash <this> <tree>).
 export LC_ALL=C
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
