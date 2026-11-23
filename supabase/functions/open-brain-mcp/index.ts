@@ -48,6 +48,14 @@ import {
   type RouteSnapshotRow,
 } from "./_complete_contract.ts";
 import {
+  COMPLETE_CONTRACT_EVENTS_TABLE,
+  type ContractEventRow,
+  describeError,
+  refusalEventRow,
+  warningEventRow,
+  writeContractEvent,
+} from "./_complete_contract_events.ts";
+import {
   ACTION_ITEM_LIST_MAX,
   actionItemListWindow,
   assertRestoreSelector,
@@ -775,6 +783,32 @@ async function loadRouteSnapshot(slug: string): Promise<RouteLookup> {
   }
 }
 
+// Task 5.4 measure (PR 32 decision 7): one complete_contract_events row per
+// "[complete-contract]" log line. Best-effort and off the critical path: the
+// writer never rejects, waitUntil keeps the insert alive after the answer is
+// sent, and everything here (building the row, starting the write, scheduling
+// it, formatting and logging a failure) sits inside one guard, so nothing about
+// the event write can change the tool's answer or block a completion. The row
+// is built here, at the emission site, so its occurred_at is the moment of the
+// log line, not of the later insert.
+function recordCompleteContractEvent(build: () => ContractEventRow): void {
+  try {
+    const write = writeContractEvent(
+      (r) => supabase.from(COMPLETE_CONTRACT_EVENTS_TABLE).insert(r),
+      build(),
+    );
+    EdgeRuntime.waitUntil(write);
+  } catch (err: unknown) {
+    try {
+      console.error(
+        `[complete-contract] event write not scheduled: ${describeError(err)}`,
+      );
+    } catch {
+      // telemetry about telemetry: nothing more to do, and nothing may escape
+    }
+  }
+}
+
 async function moveAgentTaskViaTool(args: {
   taskId: string;
   agentCode: string;
@@ -810,6 +844,9 @@ async function moveAgentTaskViaTool(args: {
   // same AGENT DONE event the closeout controller reads, so it is checked too.
   let warnings: CompletionWarning[] = [];
   if (args.action === "complete" || args.action === "request-review") {
+    // Narrowed here; the event-row builders below run in closures, where
+    // TypeScript would forget the narrowing of args.action.
+    const contractAction = args.action;
     const slug = typeof task.project_slug === "string"
       ? task.project_slug.trim()
       : "";
@@ -831,12 +868,32 @@ async function moveAgentTaskViaTool(args: {
           verdict.reasons.join(",")
         }`,
       );
+      recordCompleteContractEvent(() =>
+        refusalEventRow({
+          action: contractAction,
+          taskId: args.taskId,
+          agentCode: args.agentCode,
+          slug,
+          reasons: verdict.reasons,
+          occurredAt: new Date(),
+        })
+      );
       throw new Error(verdict.message);
     }
     warnings = verdict.warnings;
     for (const w of warnings) {
       console.log(
         `[complete-contract] ${w.code} task=${args.taskId} action=${args.action} slug=${slug}`,
+      );
+      recordCompleteContractEvent(() =>
+        warningEventRow({
+          action: contractAction,
+          taskId: args.taskId,
+          agentCode: args.agentCode,
+          slug,
+          code: w.code,
+          occurredAt: new Date(),
+        })
       );
     }
   }
