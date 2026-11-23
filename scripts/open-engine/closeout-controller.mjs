@@ -17,7 +17,45 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+// Loop-closing Task 5.4: the receipt contract lives in one module that both this
+// controller and complete_agent_task (open-brain-mcp, Deno) import, so a receipt
+// the Edge Function accepts at complete time is judged by the same code here.
+//
+// Loaded by a path built from this file's REAL location, not by a static
+// relative specifier: under --preserve-symlinks-main (pinned by the entrypoint
+// symlink test) import.meta.url names the symlink, and "../../supabase/..."
+// resolved from a symlink's directory points nowhere, so a static import fails
+// the launch before main() runs.
+const RECEIPT_SHAPE = await import(
+  pathToFileURL(
+    join(
+      dirname(realpathSync(fileURLToPath(import.meta.url))),
+      "..",
+      "..",
+      "supabase",
+      "functions",
+      "_shared",
+      "receipt-shape.js",
+    ),
+  ).href
+);
+const {
+  evaluateReceiptContract,
+  holdMessage,
+  parseOperatorAction,
+  referenceDeliverables,
+  REQUIRED_RECEIPT_SECTIONS,
+  routeCapabilities,
+  routeCapabilityReasons,
+} = RECEIPT_SHAPE;
+export const {
+  isSafeOperatorTarget,
+  parseReceipt,
+  REASON_ALIASES,
+  receiptNamesDeliverable,
+} = RECEIPT_SHAPE;
+export { parseOperatorAction, REQUIRED_RECEIPT_SECTIONS };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REGISTRY_PATH = join(__dirname, "project-closeout-registry.json");
@@ -32,17 +70,6 @@ const DEFAULT_DRAFTS_DIR = join(
 );
 const DEFAULT_JOURNAL_DIR = join(DEFAULT_DRAFTS_DIR, "journal");
 const FETCH_TIMEOUT_MS = 60_000;
-
-const REQUIRED_RECEIPT_SECTIONS = [
-  "Work summary",
-  "Verification",
-  "Touched files or records",
-  "Limitations",
-  "Tracker draft",
-  "Session-log draft",
-  "Brain Bank capture draft",
-  "Follow-up recommendation",
-];
 
 const SAFE_STATUSES = new Set(["Agent Review"]);
 const SAFE_RISKS = new Set(["low"]);
@@ -666,18 +693,11 @@ function evaluateTask(task, registry, actionItems, options = {}) {
   if (!route) {
     reasons.push("UNKNOWN_PROJECT_ROUTE");
   } else {
-    for (
-      const [field, path] of Object.entries({
-        workspace_path: route.workspace_path,
-        tracker_path: route.tracker_path,
-        session_log_path: route.session_log_path,
-      })
-    ) {
-      if (!path || !existsSync(path)) {
-        reasons.push(`UNRESOLVED_${field.toUpperCase()}`);
-      }
-    }
-    if (!route.capture_tag) reasons.push("MISSING_CAPTURE_TAG");
+    // The same four capabilities publish-route-snapshot.mjs stores in
+    // closeout_routes for complete_agent_task, in the same order:
+    // UNRESOLVED_WORKSPACE_PATH, UNRESOLVED_TRACKER_PATH,
+    // UNRESOLVED_SESSION_LOG_PATH, MISSING_CAPTURE_TAG.
+    reasons.push(...routeCapabilityReasons(routeCapabilities(route, existsSync)));
   }
 
   const doneEvents = task.events.filter((event) =>
@@ -707,79 +727,19 @@ function evaluateTask(task, registry, actionItems, options = {}) {
     if (hasNewerOpsAmend) reasons.push("OPS_AMEND_NEWER_THAN_DONE");
   }
   const receiptText = latestDoneEvent ? receiptFromEvent(latestDoneEvent) : "";
-  const receipt = parseReceipt(receiptText);
-  reasons.push(...receipt.reasons);
-
-  // Review-note augmentation path: a human review note stored on the task row
-  // (agent_tasks.review_reason) may supply sections the AGENT DONE receipt is
-  // missing. Only missing sections are taken from it — the immutable AGENT DONE
-  // event stays authoritative for every section it already carries, and the
-  // 8-section gate itself is unchanged: all 8 must be present somewhere.
-  const augmentation = augmentFromReviewNote(receipt, task.review_reason);
-  reasons.push(...augmentation.reasons);
-  if (augmentation.missing.length > 0) reasons.push("RECEIPT_MISSING_SECTION");
-  const followUpHeading = canonicalHeading("Follow-up recommendation");
-  const operator = parseOperatorAction(augmentation.sections[followUpHeading]);
-  reasons.push(...operator.reasons);
-  // A marker outside Follow-up recommendation holds the task instead of
-  // silently closing it to Agent Done — the operator step must never be lost
-  // to a placement mistake (Fix Session A decision, 2026-07-10).
-  const markerSources = [receiptText];
-  if (augmentation.augmented.length > 0) {
-    markerSources.push(String(task.review_reason || ""));
-  }
-  const totalMarkers = markerSources.reduce(
-    (count, text) => count + countOperatorMarkers(text),
-    0,
-  );
-  if (
-    totalMarkers > countOperatorMarkers(augmentation.sections[followUpHeading])
-  ) {
-    reasons.push("OPERATOR_MARKER_OUTSIDE_FOLLOW_UP");
-  }
-
-  // Operator-install gate (Session 344): the write-safe policy means an executor
-  // never installs its own output — it stages a file under deliverables/ that a
-  // human must move. Applying such a task with no operator step recorded closes
-  // it to Agent Done while the staged file sits uninstalled and untracked (the
-  // Session 343 strand). Evidence of a staged deliverable therefore makes the
-  // operator marker mandatory. Fails closed: a HOLD is recoverable, a strand is
-  // invisible.
-  const stagedDeliverable = markerSources.some(receiptNamesDeliverable);
-  if (stagedDeliverable && !operator.operator) {
-    reasons.push("DELIVERABLE_WITHOUT_OPERATOR_ACTION");
-  }
-  if (operator.operator?.reference_only) {
-    const scope = String(task.desired_outcome || task.title || "").trim();
-    if (!/^(A|An) (report|research|verification|recommendation|specification|brief|reference|summary|audit|plan)\b/i.test(scope)) {
-      reasons.push("REFERENCE_ONLY_SCOPE_MISMATCH");
-    }
-    if (markerSources.some((text) => referenceDeliverables(text).some(
-      (path) => /\.(php|js|mjs|ts|sql|html|css|json)$/i.test(path),
-    ))) {
-      reasons.push("REFERENCE_ONLY_ON_INSTALLABLE");
-    }
-  }
-
-  // A marker appended mid-line to a prose sentence ("...decide first.
-  // OPERATOR-ACTION: call the vendor ...") is invisible to the line-anchored
-  // parser, so the task applies with its operator step silently dropped. The
-  // parser stays strict (the anchor is what makes marker injection detectable);
-  // the malformed marker becomes a visible HOLD instead of a silent loss.
-  //
-  // The scan also runs when the anchored marker is the reference-only form:
-  // that marker closes the card to Agent Done, so a mid-line install marker
-  // beside it would be the one receipt shape where the install step is lost
-  // with zero human contact.
-  if (
-    (!operator.operator || operator.operator.reference_only) &&
-    String(augmentation.sections[followUpHeading] || "").split(/\r?\n/).some(
-      (line) => /OPERATOR-ACTION:\s*\S/i.test(line) &&
-        !/^\s*OPERATOR-ACTION:/i.test(line),
-    )
-  ) {
-    reasons.push("OPERATOR_MARKER_NOT_LINE_ANCHORED");
-  }
+  // The static receipt contract (headings, operator marker, staged-deliverable
+  // gate, reference-only guards, line anchoring) is shared with
+  // complete_agent_task; see supabase/functions/_shared/receipt-shape.js for
+  // the reasoning behind each gate. Reasons come back in the order this
+  // function has always pushed them.
+  const contract = evaluateReceiptContract({
+    receiptText,
+    reviewReason: task.review_reason,
+    desiredOutcome: task.desired_outcome,
+    title: task.title,
+  });
+  reasons.push(...contract.reasons);
+  const { augmentation, operator, stagedDeliverable } = contract;
 
   // Plan-doc reconciliation gate (Session 335): a task seeded directly from a
   // project plan doc carries a `plan-doc: <path>` source entry. Applying it
@@ -882,31 +842,6 @@ function evaluateTask(task, registry, actionItems, options = {}) {
       },
     },
   };
-}
-
-function augmentFromReviewNote(receipt, reviewReason) {
-  const sections = { ...receipt.sections };
-  const augmented = [];
-  const reasons = [...(receipt.reasons || [])];
-  const note = typeof reviewReason === "string" ? reviewReason : "";
-
-  if (receipt.missing.length > 0 && note.trim()) {
-    const noteReceipt = parseReceipt(note);
-    reasons.push(...noteReceipt.reasons);
-    const noteSections = noteReceipt.sections;
-    for (const heading of receipt.missing) {
-      const candidate = String(noteSections[heading] || "").trim();
-      if (candidate) {
-        sections[heading] = candidate;
-        augmented.push(heading);
-      }
-    }
-  }
-
-  const missing = REQUIRED_RECEIPT_SECTIONS
-    .map(canonicalHeading)
-    .filter((heading) => !String(sections[heading] || "").trim());
-  return { sections, missing, augmented, reasons: [...new Set(reasons)] };
 }
 
 // --- Plan-doc reconciliation (Session 335) ------------------------------
@@ -1057,16 +992,6 @@ export function extractOperatorAction(followUpText) {
   return parseOperatorAction(followUpText).operator;
 }
 
-// A named file under deliverables/ is the receipt's own evidence that the run
-// staged a file it did not install. A bare "deliverables/" mention in prose is
-// not: only a path with a file extension counts, so a receipt that says nothing
-// was written outside deliverables/ stays clean.
-const DELIVERABLE_PATH = /(?:^|[\s`"'(<[])deliverables\/[A-Za-z0-9._/-]+\.[A-Za-z0-9]{1,8}\b/;
-
-export function receiptNamesDeliverable(text) {
-  return DELIVERABLE_PATH.test(String(text || ""));
-}
-
 // OE-13 Sub-phase B — pure parsers + predicates (spec §3/§8). No side effects,
 // never throw: evaluate() must classify, not crash.
 
@@ -1200,111 +1125,6 @@ export function applyReviewArgs(item) {
   };
 }
 
-function referenceDeliverables(text) {
-  return [...String(text || "").matchAll(/deliverables\/[A-Za-z0-9._/-]+\.[A-Za-z0-9]{1,8}\b/g)].map((m) => m[0]);
-}
-
-function parseOperatorAction(followUpText) {
-  // Explicit marker only — never fuzzy NLP. Line form:
-  //   OPERATOR-ACTION: <step> || OPERATOR-TARGET: <url-or-path>
-  // OPERATOR-TARGET (and the ||) are optional.
-  const lines = String(followUpText || "")
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => /^OPERATOR-ACTION:/i.test(l));
-  if (lines.length === 0) return { operator: null, reasons: [] };
-  if (lines.length > 1) {
-    return { operator: null, reasons: ["OPERATOR_MARKER_COUNT"] };
-  }
-  const line = lines[0];
-  if (!line) return { operator: null, reasons: [] };
-  const body = line.replace(/^OPERATOR-ACTION:/i, "").trim();
-  if (/^none \(reference only\)$/i.test(body)) {
-    return { operator: { operator_action: "none", reference_only: true }, reasons: [] };
-  }
-  // A near miss of the reference-only form ("none (reference only).",
-  // "none(reference only)", "none (reference-only)", or the exact form with a
-  // "|| OPERATOR-TARGET:" suffix) must not fall through to the ordinary parser:
-  // it would route to Needs Operator with the literal step "none (reference
-  // only)." and skip both reference-only guards. Hold it as a format error.
-  if (/^none\b/i.test(body) && /reference/i.test(body)) {
-    return { operator: null, reasons: ["REFERENCE_ONLY_MARKER_FORMAT"] };
-  }
-  const parts = body.split(/\s*\|\|\s*/);
-  if (parts.length > 2) {
-    return { operator: null, reasons: ["OPERATOR_MARKER_FORMAT"] };
-  }
-  const [actionPart, targetPart] = parts;
-  const operator_action = actionPart.trim();
-  if (!operator_action) {
-    // A bare "OPERATOR-ACTION:" with nothing after it is treated as no marker
-    // (unchanged). But an anchored line whose action is empty while something
-    // else follows the label ("OPERATOR-ACTION: || OPERATOR-TARGET: <url>")
-    // is a marker the author meant to write, so it must HOLD rather than apply
-    // with the target silently dropped. Before the line-anchored check was
-    // narrowed, this case was held (under the wrong reason); keep it held.
-    if (body) return { operator: null, reasons: ["OPERATOR_ACTION_EMPTY"] };
-    return { operator: null, reasons: [] };
-  }
-  let operator_target = null;
-  if (targetPart) {
-    if (!/^OPERATOR-TARGET:/i.test(targetPart.trim())) {
-      return { operator: null, reasons: ["OPERATOR_TARGET_LABEL_MISSING"] };
-    }
-    operator_target = targetPart.replace(/^OPERATOR-TARGET:/i, "").trim() ||
-      null;
-    if (operator_target && !isAllowedOperatorTarget(operator_target)) {
-      return { operator: null, reasons: ["OPERATOR_TARGET_UNSAFE_SCHEME"] };
-    }
-  }
-  return { operator: { operator_action, operator_target }, reasons: [] };
-}
-
-export function parseReceipt(text) {
-  const sections = {};
-  const seen = new Set();
-  const reasons = [];
-  if (String(text || "").includes("<!-- open-engine closeout")) {
-    reasons.push("RECEIPT_MARKER_INJECTION");
-  }
-  // A heading may carry its content inline after the colon ("Limitations: none
-  // beyond ...") — real receipts write both forms. The line-start anchor is
-  // load-bearing: mid-sentence "Verification:" in prose must not open a section.
-  const headingPattern = new RegExp(
-    `^(${REQUIRED_RECEIPT_SECTIONS.map(escapeRegExp).join("|")}):\\s*(.*)$`,
-    "i",
-  );
-  let current = null;
-
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const match = line.match(headingPattern);
-    if (match) {
-      current = canonicalHeading(match[1]);
-      if (seen.has(current)) reasons.push("RECEIPT_DUPLICATE_HEADING");
-      seen.add(current);
-      sections[current] = match[2].trim();
-      continue;
-    }
-    if (current) {
-      sections[current] = `${sections[current]}${
-        sections[current] ? "\n" : ""
-      }${line}`;
-    }
-  }
-
-  for (const heading of REQUIRED_RECEIPT_SECTIONS) {
-    const canonical = canonicalHeading(heading);
-    if (sections[canonical] !== undefined) {
-      sections[canonical] = sections[canonical].trim();
-    }
-  }
-
-  const missing = REQUIRED_RECEIPT_SECTIONS
-    .map(canonicalHeading)
-    .filter((heading) => !String(sections[heading] || "").trim());
-  return { sections, missing, reasons: [...new Set(reasons)] };
-}
-
 function latestEvent(events) {
   if (!Array.isArray(events) || events.length === 0) return null;
   return [...events].sort((a, b) =>
@@ -1312,114 +1132,8 @@ function latestEvent(events) {
   )[0];
 }
 
-function countOperatorMarkers(text) {
-  return String(text || "")
-    .split(/\r?\n/)
-    .filter((line) => /^OPERATOR-ACTION:/i.test(line.trim()))
-    .length;
-}
-
-function isAllowedOperatorTarget(value) {
-  const target = String(value || "").trim();
-  if (!target) return true;
-  if (/^https?:\/\//i.test(target)) return true;
-  // Protocol-relative //host resolves to an external host in a browser, so it
-  // must be rejected before the absolute-path branch can accept it.
-  if (/^\/\//.test(target)) return false;
-  if (/^\/[^\0]+/.test(target)) return true;
-  if (
-    /^[A-Za-z0-9._/-]+$/.test(target) && !/^[a-z][a-z0-9+.-]*:/i.test(target)
-  ) return true;
-  return false;
-}
-
-function canonicalHeading(value) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-}
-
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function holdMessage(reasons, receipt) {
-  if (reasons.includes("RECEIPT_MARKER_INJECTION")) {
-    return "Receipt contains an open-engine closeout marker; held to prevent marker injection.";
-  }
-  if (reasons.includes("RECEIPT_DUPLICATE_HEADING")) {
-    return "Receipt contains duplicate canonical headings; held to prevent section overwrite.";
-  }
-  if (reasons.includes("OPERATOR_MARKER_OUTSIDE_FOLLOW_UP")) {
-    return "Receipt carries an OPERATOR-ACTION marker outside the Follow-up recommendation section; held so the operator step is not silently dropped. Move the marker into Follow-up recommendation and re-run.";
-  }
-  if (reasons.includes("OPERATOR_MARKER_NOT_LINE_ANCHORED")) {
-    return "Receipt's Follow-up recommendation contains an OPERATOR-ACTION marker that is not on its own line (it is appended to a prose sentence), so the parser cannot read it; held so the operator step is not silently dropped. Put the marker on its own line and re-run.";
-  }
-  if (reasons.includes("OPERATOR_ACTION_EMPTY")) {
-    return "Receipt's OPERATOR-ACTION marker has no action text before the '||' separator, so the operator step cannot be read; held so it is not silently dropped. Write the step after 'OPERATOR-ACTION:' and re-run.";
-  }
-  if (reasons.includes("OPERATOR_TARGET_UNSAFE_SCHEME")) {
-    return "OPERATOR-TARGET must be a plain http(s) URL or filesystem path, not a description. Put descriptive text in OPERATOR-ACTION and re-run; the task remains held.";
-  }
-  if (reasons.includes("REFERENCE_ONLY_MARKER_FORMAT")) {
-    return "Receipt's OPERATOR-ACTION marker is a near miss of the reference-only form; held so it is not applied as a literal operator step. The only accepted spelling is exactly 'OPERATOR-ACTION: none (reference only)' on its own line with nothing after it (no period, no || OPERATOR-TARGET). Fix the marker, or replace it with a real install step, and re-run.";
-  }
-  if (reasons.includes("REFERENCE_ONLY_SCOPE_MISMATCH")) {
-    return "Receipt says 'none (reference only)' but the packet's accepted scope (desired_outcome, or title when that is empty) does not begin 'A' or 'An' followed by report, research, verification, recommendation, specification, brief, reference, summary, audit or plan; held. Either the output is really a report and the packet scope needs correcting through admin_amend_agent_task, or it is not and the receipt needs a real 'OPERATOR-ACTION: install <path> || OPERATOR-TARGET: <where>' step. Do NOT apply this by hand with apply_agent_task_review.";
-  }
-  if (reasons.includes("REFERENCE_ONLY_ON_INSTALLABLE")) {
-    return "Receipt says 'none (reference only)' but names a staged php/js/mjs/ts/sql/html/css/json file under deliverables/; a file with an installable extension is never reference-only. Held. Replace the marker with 'OPERATOR-ACTION: install <path> || OPERATOR-TARGET: <where>' and re-run. Do NOT apply this by hand with apply_agent_task_review.";
-  }
-  if (reasons.includes("DELIVERABLE_WITHOUT_OPERATOR_ACTION")) {
-    return "Receipt shows the run staged a deliverable under deliverables/ but carries no OPERATOR-ACTION marker; held so the install step is not lost. Add 'OPERATOR-ACTION: install <deliverable-path> || OPERATOR-TARGET: <install target>' to Follow-up recommendation and re-run.";
-  }
-  if (reasons.some((reason) => reason.startsWith("OPERATOR_"))) {
-    return `Receipt has an invalid operator marker: ${
-      reasons.filter((reason) => reason.startsWith("OPERATOR_")).join(", ")
-    }.`;
-  }
-  if (reasons.includes("RECEIPT_MISSING_SECTION")) {
-    return `Receipt is missing required sections: ${
-      receipt.missing.join(", ")
-    }.`;
-  }
-  if (reasons.includes("OPS_AMEND_NEWER_THAN_DONE")) {
-    return "A human correction (ops-amend) was posted after the AGENT DONE this apply would use; its Tracker/Session-log drafts may be stale. A superseding AGENT DONE will NOT work from here: complete_agent_task refuses Agent Review -> Agent Review. Repair route, three calls: admin_amend_agent_task with release_claim true (returns the row to Agent Todo and clears agent_code), then claim_specific_agent_task, then complete_agent_task with the corrected receipt folding the ops-amend in. Then re-run. The row sits unclaimed in Agent Todo between the fold and the re-claim, so run the three back to back if the task is not requires_local and a lane could be awake.";
-  }
-  if (reasons.includes("PLAN_DOC_PATH_UNRESOLVED")) {
-    return "Task carries a plan-doc source whose path cannot be resolved to a project folder; held so the doc line is not left un-synced. Fix the plan-doc source path and re-run.";
-  }
-  if (reasons.includes("PLAN_DOC_LINE_NOT_FOUND")) {
-    return "Task carries a plan-doc source but no [OE:<shortid>] carded line was found in that plan-doc folder; held so applying cannot silently skip the doc sync. Restore the tagged doc line (or flip it by hand) and re-run.";
-  }
-  if (reasons.includes("EXECUTED_CHECK_FAILED")) {
-    return "The packet's executed check ran in isolation and exited non-zero; held, not applied. Fix the code (or the check) and post a fresh AGENT DONE with a new CHECK-REF.";
-  }
-  if (reasons.includes("EXECUTED_CHECK_DISABLED")) {
-    return "Task carries a check_spec but the executed-check lane is disabled (EXECUTED_CHECK_ENABLED=false); held for the human-read gate.";
-  }
-  if (reasons.includes("CHECK_SPEC_UNPARSEABLE")) {
-    return "Task carries a check_spec that is not a valid allowlisted {runner, args[]} value; held and never executed. Fix the packet's check_spec.";
-  }
-  if (reasons.includes("AUTO_PROMOTED_CHECK_TASK_EXCLUDED")) {
-    return "Task was auto-promoted (triage-auto) and also carries a check_spec; machine-promote and machine-apply never stack (spec §8), so it is held for a human.";
-  }
-  if (reasons.includes("CHECK_SPEC_ON_CONTENT_TASK")) {
-    return "Task carries a check_spec but its receipt stages a deliverables/ file — content work has no executable check; held for the human-read gate.";
-  }
-  if (reasons.some((reason) => reason.startsWith("CHECK_REF"))) {
-    return "Task carries a check_spec but the receipt does not carry exactly one line-anchored 'CHECK-REF: <40-hex commit sha>'; held. Add the marker line naming the produced commit and re-run.";
-  }
-  if (reasons.includes("RISK_NOT_LOW")) {
-    // Named explicitly because the generic fallback below is what let this
-    // become a silent data-loss bug: a human read "RISK_NOT_LOW", applied the
-    // card by hand with apply_agent_task_review, and got a clean-looking close
-    // with NO tracker entry, NO session-log entry, and NO capture -- because
-    // those three writes live in THIS script, not in the Edge Function. Seven
-    // cards were closed that way before anyone noticed. Do not shorten this
-    // message to the reason code.
-    return "Task risk is not low, so the unattended lane holds it. Do NOT apply this by hand with apply_agent_task_review: that Edge Function has no filesystem, so it closes the card while writing NO tracker entry, NO session-log entry, and NO Brain Bank capture, and nothing reports the omission. Re-run this same command with --operator-apply to apply it through the controller and get all three writes.";
-  }
-  return `Task held by dry-run safety gates: ${reasons.join(", ")}.`;
 }
 
 function findActionItem(actionItems, id) {

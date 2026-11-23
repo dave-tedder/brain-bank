@@ -8,10 +8,34 @@
 //   2. a completion note the (mocked) LAYER 2 model claims resolves the
 //      candidate through the status-guarded update and writes the resolved
 //      decision row only when the update returned the row.
+//   10. (loop-closing Task 5.1) the fragment gate on the ingest copy: the
+//      plan's eight items store four (original text), drop four with
+//      fragment/dropped rows naming one_token or dangling_clause, and the
+//      pronoun-object item gets a fragment/proposed/pronoun_object row carrying
+//      the id the insert returned.
+//   11. (Codex review 1, F2) the open-item dedup on the ingest copy: an item
+//      already open is not inserted again and gets no suspect row, while a new
+//      item from the same capture is inserted. The GET mock answers only the
+//      exact status=eq.open lookup, so a divergent filter string fails here.
+//   12. (Codex review 1, F3) the corrected rollout probe text (step 6) on the
+//      ingest copy, with the original probe's item and the MCP probe's item
+//      already open: the Slack probe item, carrying its own token, is still
+//      inserted and gets its suspect row, and "deploy" is dropped.
+//   13. (loop-closing Task 5.2) dedup on the ingest copy: two identical strings
+//      in one batch insert once with a dedup/dropped/exact_batch row naming the
+//      survivor the insert returned; a reworded copy of a recent open item
+//      (dedup_semantic_candidates, read BEFORE the insert) is inserted AND
+//      proposed through ONE record_decisions call (dedup/proposed/
+//      semantic_overlap, the new id, the candidate as survivor, the score).
 //
 //   deno run --allow-net --allow-env --allow-read scripts/loop-closing/ingest-probe-harness.ts
 //
 // Exit 0 with "INGEST PROBE PASSED" or non-zero with the first failed check.
+
+// The checks the TS mutant sweep certifies go through claimVerdict (Codex
+// re-review 2, N1): the claim records its entry and verdict at run time and
+// its tag ends the FAILED line, so a direct fail() can never stand in for it.
+import { claimVerdict } from "./claim.ts";
 
 const SIGNING_SECRET = "probe-signing-secret";
 const CAPTURE_CHANNEL = "C_PROBE_CAPTURE";
@@ -40,7 +64,10 @@ const scenario = {
   transitionAnswers: [] as Array<number | "error">,
   proposalItems: [] as Array<{ item_id: string; description: string }>,
   reviewAnswers: [] as Array<Array<{ status: string; message: string; decision_id: string | null }>>,
+  semanticCandidates: [] as Array<Record<string, unknown>>,
 };
+// Rows the action_items insert returned (Task 5.1 asks for id, description).
+const returnedItems: Array<{ id: string; description: string }> = [];
 const slackThreads: Array<string | undefined> = [];
 const slackReplies: string[] = [];
 
@@ -95,6 +122,8 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
       if (table === "rpc/find_candidate_action_items") return json(scenario.candidates);
       if (table === "rpc/resolve_proposal_item") return json(scenario.proposalItems);
       if (table === "rpc/review_proposal") return json(scenario.reviewAnswers.shift() ?? []);
+      if (table === "rpc/dedup_semantic_candidates") return json(scenario.semanticCandidates);
+      if (table === "rpc/record_decisions") return json(Array.isArray((body as { p_rows?: unknown[] })?.p_rows) ? (body as { p_rows: unknown[] }).p_rows.length : null);
       if (table === "rpc/transition_action_item") {
         if (scenario.transitionAnswers.length) {
           const answer = scenario.transitionAnswers.shift()!;
@@ -108,8 +137,19 @@ globalThis.fetch = async (input: Request | URL | string, init?: RequestInit): Pr
       const row = { id: crypto.randomUUID() };
       return json(single ? row : [row]);
     }
-    if (table === "action_items" && method === "GET" && scenario.openItems) return json(scenario.openItems);
+    // Open items answer ONLY the exact open-item lookup the code issues
+    // (status=eq.open); any other filter string reads nothing, so a divergent
+    // filter in the ingest copy changes behavior here (Codex review 1, F2).
+    if (table === "action_items" && method === "GET" && scenario.openItems) {
+      return json(u.searchParams.get("status") === "eq.open" ? scenario.openItems : []);
+    }
     if (table === "action_items" && method === "PATCH") throw new Error("direct action_items status update: every writer must use transition_action_item");
+    if (table === "action_items" && method === "POST") {
+      const rows = (Array.isArray(body) ? body : [body]) as Array<{ description: string }>;
+      const back = rows.map((r) => ({ id: crypto.randomUUID(), description: r.description }));
+      returnedItems.push(...back);
+      return json(back, 201);
+    }
     if (method === "POST") return json([]);
     return json([]);
   }
@@ -148,6 +188,7 @@ function fail(msg: string): never {
   Deno.exit(1);
 }
 const expect = (cond: boolean, msg: string) => { if (!cond) fail(msg); };
+const expectClaimed = (tag: string | null, msg: string) => { if (tag !== null) fail(`${msg} ${tag}`); };
 const inserts = (table: string) => recorded.filter((r) => r.table === table && r.method === "POST").flatMap((r) => Array.isArray(r.body) ? r.body : [r.body]) as Array<Record<string, unknown>>;
 
 // --- Probe 1: work report + FOR OPERATOR through the Slack capture channel ---
@@ -157,7 +198,7 @@ const report = "CRM Session 80 (2026-10-29): departure-notice window spec writte
 const status1 = await postSlackMessage(report);
 expect(status1 === 200, `probe 1 HTTP ${status1}`);
 const items1 = inserts("action_items");
-expect(items1.length === 1 && items1[0].description === "send Sam the sign-in link by 2026-11-05" && items1[0].status === "open", `probe 1 action_items rows: ${JSON.stringify(items1)}`);
+expectClaimed(claimVerdict("probe-1-rows", () => items1.length === 1 && items1[0].description === "send Sam the sign-in link by 2026-11-05" && items1[0].status === "open"), `probe 1 action_items rows: ${JSON.stringify(items1)}`);
 const gate1 = inserts("auto_resolve_decisions").filter((d) => d.layer === "gate");
 expect(gate1.length === 2 && gate1.every((d) => d.outcome === "dropped" && d.reason === "work_report" && d.item_id === null && typeof d.thought_id === "string"), `probe 1 gate rows: ${JSON.stringify(gate1)}`);
 expect(gate1.map((d) => d.candidate_description).join("|") === "The operator runs both deploys|Update the tracker", "probe 1 gate candidate_description");
@@ -305,6 +346,152 @@ expect(await postSlackMessage("keep c0140001 d0140002", { user: "U0AB12CD" }) ==
 expect(reviewCalls().length === 0, "probe 9 keep with a decision id is not a review form");
 expect(inserts("thoughts").length === 1, "probe 9 the near-miss is captured as a thought, as before");
 origLog("probe 9 ok: keep with a second id is not an exact form and is captured unchanged");
+
+// --- Probe 10 (Task 5.1): the fragment gate on the ingest copy. ---
+recorded.length = 0; logs.length = 0; returnedItems.length = 0;
+const PLAN_ITEMS_10 = [
+  "deploy", "switch on", "then deploy", "finalize what we're",
+  "Awaiting the operator to apply migration 063", "send Sam the explainer PDF",
+  "send her the explainer PDF", "nudge Jordan if nothing arrives",
+];
+scenario.metadata = { people: ["Sam"], action_items: PLAN_ITEMS_10, dates_mentioned: [], topics: ["koi"], type: "task", project: null, priority: "normal" };
+scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = [];
+expect(await postSlackMessage("Loop-closing probe 10: notes from the koi consult with Sam and Jordan.") === 200, "probe 10 HTTP");
+const items10 = inserts("action_items");
+expectClaimed(
+  claimVerdict("probe-10-rows", () => JSON.stringify(items10.map((r) => r.description)) === JSON.stringify(["Awaiting the operator to apply migration 063", "send Sam the explainer PDF", "send her the explainer PDF", "nudge Jordan if nothing arrives"])),
+  `probe 10 action_items rows (original text, fragments dropped): ${JSON.stringify(items10)}`,
+);
+const thought10 = recorded.find((r) => r.table === "auto_resolve_decisions" && (r.body as Record<string, unknown>)?.layer === "fragment");
+const frag10 = inserts("auto_resolve_decisions").filter((d) => d.layer === "fragment");
+const drops10 = frag10.filter((d) => d.outcome === "dropped");
+expectClaimed(
+  claimVerdict("probe-10-drops", () => JSON.stringify(drops10.map((d) => [d.candidate_description, d.reason])) === JSON.stringify([["deploy", "one_token"], ["switch on", "one_token"], ["then deploy", "one_token"], ["finalize what we're", "dangling_clause"]])),
+  `probe 10 fragment drop rows: ${JSON.stringify(drops10)}`,
+);
+expect(drops10.every((d) => d.item_id === null && typeof d.thought_id === "string" && d.thought_id === drops10[0].thought_id), "probe 10 drop rows: item_id null, one thought_id");
+const herId = returnedItems.find((r) => r.description === "send her the explainer PDF")?.id;
+const sus10 = frag10.filter((d) => d.outcome === "proposed");
+expectClaimed(
+  claimVerdict("probe-10-suspect", () =>
+    herId !== undefined && sus10.length === 1 && sus10[0].reason === "pronoun_object" && sus10[0].item_id === herId &&
+    sus10[0].thought_id === drops10[0].thought_id && sus10[0].candidate_description === "send her the explainer PDF"),
+  `probe 10 suspect row: ${JSON.stringify(sus10)} (returned ${JSON.stringify(returnedItems)})`,
+);
+expect(frag10.length === 5 && thought10 !== undefined, `probe 10 exactly five fragment rows: ${frag10.length}`);
+expect(logs.filter((l) => l.startsWith("fragment gate: dropped item (")).length === 4, "probe 10 four drop log lines");
+origLog("probe 10 ok: ingest copy stored 4 items, wrote 4 fragment drop rows (3 one_token, 1 dangling_clause) and 1 pronoun_object suspect with the inserted item's id");
+
+// --- Probe 11 (Codex review 1, F2): the open-item dedup on the ingest copy. ---
+recorded.length = 0; logs.length = 0; returnedItems.length = 0;
+scenario.metadata = {
+  people: ["Sam"],
+  action_items: ["send her the probe 11 koi stencil", "send Sam the probe 11 deposit link"],
+  dates_mentioned: [], topics: ["koi"], type: "task", project: null, priority: "normal",
+};
+scenario.openItems = [{ id: crypto.randomUUID(), description: "Send her the probe 11 koi stencil." }];
+scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = [];
+expect(await postSlackMessage("Loop-closing probe 11: the koi stencil and the deposit link for Sam.") === 200, "probe 11 HTTP");
+const items11 = inserts("action_items");
+expectClaimed(
+  claimVerdict("probe-11-rows", () => JSON.stringify(items11.map((r) => r.description)) === JSON.stringify(["send Sam the probe 11 deposit link"])),
+  `probe 11 action_items rows (the already-open item is not inserted again): ${JSON.stringify(items11)}`,
+);
+const sus11 = inserts("auto_resolve_decisions").filter((d) => d.layer === "fragment");
+expect(sus11.length === 0, `probe 11 no fragment rows (the duplicate was not inserted, so it is not a suspect): ${JSON.stringify(sus11)}`);
+const lookups11 = recorded.filter((r) => r.table === "action_items" && r.method === "GET");
+expect(
+  lookups11.length === 1 && new URL(lookups11[0].url).searchParams.get("status") === "eq.open",
+  `probe 11 one open-item lookup, status=eq.open: ${JSON.stringify(lookups11.map((r) => r.url))}`,
+);
+scenario.openItems = null;
+origLog("probe 11 ok: ingest copy's open-item lookup (status=eq.open) suppressed the already-open item and inserted only the new one");
+
+// --- Probe 12 (Codex review 1, F3): the corrected rollout probe on the ingest copy. ---
+recorded.length = 0; logs.length = 0; returnedItems.length = 0;
+const RUN12 = "20261121093000";
+const SLACK12 = `send her the fragment probe explainer PDF fgprobe${RUN12}slack`;
+scenario.metadata = { people: [], action_items: ["deploy", "send the fragment probe explainer PDF"], dates_mentioned: [], topics: ["brain-bank"], type: "task", project: null, priority: "normal" };
+scenario.openItems = [
+  { id: crypto.randomUUID(), description: "send her the fragment probe explainer PDF" },
+  { id: crypto.randomUUID(), description: `send her the fragment probe explainer PDF fgprobe${RUN12}mcp` },
+];
+scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = [];
+expect(
+  await postSlackMessage(`Fragment gate probe, handoff for Session 999 (2026-11-20).\nFOR OPERATOR: deploy\nFOR OPERATOR: ${SLACK12}`) === 200,
+  "probe 12 HTTP",
+);
+const items12 = inserts("action_items");
+expect(JSON.stringify(items12.map((r) => r.description)) === JSON.stringify([SLACK12]), `probe 12 action_items rows (the tokenized Slack probe item): ${JSON.stringify(items12)}`);
+const frag12 = inserts("auto_resolve_decisions").filter((d) => d.layer === "fragment");
+const id12 = returnedItems.find((r) => r.description === SLACK12)?.id;
+expect(
+  JSON.stringify(frag12.map((d) => [d.outcome, d.reason, d.candidate_description, d.item_id === null ? null : d.item_id === id12 ? "returned id" : d.item_id])) ===
+    JSON.stringify([["dropped", "one_token", "deploy", null], ["proposed", "pronoun_object", SLACK12, "returned id"]]),
+  `probe 12 fragment rows (deploy dropped; one suspect with the returned id): ${JSON.stringify(frag12)} (returned ${JSON.stringify(returnedItems)})`,
+);
+scenario.openItems = null;
+origLog("probe 12 ok: the corrected Slack probe text stored its tokenized item next to the open original and MCP probe items, dropped deploy and proposed the item with the returned id");
+
+// --- Probe 13 (Task 5.2): batch-local exact dedup and a semantic proposal on the ingest copy. ---
+recorded.length = 0; logs.length = 0; returnedItems.length = 0;
+const CAND13 = "c5213000-0000-4000-8000-000000000001";
+const CASEY13 = "Add Casey as guest when his email address arrives probe13";
+const DECK13 = "Send Sam the probe 13 flash deck";
+scenario.metadata = { people: ["Sam"], action_items: [CASEY13, DECK13, "send sam the probe 13 flash deck."], dates_mentioned: [], topics: ["brain-bank"], type: "task", project: null, priority: "normal" };
+scenario.semanticCandidates = [
+  { id: CAND13, description: "Add Casey as a guest when his email arrives probe13", created_at: "2026-11-19T12:00:00.000Z", source_thought_id: crypto.randomUUID(), project: "brain-bank" },
+];
+scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = [];
+expect(await postSlackMessage("Loop-closing probe 13: the Casey guest pass and the flash deck for Sam.") === 200, "probe 13 HTTP");
+const items13 = inserts("action_items");
+expectClaimed(
+  claimVerdict("probe-13-rows", () => JSON.stringify(items13.map((r) => r.description)) === JSON.stringify([CASEY13, DECK13])),
+  `probe 13 action_items rows (one copy of the deck, the reworded Casey item inserted): ${JSON.stringify(items13)}`,
+);
+const deckId13 = returnedItems.find((r) => r.description === DECK13)?.id;
+const caseyId13 = returnedItems.find((r) => r.description === CASEY13)?.id;
+const exact13 = inserts("auto_resolve_decisions").filter((d) => d.layer === "dedup");
+expectClaimed(
+  claimVerdict("probe-13-exact-batch", () =>
+    deckId13 !== undefined && JSON.stringify(exact13.map((d) => [d.outcome, d.reason, d.candidate_description, d.related_item_id, d.item_id, typeof d.thought_id])) ===
+      JSON.stringify([["dropped", "exact_batch", "send sam the probe 13 flash deck.", deckId13, null, "string"]])),
+  `probe 13 exact_batch row: ${JSON.stringify(exact13)} (returned ${JSON.stringify(returnedItems)})`,
+);
+const calls13 = recorded.filter((r) => r.table === "rpc/record_decisions").map((r) => (r.body as { p_rows: Array<Record<string, unknown>> }).p_rows);
+expectClaimed(
+  claimVerdict("probe-13-semantic", () =>
+    caseyId13 !== undefined && calls13.length === 1 &&
+    JSON.stringify(calls13[0].map((r) => [r.layer, r.outcome, r.reason, r.item_id, r.related_item_id, r.score, r.thought_id, r.candidate_description])) ===
+      JSON.stringify([["dedup", "proposed", "semantic_overlap", caseyId13, CAND13, 1, null, CASEY13]])),
+  `probe 13 semantic proposal through record_decisions: ${JSON.stringify(calls13)} (returned ${JSON.stringify(returnedItems)})`,
+);
+const order13 = recorded.map((r) => r.table).filter((t) => t === "rpc/dedup_semantic_candidates" || t === "action_items" || t === "rpc/record_decisions");
+expect(JSON.stringify(order13.filter((t, i) => order13.indexOf(t) === i)) === JSON.stringify(["action_items", "rpc/dedup_semantic_candidates", "rpc/record_decisions"]) &&
+  recorded.findIndex((r) => r.table === "rpc/dedup_semantic_candidates") < recorded.findIndex((r) => r.table === "action_items" && r.method === "POST"),
+  `probe 13 the candidates are read before the insert: ${JSON.stringify(recorded.map((r) => `${r.method} ${r.table}`))}`);
+scenario.semanticCandidates = [];
+origLog("probe 13 ok: ingest copy inserted one copy of the deck with an exact_batch row naming its survivor, and proposed the reworded Casey item against the recent open one through one record_decisions call");
+
+// --- Probe 14 (Codex review 1 of PR 33, R4): numbered obligations stay distinct. ---
+// Two items that differ only in a digit are two obligations: the
+// normalizeActionText the ingest copy imports (_shared/capture-helpers.ts since
+// correction 3; before that its own copy) must keep the digits, so both insert
+// and the batch dedup records nothing. Codex's mutant (digits stripped from the
+// normalizer) inserted one and recorded the other as exact_batch.
+recorded.length = 0; logs.length = 0; returnedItems.length = 0;
+const NUMBERED14 = ["send Sam design 1", "send Sam design 2"];
+scenario.metadata = { people: ["Sam"], action_items: NUMBERED14, dates_mentioned: [], topics: ["koi"], type: "task", project: null, priority: "normal" };
+scenario.openItems = []; scenario.semanticCandidates = []; scenario.candidates = []; scenario.resolved = []; scenario.updateAffected = [];
+expect(await postSlackMessage("Loop-closing probe 14: two numbered designs still need to go out to Sam.") === 200, "probe 14 HTTP");
+const items14 = inserts("action_items");
+const dedup14 = inserts("auto_resolve_decisions").filter((d) => d.layer === "dedup");
+expectClaimed(
+  claimVerdict("probe-14-rows", () => JSON.stringify(items14.map((r) => r.description)) === JSON.stringify(NUMBERED14) && dedup14.length === 0),
+  `probe 14 action_items rows (both numbered items insert, no dedup row): ${JSON.stringify(items14)} ${JSON.stringify(dedup14)}`,
+);
+scenario.openItems = null;
+origLog("probe 14 ok: ingest copy inserted both numbered items (design 1, design 2) and wrote no dedup row");
 
 console.log = origLog; console.error = origErr;
 console.log("INGEST PROBE PASSED");

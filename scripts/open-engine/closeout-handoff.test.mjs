@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { evaluate, evaluateUnrecordedAudit } from "./closeout-controller.mjs";
+import { evaluate, evaluateUnrecordedAudit, REASON_ALIASES } from "./closeout-controller.mjs";
+
+// Task 5.4 renamed OPERATOR_TARGET_UNSAFE_SCHEME to OPERATOR_TARGET_NOT_URL_OR_PATH.
+// The old string stays here as an alias for one release (plan, Task 5.4), so
+// this test reads exactly as it did and fails if the alias stops resolving.
+const OPERATOR_TARGET_UNSAFE_SCHEME = REASON_ALIASES.OPERATOR_TARGET_UNSAFE_SCHEME;
 
 const TASK_ID = "11111111-2222-4333-8444-555555555555";
 function withProject(fn) {
@@ -50,7 +55,7 @@ for (const [name, target] of [
       const result = evaluate(input(`OPERATOR-ACTION: Review draft || OPERATOR-TARGET: ${target}`), registry);
       assert.deepEqual({ status: result.status, apply: result.apply, reasons: result.hold[0]?.reasons }, {
         status: "HELD", apply: [],
-        reasons: ["OPERATOR_TARGET_UNSAFE_SCHEME", "DELIVERABLE_WITHOUT_OPERATOR_ACTION"],
+        reasons: [OPERATOR_TARGET_UNSAFE_SCHEME, "DELIVERABLE_WITHOUT_OPERATOR_ACTION"],
       });
       assert.match(result.hold[0].message, /^OPERATOR-TARGET must be a plain http\(s\) URL or filesystem path/);
     });

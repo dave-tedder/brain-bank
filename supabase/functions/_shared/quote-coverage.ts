@@ -61,6 +61,14 @@ function words(s: string): string[] {
     .filter((w) => w.length >= 3);
 }
 
+/** The description's content tokens: lowercase words of 3 or more characters
+ * with the stoplist dropped on the raw words, before stemming, in order and
+ * with repeats. subjectCoverage reads them; loop-closing Task 5.1's fragment
+ * gate counts them (rule one_token), so the stoplist stays single-source. */
+export function descriptionContentTokens(description: string): string[] {
+  return words(description).filter((w) => !SUBJECT_COVERAGE_STOPLIST.has(w));
+}
+
 /** Share of the description's distinct content tokens (stoplist dropped on
  * raw words, then stemmed) that appear among the quote's stemmed tokens. A
  * description with fewer than 2 content tokens after the stoplist uses all
@@ -68,7 +76,7 @@ function words(s: string): string[] {
 export function subjectCoverage(quote: string, description: string): number {
   const quoteStems = new Set(words(quote).map(stem));
   const rawDesc = words(description);
-  let content = rawDesc.filter((w) => !SUBJECT_COVERAGE_STOPLIST.has(w));
+  let content = descriptionContentTokens(description);
   if (content.length < 2) content = rawDesc;
   const descStems = new Set(content.map(stem));
   if (quoteStems.size === 0 || descStems.size === 0) return 0;

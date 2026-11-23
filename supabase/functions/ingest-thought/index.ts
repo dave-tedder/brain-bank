@@ -28,6 +28,21 @@ import {
   recordDecision,
 } from "../_shared/decisions.ts";
 import { resolveOpenItemAndRecord } from "../_shared/resolve-open-item.ts";
+import {
+  isMechanicalCapture,
+  LOG_TRUNC,
+  normalizeActionText,
+} from "../_shared/capture-helpers.ts";
+import {
+  applyFragmentGate,
+  recordPronounSuspects,
+} from "../_shared/fragment-gate.ts";
+import {
+  createBatchDedup,
+  loadSemanticCandidates,
+  proposeSemanticDuplicates,
+  recordBatchDuplicates,
+} from "../_shared/dedup.ts";
 import { transitionActionItem } from "../_shared/action-item-transition.ts";
 import {
   parseReviewCommand,
@@ -45,6 +60,7 @@ import {
   METADATA_TIMEOUT_MS,
   withTimeout,
 } from "../_shared/capture-timeouts.ts";
+import { EXTRACT_METADATA_SYSTEM_PROMPT } from "../_shared/capture-pipeline.ts";
 
 declare const EdgeRuntime: {
   waitUntil(promise: Promise<unknown>): void;
@@ -92,10 +108,6 @@ async function verifySlackSignature(
 }
 
 // --- Shared Utilities ---
-
-function titleCase(s: string): string {
-  return s.replace(/\b\w/g, (c) => c.toUpperCase());
-}
 
 async function contentHash(text: string): Promise<string> {
   const data = new TextEncoder().encode(text.trim());
@@ -171,24 +183,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
     messages: [
         {
           role: "system",
-          content: `Extract metadata from the user's captured thought. Return JSON with:
-- "people": array of people mentioned by full name when possible, e.g. "${loadProfile().example_person_name}" (use full name when possible) (empty if none)
-- "action_items": array of FUTURE to-dos the user still needs to do. STRICT RULES:
-    * Only include items phrased as future work: "need to X", "should X", "TODO: X", an imperative about something not yet done, or an explicit open question.
-    * NEVER include work described in past tense. If the note says "I updated X", "fixed Y", "shipped Z", "changed the ratio to 3px/1px", "replaced the background", those are DONE and must be excluded.
-    * NEVER restate completed work as an imperative. Do not turn "updated the ratio to 3px" into "Update the ratio to 3px".
-    * Session logs, changelogs, retrospectives, and "here's what I just did" summaries almost always have an empty action_items array. Default to [] when in doubt.
-    * A commitment to do something later ("I'll test this tomorrow") IS an action item. A description of something already tested is NOT.
-    * ONE request is ONE item. Never split a single instruction into its parts: the work itself, the output format, and where to deliver it all belong to the SAME item. "Research X and deliver the report under deliverables/foo/" is ONE action item, not two. A stranded clause like "Deliver the report under deliverables/<project-slug>/" is not work on its own, and it does real damage: when its sibling ships and resolves, the clause stays open and reads to downstream automation as an unhandled request, which is how a single request silently becomes a duplicate task-board card days later.
-- "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
-- "topics": array of 1-3 short lowercase topic tags, e.g. "${loadProfile().domain.vocabulary[0]}" not "${titleCase(loadProfile().domain.vocabulary[0])}", "project management" not "Project Management" (always at least one). Preserve hyphenated tokens as a single tag: "fitness-training" stays as one tag, never split into ["fitness", "training"].
-- "type": one of "observation", "task", "idea", "reference", "person_note". Past-tense summaries are "observation", not "task".
-- "project": the project or system this note is ABOUT, e.g. ${loadProfile().example_projects.map((p) => `"${p}"`).join(", ")}, "${loadProfile().example_domain}". Only fill this when the note explicitly references a known project by name or is clearly session-log content for one. If the note is a marketing email, utility bill, tax reminder, or random inbox item with no project context, return null. Do NOT guess a project from topical similarity.
-- "priority": "high" if urgent/time-sensitive/revenue-impacting, "low" if informational/FYI, "normal" otherwise (null if unclear)
-
-Template prefix hints: if the thought starts with DECISION:, CLIENT:, IDEA:, or MEETING:, use that to inform the type field (decision->observation, CLIENT->person_note, IDEA->idea, MEETING->observation) and extract structured fields accordingly.
-
-Only extract what's explicitly there. Be conservative — empty arrays and null fields are fine.`,
+          content: EXTRACT_METADATA_SYSTEM_PROMPT,
         },
         { role: "user", content: text },
     ],
@@ -318,44 +313,6 @@ async function handleQuery(queryText: string, channel: string, messageTs: string
 
 // --- Action Item Tracking ---
 
-function normalizeActionText(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim();
-}
-
-// Content starting with any of these prefixes is a mechanical/informational capture
-// (calendar sync, notion sync, email thread, weekly review, trend analysis, Meta DM
-// failure report). These captures describe STATE or EVENTS, not completion of action
-// items, so auto-resolve is unsafe — they carry topic/person metadata that scope-
-// matches real action items but aren't evidence of anything being done. Completion
-// signals from these sources must come through a manual `done:` command or a
-// dedicated session-log thought, not this path. Adding a pattern here means
-// "this source never resolves action items."
-// Structural prefixes are universal (every operator has these sync sources).
-// Operator-specific bridge prefixes come from profile.json — see
-// `profile.example.json` at the repo root (copied to
-// `supabase/functions/_shared/profile.json` during setup).
-const MECHANICAL_CAPTURE_PREFIXES = [
-  "[Calendar Sync]",
-  "[Notion Sync]",
-  "[Meta DM Scan]",
-  "[Weekly Review]",
-  "Email thread:",
-  "Meta DM Scan failed",
-  ...loadProfile().mechanical_capture_prefixes,
-  // Closeout-controller bookkeeping records (apply batch, operator-resolution
-  // sweep, run summary). Mirror of CLOSEOUT_CAPTURE_PREFIX in
-  // scripts/open-engine/closeout-controller.mjs. Stored, never extracted,
-  // never a completion signal, operator-marker lines included (one such
-  // capture once auto-resolved the open design item its own card said was the
-  // operator's).
-  "[Open Engine Closeout]",
-];
-
-function isMechanicalCapture(content: string): boolean {
-  const head = content.trimStart();
-  return MECHANICAL_CAPTURE_PREFIXES.some((p) => head.startsWith(p));
-}
-
 // Token-set Jaccard similarity on 3+-char lowercased words. Used as a restatement
 // guard: if a new thought's own extracted action_item is highly similar to a
 // candidate open action item, the new thought is RE-CAPTURING that work, not
@@ -382,7 +339,8 @@ const RESTATEMENT_THRESHOLD = 0.5;
 // Task 1.3): subject coverage at SUBJECT_COVERAGE_THRESHOLD replaced the
 // Jaccard-over-the-union quoteOverlap that dropped 6 of 8 real completions on
 // 2026-11-02. Single source, no mirror burden for the helper itself.
-const LOG_TRUNC = 200;
+// LOG_TRUNC, isMechanicalCapture (and its prefix list) and normalizeActionText
+// live in _shared/capture-helpers.ts (loop-closing Task 5.2, correction 3).
 // Per-call ceiling on the LAYER 2 auto-resolve LLM call. A small
 // classification prompt normally answers in seconds; if it hangs, aborting
 // and skipping auto-resolve (fail-safe: no resolution) beats stalling the
@@ -458,7 +416,7 @@ async function extractAndStoreActionItems(
     (existingItems || []).map((item) => normalizeActionText(item.description))
   );
 
-  const rows = items
+  const guarded = items
     .map((desc: unknown) => ({
       source_thought_id: thoughtId,
       description: String(desc),
@@ -477,13 +435,54 @@ async function extractAndStoreActionItems(
         return false;
       }
       return true;
-    })
-    .filter((row) => !existingNormalized.has(normalizeActionText(row.description)));
+    });
+  // Fragment gate (loop-closing Task 5.1), after the appointment guard: drops
+  // one_token and dangling_clause items, one decision row per drop. Then the
+  // open-item exact dedup (silent, as before), then the batch-local exact
+  // dedup (Task 5.2): its normalized set is updated as the batch is filtered,
+  // so two identical strings in one batch insert once. The open-item dedup
+  // runs first so a batch copy of an item that is already open is skipped
+  // silently, never recorded against a survivor that was never inserted.
+  const batch = createBatchDedup(normalizeActionText);
+  const rows = (await applyFragmentGate(supabase, thoughtId, guarded))
+    .filter((row) =>
+      !existingNormalized.has(normalizeActionText(row.description))
+    )
+    .filter((row) => batch.keep(row.description));
 
   if (rows.length === 0) return;
+  // Semantic dedup candidates (Task 5.2), read BEFORE the insert so each is
+  // older than every row this batch inserts. Never throws.
+  const recent = await loadSemanticCandidates(supabase);
 
-  const { error } = await supabase.from("action_items").insert(rows);
-  if (error) console.error("Action item insert error:", error);
+  const { data: inserted, error } = await supabase.from("action_items").insert(rows)
+    .select("id, description");
+  if (error) {
+    console.error("Action item insert error:", error);
+    return;
+  }
+  // Pronoun-object suspects are inserted, then proposed for review (Task 5.1).
+  await recordPronounSuspects(
+    supabase,
+    thoughtId,
+    (inserted ?? []) as Array<{ id: string; description: string }>,
+  );
+  // Task 5.2: each batch copy names the survivor the insert returned; then a
+  // semantic overlap with a recent open item is proposed, never suppressed.
+  await recordBatchDuplicates(
+    supabase,
+    thoughtId,
+    batch.duplicates,
+    inserted,
+    normalizeActionText,
+  );
+  await proposeSemanticDuplicates(
+    supabase,
+    recent,
+    thoughtId,
+    metadata.project,
+    inserted,
+  );
 }
 
 async function checkAutoResolve(

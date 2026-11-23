@@ -25,6 +25,11 @@ import {
   type RecheckRunRow,
   renderRecheckProposals,
 } from "./recheck-proposals.ts";
+import {
+  type FragmentProposalRow,
+  renderFragmentProposals,
+} from "./fragment-proposals.ts";
+import { type DedupProposalRow, renderDedupProposals } from "./dedup-proposals.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = serviceKey();
@@ -206,6 +211,14 @@ async function synthesizeDigest(
   // re-check, after the archive section. Reads the RPC and the receipt table
   // from 20261119c; until that is applied both lines read unavailable.
   const recheckSection = await loadRecheckProposals();
+  // Loop-closing Task 5.1: pending fragment suspects (pronoun objects), after
+  // the recheck section. Reads the RPC from 20261120; until that is applied
+  // the section reads unavailable. Omitted when nothing is pending.
+  const fragmentSection = await loadFragmentProposals();
+  // Loop-closing Task 5.2: pending semantic dedup proposals, after the
+  // fragment section. Reads the RPC from 20261120c; until that is applied the
+  // section reads unavailable. Omitted when nothing is pending.
+  const dedupSection = await loadDedupProposals();
 
   const structuredLines = [
     `Open action item count: ${openActionTotal}`,
@@ -352,7 +365,7 @@ Neither of those is today. Today is the one appointment, then clear.
 
   const synthesized = (data.choices?.[0]?.message?.content ?? "").trim();
   const checklist = buildOpenActionChecklist(openActionsInput);
-  return [synthesized, checklist, deskLine, archiveSection, recheckSection].filter(Boolean).join("\n\n");
+  return [synthesized, checklist, deskLine, archiveSection, recheckSection, fragmentSection, dedupSection].filter(Boolean).join("\n\n");
 }
 
 // Every failure is non-fatal and visible: buildOpenActionChecklist prints what
@@ -471,6 +484,30 @@ async function loadRecheckProposals(): Promise<string> {
     console.error("recheck last-run read failed (non-fatal):", err);
   }
   return renderRecheckProposals(rows, run, new Date().toISOString());
+}
+
+async function loadFragmentProposals(): Promise<string> {
+  let rows: FragmentProposalRow[] | null = null;
+  try {
+    const { data, error } = await supabase.rpc("fragment_pending_proposals", { p_limit: 200 });
+    if (error) console.error("fragment proposals read failed (non-fatal):", error);
+    else rows = (data ?? []) as FragmentProposalRow[];
+  } catch (err) {
+    console.error("fragment proposals read failed (non-fatal):", err);
+  }
+  return renderFragmentProposals(rows);
+}
+
+async function loadDedupProposals(): Promise<string> {
+  let rows: DedupProposalRow[] | null = null;
+  try {
+    const { data, error } = await supabase.rpc("dedup_pending_proposals", { p_limit: 200 });
+    if (error) console.error("dedup proposals read failed (non-fatal):", error);
+    else rows = (data ?? []) as DedupProposalRow[];
+  } catch (err) {
+    console.error("dedup proposals read failed (non-fatal):", err);
+  }
+  return renderDedupProposals(rows);
 }
 
 async function loadDeskLine(): Promise<string> {

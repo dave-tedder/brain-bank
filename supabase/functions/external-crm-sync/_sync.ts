@@ -149,16 +149,18 @@ export interface ThoughtInsert {
 }
 
 /** The capture pipeline `capture_intake` reuses (embedding, metadata
- * extraction, coercion, project routing, action-item storage). Injected so
- * the decision logic here stays pure; `index.ts` wires the real one from
- * `_shared/capture-pipeline.ts` and `_shared/metadata-validation.ts`. */
+ * extraction, coercion, project routing). Injected so the decision logic here
+ * stays pure; `index.ts` wires the real one from `_shared/capture-pipeline.ts`
+ * and `_shared/metadata-validation.ts`. It stores no action items;
+ * `index_test.ts` runs the real one and pins that. */
 export interface CapturePipeline {
   /** SHA-256 of the trimmed text, the same function every capture path uses. */
   hash(text: string): Promise<string>;
   /** Embedding plus coerced, project-routed metadata for `content`. */
   analyze(content: string): Promise<{ embedding: number[]; metadata: Metadata }>;
-  /** Post-insert work (action-item storage). A throw here is logged by the
-   * caller and never turns a stored thought into a failed capture. */
+  /** Post-insert work. The real pipeline does nothing here (it used to store
+   * action items). A throw here is logged by the caller and never turns a
+   * stored thought into a failed capture. */
   afterInsert(thoughtId: string, content: string, metadata: Metadata): Promise<void>;
 }
 
@@ -708,7 +710,8 @@ export function buildIntakeMetadata(
  *
  * Auto-resolve is deliberately NOT run for intakes (see
  * docs/architecture/rest-api.md): a new request is not evidence that any
- * action item was completed. */
+ * action item was completed. Nor is action-item extraction: the CRM owns the
+ * request, so it is not a to-do source here. */
 export async function captureIntake(
   store: SyncStore,
   pipeline: CapturePipeline,

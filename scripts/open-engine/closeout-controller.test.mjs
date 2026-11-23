@@ -1877,18 +1877,26 @@ test("closeout prefix: nullish and non-string input become a prefixed empty or s
   assert.equal(asCloseoutCapture(42), `${PREFIX_LINE}42`);
 });
 
-test("closeout prefix: the exact literal is listed in BOTH capture handlers' MECHANICAL_CAPTURE_PREFIXES", () => {
+// Since loop-closing Task 5.2 (correction 3 of PR 33) both capture handlers
+// import isMechanicalCapture from _shared/capture-helpers.ts, which holds the
+// one MECHANICAL_CAPTURE_PREFIXES list.
+test("closeout prefix: the exact literal is listed in the one MECHANICAL_CAPTURE_PREFIXES, and BOTH capture handlers use it", () => {
+  const FUNCTIONS = join(HERE, "..", "..", "supabase", "functions");
+  const helpers = readFileSync(join(FUNCTIONS, "_shared", "capture-helpers.ts"), "utf8");
+  const start = helpers.indexOf("const MECHANICAL_CAPTURE_PREFIXES = [");
+  assert.ok(start >= 0, "capture-helpers.ts: list not found");
+  const block = helpers.slice(start, helpers.indexOf("];", start));
+  assert.ok(
+    block.includes(`"${CLOSEOUT_CAPTURE_PREFIX}",`),
+    `capture-helpers.ts: MECHANICAL_CAPTURE_PREFIXES lacks ${CLOSEOUT_CAPTURE_PREFIX}`,
+  );
   for (const fn of ["open-brain-mcp", "ingest-thought"]) {
-    const src = readFileSync(
-      join(HERE, "..", "..", "supabase", "functions", fn, "index.ts"),
-      "utf8",
-    );
-    const start = src.indexOf("const MECHANICAL_CAPTURE_PREFIXES = [");
-    assert.ok(start >= 0, `${fn}: list not found`);
-    const block = src.slice(start, src.indexOf("];", start));
-    assert.ok(
-      block.includes(`"${CLOSEOUT_CAPTURE_PREFIX}",`),
-      `${fn}: MECHANICAL_CAPTURE_PREFIXES lacks ${CLOSEOUT_CAPTURE_PREFIX}`,
+    const src = readFileSync(join(FUNCTIONS, fn, "index.ts"), "utf8");
+    assert.ok(!src.includes("MECHANICAL_CAPTURE_PREFIXES = ["), `${fn}: declares its own prefix list`);
+    assert.match(
+      src,
+      /import \{[^}]*\bisMechanicalCapture\b[^}]*\} from "\.\.\/_shared\/capture-helpers\.ts";/,
+      `${fn}: does not import isMechanicalCapture from _shared/capture-helpers.ts`,
     );
   }
 });

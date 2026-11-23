@@ -10,7 +10,11 @@
 //   B3 project enum coercion (loadKnownSlugs + coerceMetadata)
 //   B4 type validation (coerceType)
 //   B5 hyphen-recombine (recombineHyphenated)
+//   Loop-closing Task 5.1 fragment gate (normalizeItemPrefix,
+//   classifyFragmentItem, isFragmentItem)
+
 import { loadProfile } from "./profile.ts";
+import { descriptionContentTokens } from "./quote-coverage.ts";
 
 export const VALID_TYPES = [
   "observation",
@@ -213,6 +217,130 @@ export function extractOperatorLines(
     if (m && m[1]) out.push(m[1]);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Loop-closing Task 5.1 (A2, A3): the fragment gate.
+//
+// An extracted action item that is not a whole obligation ("deploy",
+// "switch on", "finalize what we're") is dropped before insert, and every drop
+// writes an auto_resolve_decisions row (layer fragment, outcome dropped) so the
+// rejected text stays auditable. The wiring lives in fragment-gate.ts; these are
+// the pure rules, unit-tested in metadata-validation.test.ts.
+//
+// Order: normalize (never reject on) a leading `then`, `next:`, `waiting on`,
+// `awaiting` or `TODO:`; then rule (a) one_token; then rule (b)
+// dangling_clause. The first rule that matches names the reason, so an item
+// both rules would drop ("deploy the") records one_token.
+//
+// A bare pronoun object is NOT a mechanical drop: the item is inserted and
+// recorded as a fragment suspect (layer fragment, outcome proposed, reason
+// pronoun_object) for review through Task 3.6 (`keep <id>` / `archive <id>`).
+// ---------------------------------------------------------------------------
+
+// Each prefix is stripped from the start, case-insensitively, repeatedly
+// ("TODO: then deploy" becomes "deploy"). Word boundaries keep "thence" and
+// "awaitingly" whole.
+const ITEM_PREFIX_RE =
+  /^\s*(?:then\b[\s,:;.-]*|next:\s*|waiting\s+on\b\s*|awaiting\b\s*|todo:\s*)/i;
+
+/** Strip, never reject on, leading `then`, `next:`, `waiting on`, `awaiting`
+ * and `TODO:` (any case, repeated). Returns the trimmed remainder, which may
+ * be empty. "Awaiting the operator to apply migration 063" becomes
+ * "The operator to apply migration 063". Classification only: the stored description
+ * is the original text (decision recorded in the Task 5.1 packet). */
+export function normalizeItemPrefix(desc: string): string {
+  let s = String(desc ?? "").trim();
+  for (;;) {
+    const next = s.replace(ITEM_PREFIX_RE, "").trim();
+    if (next === s) return s;
+    s = next;
+  }
+}
+
+// Rule (b): words that cannot end an obligation. Matched against the RAW final
+// token of the normalized description (lowercase, apostrophes kept, before the
+// stoplist). Not a wider stoplist: rule (a) never reads this list.
+export const DANGLING_FINAL_TOKENS: ReadonlySet<string> = new Set([
+  "the", "a", "an", "to", "and", "or", "of", "for", "with", "that", "what",
+  "which", "we're", "i'm", "you're", "they're", "it's", "is", "are", "be",
+]);
+
+// Pronouns that, as the object of an item, leave it unable to stand alone.
+// her, him and it count wherever they appear (possessive "her" included: the
+// item still does not name the person). this and that count only when nothing
+// follows or a preposition, particle or time word follows ("send this to
+// Jordan", "finish that up"); followed by anything else they are determiners or
+// a conjunction ("check this week's post", "confirm that the migration ran").
+export const PRONOUN_OBJECTS: readonly string[] = ["her", "him", "it", "that", "this"];
+const ALWAYS_PRONOUN: ReadonlySet<string> = new Set(["her", "him", "it"]);
+const DEMONSTRATIVE: ReadonlySet<string> = new Set(["this", "that"]);
+const DEMONSTRATIVE_OBJECT_FOLLOWERS: ReadonlySet<string> = new Set([
+  "to", "for", "with", "on", "in", "at", "by", "from", "into", "onto", "over",
+  "up", "off", "out", "back", "down", "again", "today", "tomorrow", "tonight",
+  "now", "asap", "soon", "later", "if", "when", "before", "after", "until",
+  "once", "so", "and", "or",
+]);
+
+/** Lowercased raw tokens: whitespace split, curly apostrophes folded to
+ * straight ones, every character other than a-z, 0-9 and the apostrophe
+ * trimmed from both ends, empty tokens removed. */
+export function rawItemTokens(desc: string): string[] {
+  return String(desc ?? "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u02bc]/g, "'")
+    .split(/\s+/)
+    .map((t) => t.replace(/^[^a-z0-9']+|[^a-z0-9']+$/g, ""))
+    .filter((t) => t.length > 0);
+}
+
+export type FragmentDropReason = "one_token" | "dangling_clause";
+
+export type FragmentVerdict = {
+  /** The normalized description the rules read. */
+  normalized: string;
+  /** Null when the item is kept. */
+  drop: FragmentDropReason | null;
+  /** True when a kept item's object is a bare pronoun (fragment suspect).
+   * Always false for a dropped item. */
+  pronounObject: boolean;
+};
+
+/** True when the normalized description has a bare pronoun object. */
+export function hasPronounObject(normalized: string): boolean {
+  const toks = rawItemTokens(normalized);
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i];
+    if (ALWAYS_PRONOUN.has(t)) return true;
+    if (DEMONSTRATIVE.has(t)) {
+      const next = toks[i + 1];
+      if (next === undefined || DEMONSTRATIVE_OBJECT_FOLLOWERS.has(next)) return true;
+    }
+  }
+  return false;
+}
+
+/** The whole Task 5.1 classification of one extracted item. */
+export function classifyFragmentItem(desc: string): FragmentVerdict {
+  const normalized = normalizeItemPrefix(desc);
+  // (a) one_token: 1 or fewer distinct content tokens after the Task 1.3
+  // stoplist (single source: quote-coverage.ts).
+  if (new Set(descriptionContentTokens(normalized)).size <= 1) {
+    return { normalized, drop: "one_token", pronounObject: false };
+  }
+  // (b) dangling_clause: the raw final token cannot end an obligation.
+  const toks = rawItemTokens(normalized);
+  const last = toks[toks.length - 1];
+  if (last !== undefined && DANGLING_FINAL_TOKENS.has(last)) {
+    return { normalized, drop: "dangling_clause", pronounObject: false };
+  }
+  return { normalized, drop: null, pronounObject: hasPronounObject(normalized) };
+}
+
+/** True when the item is dropped by rule (a) or (b). A pronoun suspect is
+ * NOT a fragment drop. */
+export function isFragmentItem(desc: string): boolean {
+  return classifyFragmentItem(desc).drop !== null;
 }
 
 const RESCHEDULE_DATE_HINT_RE =

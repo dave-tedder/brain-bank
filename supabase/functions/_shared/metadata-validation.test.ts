@@ -18,7 +18,16 @@ import {
   isWorkReportCapture,
   routeProjectFromContent,
   shouldExtractActionItems,
+  classifyFragmentItem,
+  DANGLING_FINAL_TOKENS,
+  hasPronounObject,
+  isFragmentItem,
+  normalizeItemPrefix,
 } from "./metadata-validation.ts";
+import { descriptionContentTokens } from "./quote-coverage.ts";
+import { EMPTY_ITEM_MARKER } from "./fragment-gate.ts";
+// Runtime-bound claims for the TS mutant sweep (Codex re-review 2, N1).
+import { claim } from "../../../scripts/loop-closing/claim.ts";
 import { extractAndStoreActionItems } from "./capture-pipeline.ts";
 
 Deno.test("normalizeTopic: lowercases", () => {
@@ -625,14 +634,23 @@ function makeFakeActionItemDb(existingOpen: string[] = []) {
           }),
       }),
       insert: (rows: FakeRow[] | Record<string, unknown>) => {
+        let returned: Array<{ id: string; description: string }> = [];
         if (table === "auto_resolve_decisions") {
           decisions.push(rows as Record<string, unknown>);
         } else if (Array.isArray(rows)) {
           inserted.push(...rows);
+          // Task 5.1: the action_items insert asks for the new ids back
+          // (.select("id, description")) for the pronoun-suspect rows.
+          returned = rows.map((r, i) => ({
+            id: `f0000000-0000-4000-8000-${String(inserted.length - rows.length + i).padStart(12, "0")}`,
+            description: r.description,
+          }));
         } else {
           throw new Error(`unexpected single-row insert into ${table}`);
         }
-        return Promise.resolve({ error: null });
+        return Object.assign(Promise.resolve({ error: null }), {
+          select: (_cols: string) => Promise.resolve({ data: returned, error: null }),
+        });
       },
     }),
   };
@@ -919,4 +937,268 @@ Deno.test("extractOperatorLines: a profile-configured marker replaces the defaul
   // Regex metacharacters in a marker are literal, and the match is case-sensitive.
   assertEquals(extractOperatorLines("TODO(me): ship it\ntodo(me): prose", "TODO(me)"), ["ship it"]);
   assertEquals(extractOperatorLines("for alex: prose, not a marker", "FOR ALEX"), []);
+});
+
+
+// ---------------------------------------------------------------------------
+// Loop-closing Task 5.1: the fragment gate. The plan's own cases first, each
+// named for the case; then the rule edges; then the gate end to end through the
+// shared extractAndStoreActionItems (fake db above).
+// ---------------------------------------------------------------------------
+
+Deno.test("fragment gate 5.1: deploy, switch on and then deploy drop with reason one_token", () => {
+  for (const d of ["deploy", "switch on", "then deploy"]) {
+    claim("rule-a-one-token", classifyFragmentItem(d).drop, "one_token", d);
+    assertEquals(isFragmentItem(d), true, d);
+  }
+});
+
+Deno.test("fragment gate 5.1: finalize what we're drops with reason dangling_clause and NOT one_token", () => {
+  // Rule (a) alone keeps it: two content tokens survive the stoplist. Rule (b)
+  // is what drops it.
+  assertEquals(descriptionContentTokens("finalize what we're"), ["finalize", "what"]);
+  const v = classifyFragmentItem("finalize what we're");
+  claim("rule-b-dangling", v.drop, "dangling_clause");
+  assertEquals(v.pronounObject, false);
+});
+
+Deno.test("fragment gate 5.1: Awaiting the operator to apply migration 063 keeps, normalized to the operator to apply migration 063", () => {
+  const v = classifyFragmentItem("Awaiting the operator to apply migration 063");
+  claim("prefix-normalized", v, { normalized: "the operator to apply migration 063", drop: null, pronounObject: false });
+});
+
+Deno.test("fragment gate 5.1: send Sam the explainer PDF keeps (ends in a content word), no suspect", () => {
+  assertEquals(classifyFragmentItem("send Sam the explainer PDF"), {
+    normalized: "send Sam the explainer PDF", drop: null, pronounObject: false,
+  });
+});
+
+Deno.test("fragment gate 5.1: send her the explainer PDF keeps as a pronoun_object suspect", () => {
+  claim("pronoun-suspect", classifyFragmentItem("send her the explainer PDF"), {
+    normalized: "send her the explainer PDF", drop: null, pronounObject: true,
+  });
+});
+
+Deno.test("fragment gate 5.1: nudge Jordan if nothing arrives keeps, no suspect", () => {
+  assertEquals(classifyFragmentItem("nudge Jordan if nothing arrives"), {
+    normalized: "nudge Jordan if nothing arrives", drop: null, pronounObject: false,
+  });
+});
+
+Deno.test("fragment gate 5.1: normalizeItemPrefix strips each prefix in any case, repeatedly, and nothing else", () => {
+  const cases: Array<[string, string]> = [
+    ["then send Jordan the koi sketch", "send Jordan the koi sketch"],
+    ["Then, send Jordan the koi sketch", "send Jordan the koi sketch"],
+    ["next: send Jordan the koi sketch", "send Jordan the koi sketch"],
+    ["NEXT:send Jordan the koi sketch", "send Jordan the koi sketch"],
+    ["waiting on Jordan to send the deposit", "Jordan to send the deposit"],
+    ["Waiting   on Jordan to send the deposit", "Jordan to send the deposit"],
+    ["awaiting Jordan's deposit", "Jordan's deposit"],
+    ["TODO: send Jordan the koi sketch", "send Jordan the koi sketch"],
+    ["todo:send Jordan the koi sketch", "send Jordan the koi sketch"],
+    ["TODO: then next: send Jordan the koi sketch", "send Jordan the koi sketch"],
+    ["  then  ", ""],
+    // Not prefixes: inside a word, without the colon, or not at the start.
+    ["thence to the shop", "thence to the shop"],
+    ["next week send Jordan the sketch", "next week send Jordan the sketch"],
+    ["TODO send Jordan the sketch", "TODO send Jordan the sketch"],
+    ["send Jordan the sketch then call", "send Jordan the sketch then call"],
+    ["waitingon nothing", "waitingon nothing"],
+  ];
+  for (const [input, want] of cases) assertEquals(normalizeItemPrefix(input), want, input);
+});
+
+Deno.test("fragment gate 5.1: a prefix is normalized, never a reason to drop", () => {
+  for (const p of ["then ", "next: ", "waiting on ", "awaiting ", "TODO: "]) {
+    claim("prefix-never-drops", classifyFragmentItem(`${p}send Sam the explainer PDF`).drop, null, p);
+  }
+  // "next:" is not on the stoplist, so without normalization "next: deploy"
+  // would keep two content tokens; normalized, it is one.
+  assertEquals(classifyFragmentItem("next: deploy").drop, "one_token");
+});
+
+Deno.test("fragment gate 5.1: rule (a) counts distinct content tokens after the Task 1.3 stoplist", () => {
+  assertEquals(classifyFragmentItem("").drop, "one_token");
+  assertEquals(classifyFragmentItem("   ").drop, "one_token");
+  assertEquals(classifyFragmentItem("fix it").drop, "one_token"); // both stoplisted
+  assertEquals(classifyFragmentItem("invoice invoice").drop, "one_token"); // one distinct token
+  claim("rule-a-stoplist", classifyFragmentItem("The operator should run the deploy").drop, "one_token");
+  assertEquals(classifyFragmentItem("invoice Jordan").drop, null); // two content tokens
+});
+
+Deno.test("fragment gate 5.1: rule (b) drops on every listed final word and only when it is final", () => {
+  assertEquals(DANGLING_FINAL_TOKENS.size, 20);
+  for (const w of DANGLING_FINAL_TOKENS) {
+    assertEquals(classifyFragmentItem(`send Sam the koi brochure ${w}`).drop, "dangling_clause", w);
+    // The same word inside the item does not drop it.
+    assertEquals(classifyFragmentItem(`send Sam ${w} koi brochure`).drop, null, `${w} mid-item`);
+  }
+  // Raw final token: case folded, trailing punctuation trimmed, curly
+  // apostrophe folded to a straight one, apostrophe kept.
+  assertEquals(classifyFragmentItem("Finalize what WE'RE.").drop, "dangling_clause");
+  assertEquals(classifyFragmentItem("finalize what we’re").drop, "dangling_clause");
+  assertEquals(classifyFragmentItem("ask Jordan what we're doing about it's").drop, "dangling_clause");
+  // A word that merely starts like a listed one is not listed.
+  assertEquals(classifyFragmentItem("send Sam the theme").drop, null);
+  assertEquals(classifyFragmentItem("ask Jordan about isles").drop, null);
+});
+
+Deno.test("fragment gate 5.1: rule (a) is checked first, so an item both rules match records one_token", () => {
+  assertEquals(classifyFragmentItem("deploy the").drop, "one_token");
+  assertEquals(classifyFragmentItem("then deploy to").drop, "one_token");
+});
+
+Deno.test("fragment gate 5.1: pronoun objects her, him and it anywhere; this and that only as an object", () => {
+  const yes = [
+    "send her the explainer PDF",
+    "follow up with him about the deposit",
+    "send it to Sam by Friday",
+    "pull her file before the session",
+    "send this to Jordan",
+    "finish that up tomorrow",
+    "hand Sam this",
+  ];
+  const no = [
+    "send Sam the explainer PDF",
+    "check this week's koi post",
+    "confirm that the migration ran",
+    "check if it's live on the site",
+    "send Sam the koi brochure",
+  ];
+  for (const d of yes) assertEquals(hasPronounObject(normalizeItemPrefix(d)), true, d);
+  for (const d of no) assertEquals(hasPronounObject(normalizeItemPrefix(d)), false, d);
+  // A dropped item is never also a suspect.
+  assertEquals(classifyFragmentItem("send it").pronounObject, false);
+});
+
+const FRAG_THOUGHT = "4a51f000-0000-4000-8000-000000000001";
+const PLAN_ITEMS = [
+  "deploy",
+  "switch on",
+  "then deploy",
+  "finalize what we're",
+  "Awaiting the operator to apply migration 063",
+  "send Sam the explainer PDF",
+  "send her the explainer PDF",
+  "nudge Jordan if nothing arrives",
+];
+const TASK_META = (items: string[]) => ({ type: "task", source: "slack", action_items: items });
+
+Deno.test("fragment gate 5.1, shared capture path: the plan's eight items store four, drop four with their reasons, and record one suspect", async () => {
+  const { db, inserted, decisions } = makeFakeActionItemDb();
+  await extractAndStoreActionItems(db, FRAG_THOUGHT, TASK_META(PLAN_ITEMS), "a note with eight items", isMechanicalForTest);
+  // The stored description is the original text, prefix included.
+  claim("e2e-stored", inserted.map((r) => r.description), [
+    "Awaiting the operator to apply migration 063",
+    "send Sam the explainer PDF",
+    "send her the explainer PDF",
+    "nudge Jordan if nothing arrives",
+  ]);
+  const drops = decisions.filter((d) => d.outcome === "dropped");
+  claim("e2e-drops", drops.map((d) => [d.candidate_description, d.reason]), [
+    ["deploy", "one_token"],
+    ["switch on", "one_token"],
+    ["then deploy", "one_token"],
+    ["finalize what we're", "dangling_clause"],
+  ]);
+  for (const d of drops) {
+    assertEquals(d.layer, "fragment");
+    assertEquals(d.item_id, null);
+    assertEquals(d.thought_id, FRAG_THOUGHT);
+    assertEquals([d.evidence_thought_id, d.evidence_event_id, d.related_item_id, d.quote, d.score], [null, null, null, null, null]);
+  }
+  const suspects = decisions.filter((d) => d.outcome === "proposed");
+  // The fake returns ids in insert order; "send her..." is the third row.
+  claim("e2e-suspect", suspects, [{
+    layer: "fragment", outcome: "proposed", reason: "pronoun_object",
+    candidate_description: "send her the explainer PDF",
+    item_id: "f0000000-0000-4000-8000-000000000002", thought_id: FRAG_THOUGHT,
+    evidence_thought_id: null, evidence_event_id: null, related_item_id: null, quote: null, score: null,
+  }]);
+  assertEquals(decisions.length, 5);
+});
+
+Deno.test("fragment gate 5.1, shared capture path: runs after the appointment guard and before the open-item dedup", async () => {
+  // An unanchored appointment item that is ALSO a fragment is the appointment
+  // guard's: skipped there, so no fragment row. A fragment that duplicates an
+  // open item still gets its fragment row: the gate runs before the dedup.
+  const { db, inserted, decisions } = makeFakeActionItemDb(["switch on"]);
+  await extractAndStoreActionItems(
+    db, FRAG_THOUGHT,
+    TASK_META(["Schedule dental appointment for the", "switch on", "send Sam the explainer PDF"]),
+    "a note", isMechanicalForTest,
+  );
+  assertEquals(inserted.map((r) => r.description), ["send Sam the explainer PDF"]);
+  claim("gate-before-dedup", decisions.map((d) => [d.layer, d.outcome, d.reason, d.candidate_description]), [
+    ["fragment", "dropped", "one_token", "switch on"],
+  ]);
+});
+
+Deno.test("fragment gate 5.1, shared capture path: FOR OPERATOR lines of a work report pass through the same gate", async () => {
+  const { db, inserted, decisions } = makeFakeActionItemDb();
+  const report = "CRM Session 80 (2026-10-29): spec committed (commit 4f1c2a9b).\nFOR OPERATOR: deploy\nFOR OPERATOR: send Sam the sign-in link";
+  await extractAndStoreActionItems(db, FRAG_THOUGHT, TASK_META(["Update the tracker"]), report, isMechanicalForTest);
+  assertEquals(inserted.map((r) => r.description), ["send Sam the sign-in link"]);
+  assertEquals(decisions.map((d) => [d.layer, d.reason, d.candidate_description]), [
+    ["gate", "work_report", "Update the tracker"],
+    ["fragment", "one_token", "deploy"],
+  ]);
+});
+
+Deno.test("fragment gate 5.1, shared capture path: an empty extracted item is dropped and its row carries the marker", async () => {
+  const { db, inserted, decisions } = makeFakeActionItemDb();
+  await extractAndStoreActionItems(db, FRAG_THOUGHT, TASK_META(["  ", "send Sam the explainer PDF"]), "a note", isMechanicalForTest);
+  assertEquals(inserted.map((r) => r.description), ["send Sam the explainer PDF"]);
+  assertEquals(decisions.map((d) => [d.reason, d.candidate_description]), [["one_token", EMPTY_ITEM_MARKER]]);
+});
+
+Deno.test("fragment gate 5.1, shared capture path: a failed action_items insert writes no suspect row", async () => {
+  const decisions: Array<Record<string, unknown>> = [];
+  const db = {
+    from: (table: string) => ({
+      select: () => ({ eq: () => Promise.resolve({ data: [], error: null }) }),
+      insert: (rows: unknown) => {
+        if (table === "auto_resolve_decisions") decisions.push(rows as Record<string, unknown>);
+        const answer = table === "action_items"
+          ? { data: null, error: { message: "insert refused" } }
+          : { error: null };
+        return Object.assign(Promise.resolve(answer), { select: () => Promise.resolve(answer) });
+      },
+    }),
+  };
+  await extractAndStoreActionItems(db, FRAG_THOUGHT, TASK_META(["send her the explainer PDF", "deploy"]), "a note", isMechanicalForTest);
+  assertEquals(decisions.map((d) => [d.outcome, d.reason]), [["dropped", "one_token"]]);
+});
+
+Deno.test("fragment gate 5.1, shared capture path: a failed decision write never un-drops an item", async () => {
+  const inserted: unknown[] = [];
+  const db = {
+    from: (table: string) => ({
+      select: () => ({ eq: () => Promise.resolve({ data: [], error: null }) }),
+      insert: (rows: unknown) => {
+        if (table === "auto_resolve_decisions") return Object.assign(Promise.resolve({ error: { message: "down" } }), {});
+        inserted.push(...(rows as unknown[]));
+        return Object.assign(Promise.resolve({ error: null }), {
+          select: () => Promise.resolve({ data: (rows as Array<{ description: string }>).map((r, i) => ({ id: `id-${i}`, description: r.description })), error: null }),
+        });
+      },
+    }),
+  };
+  await extractAndStoreActionItems(db, FRAG_THOUGHT, TASK_META(["deploy", "send her the explainer PDF"]), "a note", isMechanicalForTest);
+  assertEquals((inserted as Array<{ description: string }>).map((r) => r.description), ["send her the explainer PDF"]);
+});
+
+Deno.test("fragment gate 5.1: known cost of rule (a) as the plan wrote it: a generic verb plus one object word drops", () => {
+  // The Task 1.3 stoplist holds generic verbs (fix, update, deploy, check, add,
+  // make, run, apply), so an item that is one of them plus a single object word
+  // has one content token and drops. Pinned here so a change to this behavior
+  // is a decision, not a drift; the packet lists it for the operator, and every such
+  // drop is a fragment row the monthly hand read can see.
+  for (const d of ["Fix the website", "Update the tracker", "Deploy the dashboard fix", "check email"]) {
+    assertEquals(classifyFragmentItem(d).drop, "one_token", d);
+  }
+  // Two object words, or a named person, keep it.
+  for (const d of ["Fix the website menu", "Call Jordan", "Pay rent", "email Sam the invoice"]) {
+    assertEquals(classifyFragmentItem(d).drop, null, d);
+  }
 });

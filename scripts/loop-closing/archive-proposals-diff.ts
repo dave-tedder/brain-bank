@@ -82,7 +82,7 @@ export const ADVERSARIAL: Array<{ text: string; captured_at: string }> = [
   { text: "session5 handoff", captured_at: "2026-11-02T20:00:00Z" },
   { text: "Handoff: see project-tracker.md and commit ABCDEF1", captured_at: "2026-11-02T20:00:00Z" },
   { text: "HANDOFF (abcdef12) [OE:1234abcd", captured_at: "2026-11-02T20:00:00Z" },
-  { text: "[oe:1234abcd] deliverables/open-brain/x.md", captured_at: "2026-11-02T20:00:00Z" },
+  { text: "[oe:1234abcd] deliverables/brain-bank/x.md", captured_at: "2026-11-02T20:00:00Z" },
   { text: "deliverables/x handoff", captured_at: "2026-11-02T20:00:00Z" },
   { text: "Deliverables/a/b.md handoff", captured_at: "2026-11-02T20:00:00Z" },
   { text: "Deployed 2026-11-01 and TASK 1234ABCD", captured_at: "2026-11-02T20:00:00Z" },

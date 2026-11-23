@@ -30,6 +30,7 @@ import {
   recordDecision,
 } from "../_shared/decisions.ts";
 import { resolveOpenItemAndRecord } from "../_shared/resolve-open-item.ts";
+import { isMechanicalCapture, LOG_TRUNC } from "../_shared/capture-helpers.ts";
 import { extractJsonObject } from "../_shared/extract-json.ts";
 import {
   contentHash,
@@ -39,6 +40,13 @@ import {
 } from "../_shared/capture-pipeline.ts";
 import { buildRestEventUpdate } from "./_rest_event.ts";
 import { callOpenRouter } from "../_shared/openrouter.ts";
+import {
+  type CompletionWarning,
+  evaluateCompletion,
+  ROUTE_SNAPSHOT_COLUMNS,
+  type RouteLookup,
+  type RouteSnapshotRow,
+} from "./_complete_contract.ts";
 import {
   ACTION_ITEM_LIST_MAX,
   actionItemListWindow,
@@ -227,44 +235,6 @@ function extractMetadata(text: string): Promise<Record<string, unknown>> {
 
 // --- Action Item Tracking ---
 
-// Content starting with any of these prefixes is a mechanical/informational capture
-// (calendar sync, notion sync, email thread, weekly review, trend analysis, Meta DM
-// failure report). These captures describe STATE or EVENTS, not completion of action
-// items, so auto-resolve is unsafe — they carry topic/person metadata that scope-
-// matches real action items but aren't evidence of anything being done. Completion
-// signals from these sources must come through a manual `done:` command or a
-// dedicated session-log thought, not this path. Adding a pattern here means
-// "this source never resolves action items."
-// Structural prefixes are universal (every operator has these sync sources).
-// Operator-specific bridge prefixes come from profile.json — see
-// `profile.example.json` at the repo root (copied to
-// `supabase/functions/_shared/profile.json` during setup).
-const MECHANICAL_CAPTURE_PREFIXES = [
-  "[Calendar Sync]",
-  "[Notion Sync]",
-  "[Meta DM Scan]",
-  "[Weekly Review]",
-  "Email thread:",
-  "Meta DM Scan failed",
-  ...loadProfile().mechanical_capture_prefixes,
-  // Closeout-controller bookkeeping records (apply batch, operator-resolution
-  // sweep, run summary). Mirror of CLOSEOUT_CAPTURE_PREFIX in
-  // scripts/open-engine/closeout-controller.mjs. Stored, never extracted,
-  // never a completion signal, operator-marker lines included (one such
-  // capture once auto-resolved the open design item its own card said was the
-  // operator's).
-  "[Open Engine Closeout]",
-];
-
-// MCP tool-surface enum values sourced from profile.
-const eventTypes = loadProfile().event_types;
-const contentTypes = loadProfile().content_types;
-
-function isMechanicalCapture(content: string): boolean {
-  const head = content.trimStart();
-  return MECHANICAL_CAPTURE_PREFIXES.some((p) => head.startsWith(p));
-}
-
 // Token-set Jaccard similarity on 3+-char lowercased words. Used as a restatement
 // guard: if a new thought's own extracted action_item is highly similar to a
 // candidate open action item, the new thought is RE-CAPTURING that work, not
@@ -291,15 +261,20 @@ const RESTATEMENT_THRESHOLD = 0.5;
 // Task 1.3): subject coverage at SUBJECT_COVERAGE_THRESHOLD replaced the
 // Jaccard-over-the-union quoteOverlap that dropped 6 of 8 real completions on
 // 2026-11-02. Single source, no mirror burden for the helper itself.
-const LOG_TRUNC = 200;
+// LOG_TRUNC and isMechanicalCapture (and its prefix list) live in
+// _shared/capture-helpers.ts (loop-closing Task 5.2, correction 3).
 // Per-call ceiling on the LAYER 2 auto-resolve LLM call. A small
 // classification prompt normally answers in seconds; if it hangs, aborting
 // and skipping auto-resolve (fail-safe: no resolution) beats stalling the
 // capture path toward the Edge Runtime wall.
 const AUTO_RESOLVE_LLM_TIMEOUT_MS = 30_000;
 
-// Moved to _shared/capture-pipeline.ts so external-crm-sync's capture_intake
-// reuses it. The mechanical test stays here (mirror list).
+// MCP tool-surface enum values sourced from profile.
+const eventTypes = loadProfile().event_types;
+const contentTypes = loadProfile().content_types;
+
+// Moved to _shared/capture-pipeline.ts so external-crm-sync's
+// capture_intake reuses it. The mechanical test is _shared/capture-helpers.ts's.
 function extractAndStoreActionItems(
   thoughtId: string,
   metadata: Record<string, unknown>,
@@ -780,6 +755,23 @@ async function loadAgentTaskForTool(taskId: string): Promise<
   return data as (AgentTaskAccessRow & Record<string, unknown>) | null;
 }
 
+// Task 5.4: the route capability snapshot for one slug. Never throws: a failed
+// read is infrastructure state, which evaluateCompletion turns into an
+// accept-with-warning, never a refusal.
+async function loadRouteSnapshot(slug: string): Promise<RouteLookup> {
+  try {
+    const { data, error } = await supabase
+      .from("closeout_routes")
+      .select(ROUTE_SNAPSHOT_COLUMNS)
+      .eq("slug", slug)
+      .maybeSingle();
+    if (error) return { row: null, error: error.message || String(error) };
+    return { row: (data as RouteSnapshotRow | null) ?? null };
+  } catch (err: unknown) {
+    return { row: null, error: (err as Error)?.message || String(err) };
+  }
+}
+
 async function moveAgentTaskViaTool(args: {
   taskId: string;
   agentCode: string;
@@ -809,6 +801,43 @@ async function moveAgentTaskViaTool(args: {
     assertWorkingExitAllowed(task, args.action);
   }
 
+  // Task 5.4: the receipt contract at complete time, BEFORE the write. A
+  // refusal throws, so move_agent_task_status is never called and the task
+  // stays Agent Working under the same claim. request_agent_review writes the
+  // same AGENT DONE event the closeout controller reads, so it is checked too.
+  let warnings: CompletionWarning[] = [];
+  if (args.action === "complete" || args.action === "request-review") {
+    const slug = typeof task.project_slug === "string"
+      ? task.project_slug.trim()
+      : "";
+    const verdict = evaluateCompletion({
+      receipt: args.reason ?? "",
+      task: {
+        project_slug: task.project_slug as string | null,
+        desired_outcome: task.desired_outcome as string | null,
+        title: task.title as string | null,
+      },
+      route: slug ? await loadRouteSnapshot(slug) : null,
+      now: new Date(),
+    });
+    if (!verdict.ok) {
+      // One line per refusal and per warning in the function log: the plan's
+      // measures (zero-hold rate, unavailable warnings per week) count these.
+      console.log(
+        `[complete-contract] COMPLETE_REFUSED task=${args.taskId} action=${args.action} reasons=${
+          verdict.reasons.join(",")
+        }`,
+      );
+      throw new Error(verdict.message);
+    }
+    warnings = verdict.warnings;
+    for (const w of warnings) {
+      console.log(
+        `[complete-contract] ${w.code} task=${args.taskId} action=${args.action} slug=${slug}`,
+      );
+    }
+  }
+
   const { status, receipt } = receiptForTaskTool(args.action);
   const { data, error } = await supabase.rpc("move_agent_task_status", {
     p_task_id: args.taskId,
@@ -820,7 +849,9 @@ async function moveAgentTaskViaTool(args: {
     p_not_before: args.notBefore ?? null,
   });
   if (error) throw error;
-  return { receipt, task: data };
+  return warnings.length > 0
+    ? { receipt, task: data, warnings }
+    : { receipt, task: data };
 }
 
 // Hard caps on user-supplied string lengths in REST handler bodies. The

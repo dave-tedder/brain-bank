@@ -9,8 +9,9 @@
 //   POST /external-crm-sync/capture_intake  a new inbound request (an intake) as a thought,
 //                                          keyed on thoughts.metadata.crm_intake_id;
 //                                          built through the shared capture pipeline
-//                                          (embedding, metadata extraction, action items)
-//                                          so it reaches the daily digest like any capture
+//                                          (embedding, metadata extraction) so it reaches
+//                                          the daily digest like any capture. It stores NO
+//                                          action items: the CRM owns request state
 //
 // Still NO READ OPERATIONS. Nothing here returns a row, a list, or a search; the
 // only response bodies are `{status, id}` and error strings. The function's
@@ -31,7 +32,6 @@ import { serviceKey } from "../_shared/service-key.ts";
 import { authenticatePushKey } from "./_auth.ts";
 import {
   contentHash,
-  extractAndStoreActionItems,
   extractMetadata,
   getEmbedding,
 } from "../_shared/capture-pipeline.ts";
@@ -178,7 +178,11 @@ const store = new SupabaseSyncStore();
 
 // The same steps handleRestCapture runs in open-brain-mcp, minus the two
 // rejection guards (content-hash dedup and the near-duplicate embedding guard):
-// the intake id is this route's dedupe key. Auto-resolve is not run at all.
+// the intake id is this route's dedupe key. Auto-resolve is not run at all, and
+// neither is action-item extraction: an intake is a request the CRM already
+// tracks, not a to-do source, so no action_items row and no
+// auto_resolve_decisions row is written for it. The extracted strings stay in
+// the thought's metadata.action_items, as on every capture.
 const pipeline: CapturePipeline = {
   hash: contentHash,
   async analyze(content: string) {
@@ -195,16 +199,8 @@ const pipeline: CapturePipeline = {
     }
     return { embedding, metadata: { ...coerced } };
   },
-  afterInsert(thoughtId: string, content: string, metadata) {
-    // Intake text is never a mechanical capture; the MECHANICAL_CAPTURE_PREFIXES
-    // test lives in the two capture files and does not apply to this route.
-    return extractAndStoreActionItems(
-      supabase,
-      thoughtId,
-      metadata,
-      content,
-      () => false,
-    );
+  afterInsert() {
+    return Promise.resolve();
   },
 };
 
