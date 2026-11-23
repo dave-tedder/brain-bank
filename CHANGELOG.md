@@ -587,7 +587,8 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 - This snapshot preceded the public `v0.1.0` release, which shipped on 2026-04-30 after the deploy-from-scratch walkthrough was verified against fresh Supabase projects.
 - The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/dave-tedder/brain-bank/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/dave-tedder/brain-bank/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/dave-tedder/brain-bank/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/dave-tedder/brain-bank/compare/v0.8.1...v0.8.2
