@@ -8,14 +8,40 @@
 #   bash scripts/loop-closing/archive-proposals-sql-test.sh --diff <snapshot-dir>
 #   bash scripts/loop-closing/archive-proposals-sql-test.sh --verdict-selftest  # no database
 #   bash scripts/loop-closing/archive-proposals-sql-test.sh --load-selftest     # no database
+# (Live negative controls for the contract verdicts: tf001-harness-selftest.sh archive.)
 #
 # Three outcomes, never two (the PR 23 rule):
 #   0  passed: every check ran to completion and held.
 #   1  FAILED: a check RAN TO COMPLETION and its assertion did not hold. Only this is
-#      a caught mutation. Every exit 1 prints a line starting "FAIL" or "ERROR".
+#      a caught mutation. Every exit 1 prints a line starting "FAIL ".
 #   2  NEVER-RAN: the cluster, a migration or a mutant did not apply; a connection
-#      never finished its statements; a helper query could not connect; a step
-#      stopped before its last check. Nothing was judged, so nothing was caught.
+#      never finished its statements; a helper query did not execute; a statement
+#      was cancelled, timed out or lost a resource; the SQL contract stopped on an
+#      error that is not one of its own assertions; a step stopped before its last
+#      check. Nothing was judged, so nothing was caught.
+#
+# A psql error is NOT by itself a failed check. This is the rule
+# action-item-review-sql-test.sh has had since the PR 25 Codex review (P2,
+# 2026-11-18): psql exits 3 for a syntax error, a missing function or a statement
+# cancelled by statement_timeout just as it does for a failed assertion. Until
+# 2026-11-19 this runner counted every psql exit 3 as a FAIL. The rule, an allowlist:
+#   - The SQL contract's exit 3 is a FAIL only when its first error carries the
+#     contract's own assertion SQLSTATE (TF001, raised by pg_temp.ok and by nothing
+#     else) and a message starting "FAIL ". Any other SQLSTATE, and an error with
+#     no readable SQLSTATE, is NEVER-RAN. The contract has no error handler: no
+#     mutant in MUTATIONS is expected to make it raise anything but an assertion.
+#   - A helper query (q) that exits non-zero for any reason did not execute: the
+#     check made on it, and the run as a whole, is NEVER-RAN.
+#   - A schedule check that fails while either connection's transcript carries an
+#     interruption (INTERRUPTION_PREFIXES below, or an error with no readable
+#     SQLSTATE) is NEVER-RAN. A behavioral error there is still a completed answer.
+# --all-mutations runs each mutant under its own deadline (OBAP_MUTANT_DEADLINE,
+# default 300 s) via deadline.py; a deadline (124), any exit other than 0/1, an
+# exit 1 with no completed "FAIL " line, an exit 1 whose output also says NEVER-RAN
+# or shows an SQL error other than a contract assertion are all NEVER-RAN, and the
+# sweep exits 2 if any mutant never ran, 1 if any survived, 0 only when every one
+# was CAUGHT. --verdict-selftest proves these verdicts (and the diff's, below) on
+# canned transcripts without a database, and every run does so before trusting one.
 #
 # What it proves:
 #   1. archive-proposals-sql-test.sql (A01-A26, B01-B11, W01-W13, U01-U14, G01-G04): the policy, the
@@ -68,20 +94,208 @@ TEST_SQL="$HERE/archive-proposals-sql-test.sql"
 MUTATIONS="no_prelock no_recompute pending_reproposed kept_never_reproposes repropose_keeps_review card_done_exempts card_archived_exempts no_card_exemption reopen_exempt_off client_one_match client_fullname_off canary_off deferred_included deadline_no_clause_break deadline_window_4 deadline_grace_off wr_future_header_counts wr_threshold_1 fragment_ignored fragment_any_generation work_report_age_60 status_written grant_anon schedule_wrong last_run_oldest exclusive_boundary wr_locale_boundary wr_alnum_boundary wr_boundary_no_underscore ws_locale_commit ws_locale_deadline ws_no_feff window_chars lower_locale_tokens lower_locale_partial lower_locale_canary js_lower_no_dotted_i js_lower_no_kelvin"
 MUTANT_DEADLINE="${OBAP_MUTANT_DEADLINE:-300}"
 
+# SQLSTATE prefixes that mean the statement was interrupted or the server could
+# not do the work: nothing was judged. 08 connection, 53 insufficient resources,
+# 54 program limit, 57 operator intervention (57014 is statement_timeout and
+# cancel), 58 system error, XX internal error, 55P03 lock_timeout. The SQL
+# contract is handed this same list.
+INTERRUPTION_PREFIXES="08 53 54 57 58 XX 55P03"
+# The SQL contract's assertion failures: pg_temp.ok raises this, nothing else does.
+ASSERT_STATE=TF001
+CONTRACT_NAME="ARCHIVE PROPOSALS SQL TEST"
+# The contract's last line, as psql prints it (a psql echo, so the whole line).
+CONTRACT_PASSED_RE='^ARCHIVE PROPOSALS SQL TEST PASSED$'
+
+# sqlstate_kind <state>: assertion | interruption | behavioral | unparseable.
+sqlstate_kind() {
+  local p
+  case "$1" in
+    [0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z][0-9A-Z]) ;;
+    *) echo unparseable; return;;
+  esac
+  [ "$1" = "$ASSERT_STATE" ] && { echo assertion; return; }
+  for p in $INTERRUPTION_PREFIXES; do
+    case "$1" in "$p"*) echo interruption; return;; esac
+  done
+  echo behavioral
+}
+
+# contract_verdict <psql exit> <output file>: judge one run of the SQL contract
+# (psql -f, ON_ERROR_STOP, VERBOSITY=verbose, so every error line carries its
+# SQLSTATE). Sets VERDICT; returns 0 passed, 1 a completed assertion failed,
+# 2 NEVER-RAN. psql's exit 3 says only that a statement raised.
+contract_verdict() {
+  local code="$1" file="$2" first state msg
+  first=$(grep -m1 -E '^psql:.*:[0-9]+: ERROR:  ' "$file")
+  case "$code" in
+    0)
+      if [ -n "$first" ]; then VERDICT="psql exited 0 but its output carries an error"; return 2; fi
+      if grep -Eq "$CONTRACT_PASSED_RE" "$file"; then VERDICT="passed"; return 0; fi
+      VERDICT="the SQL contract exited 0 without its PASSED line"; return 2;;
+    3)
+      state=$(printf '%s\n' "$first" | sed -nE 's/^psql:.*:[0-9]+: ERROR:  ([0-9A-Z]{5}): .*$/\1/p')
+      msg=$(printf '%s\n' "$first" | sed -E 's/^psql:.*:[0-9]+: ERROR:  ([0-9A-Z]{5}: )?//' | cut -c1-240)
+      case "$(sqlstate_kind "$state")" in
+        assertion)
+          case "$msg" in
+            "FAIL "*) VERDICT="$msg"; return 1;;
+          esac
+          VERDICT="SQLSTATE $ASSERT_STATE without a FAIL message, so no named check failed: $msg"; return 2;;
+        interruption) VERDICT="the SQL contract was interrupted (SQLSTATE $state: $msg); the statement did not complete, so no check was judged"; return 2;;
+        behavioral) VERDICT="the SQL contract stopped on an SQL error that is not one of its assertions (SQLSTATE $state: $msg); no check judged it, so it is not a failure and not a catch"; return 2;;
+        *) VERDICT="the SQL contract stopped (psql exit 3) on an error with no readable SQLSTATE: $(printf '%s' "${first:-$(tail -1 "$file")}" | cut -c1-200)"; return 2;;
+      esac;;
+    *) VERDICT="the SQL contract did not complete (psql exit $code): $(tail -1 "$file" | cut -c1-160)"; return 2;;
+  esac
+}
+
+# classify <mutation> <exit code> <output>: prints one line; returns 0 CAUGHT,
+# 1 SURVIVED, 2 NEVER-RAN. An exit 1 is a catch only when the run printed a
+# completed "FAIL " line and nothing in it says the run was cut short: no
+# NEVER-RAN line, and no SQL error line other than a contract assertion.
 classify() {
-  local m="$1" code="$2" out="$3" line
+  local m="$1" code="$2" out="$3" line bad
   case "$code" in
     1)
-      line=$(printf '%s\n' "$out" | grep -E '^(FAIL|ERROR)' | head -1 | cut -c1-160)
+      bad=$(printf '%s\n' "$out" | grep -m1 '^NEVER-RAN')
+      if [ -n "$bad" ]; then echo "NEVER-RAN $m: exit 1, but the run says it did not complete: $(printf '%s' "$bad" | cut -c1-160)"; return 2; fi
+      bad=$(printf '%s\n' "$out" | grep -E '^ERROR' | grep -m1 -v "^ERROR $ASSERT_STATE: FAIL ")
+      if [ -n "$bad" ]; then echo "NEVER-RAN $m: exit 1, but the output carries an SQL error that is not a completed assertion: $(printf '%s' "$bad" | cut -c1-160)"; return 2; fi
+      line=$(printf '%s\n' "$out" | grep -m1 '^FAIL ' | cut -c1-240)
       if [ -n "$line" ]; then echo "CAUGHT    $m: $line"; return 0; fi
-      echo "NEVER-RAN $m: exit 1 with no completed FAIL/ERROR line: $(printf '%s\n' "$out" | tail -1 | cut -c1-140)"; return 2;;
+      echo "NEVER-RAN $m: exit 1 with no completed FAIL line: $(printf '%s\n' "$out" | tail -1 | cut -c1-140)"; return 2;;
     0) echo "SURVIVED  $m"; return 1;;
     124) echo "NEVER-RAN $m: deadline of ${MUTANT_DEADLINE}s exceeded, the run did not complete"; return 2;;
     *) echo "NEVER-RAN $m (exit $code): $(printf '%s\n' "$out" | tail -1 | cut -c1-140)"; return 2;;
   esac
 }
 
+# Canned transcripts with the verdict each must get; no database. Run by
+# --verdict-selftest and, silently, before any run trusts a verdict. Fields:
+# want | contract, classify or kind | exit code | output (\n separates lines).
+# @P stands for psql's "psql:<file>:<line>:" prefix, @OK for the contract's own
+# last line. The three outcomes, by arm:
+#   outcome 0  exit 0 with the PASSED line and no error line.
+#   outcome 1  exit 3 whose first error is SQLSTATE TF001 with a "FAIL " message.
+#   outcome 2  every other exit 3 (a syntax error 42601, an undefined function
+#              42883, an undefined table 42P01, a statement timeout 57014, a
+#              terminated backend 57P01, a resource error, an error no check was
+#              written for, an error with no SQLSTATE), every other exit code,
+#              and an exit 0 that lacks the PASSED line or carries an error.
+contract_selftest() {
+  local d n=0 bad=0 got want kind code body P="psql:/x/t.sql:9:"
+  d=$(mktemp -d /tmp/obap-verdict.XXXXXX)
+  while IFS='|' read -r want kind code body; do
+    [ -z "$want" ] && continue
+    n=$((n + 1))
+    body=$(printf '%s' "$body" | sed "s#@P#$P#g; s#@OK#ARCHIVE PROPOSALS SQL TEST PASSED#g")
+    printf '%b\n' "$body" > "$d/out"
+    VERDICT=""
+    case "$kind" in
+      contract) contract_verdict "$code" "$d/out"; got=$?;;
+      classify) VERDICT=$(classify m "$code" "$(cat "$d/out")"); got=$?;;
+      kind) VERDICT=$(sqlstate_kind "$code"); [ "$VERDICT" = "$body" ]; got=$?;;
+    esac
+    if [ "$got" != "$want" ]; then
+      bad=$((bad + 1)); echo "FAIL verdict case $n ($kind, exit $code): got $got, expected $want: $VERDICT"
+    fi
+  done <<'CASES'
+0|contract|0|@P NOTICE:  00000: PASS T01 x\nLOCATION:  exec_stmt_raise, pl_exec.c:3911\n@OK
+2|contract|0|@P NOTICE:  00000: PASS T01 x
+2|contract|0|@P NOTICE:  00000: PASS T01 x\n@P ERROR:  TF001: FAIL T02 y: z\n@OK
+2|contract|0|@P NOTICE:  00000: PASS T01 the words ARCHIVE PROPOSALS SQL TEST PASSED inside a notice are not the last line
+1|contract|3|@P NOTICE:  00000: PASS T01 x\n@P ERROR:  TF001: FAIL T08 a named check that ran and did not hold: got 2\nCONTEXT:  PL/pgSQL function pg_temp_3.ok(text,boolean,text) line 4 at RAISE
+1|contract|3|@P ERROR:  TF001: FAIL T01 the first check: \nLOCATION:  exec_stmt_raise, pl_exec.c:3911
+2|contract|3|@P ERROR:  42601: syntax error at or near "selec"\nLINE 1: selec 1;\n        ^\nLOCATION:  scanner_yyerror, scan.l:1242
+2|contract|3|@P NOTICE:  00000: PASS T01 x\n@P ERROR:  42601: syntax error at end of input
+2|contract|3|@P ERROR:  42883: function public.no_such_function() does not exist\nLINE 1: select public.no_such_function();\nHINT:  No function matches the given name and argument types.
+2|contract|3|@P ERROR:  42P01: relation "public.no_such_table" does not exist
+2|contract|3|@P ERROR:  42703: column "nope" does not exist
+2|contract|3|@P ERROR:  57014: canceling statement due to statement timeout\nLOCATION:  ProcessInterrupts, postgres.c:3382
+2|contract|3|@P NOTICE:  00000: PASS T01 x\n@P ERROR:  57014: canceling statement due to user request
+2|contract|3|@P ERROR:  57P01: terminating connection due to administrator command
+2|contract|3|@P FATAL:  57P01: terminating connection due to administrator command\nserver closed the connection unexpectedly
+2|contract|2|@P FATAL:  57P01: terminating connection due to administrator command\n@P error: connection to server was lost
+2|contract|3|@P ERROR:  08006: connection failure
+2|contract|3|@P ERROR:  53200: out of memory
+2|contract|3|@P ERROR:  53100: could not extend file: No space left on device
+2|contract|3|@P ERROR:  54001: stack depth limit exceeded
+2|contract|3|@P ERROR:  58030: could not read block 0
+2|contract|3|@P ERROR:  XX000: unexpected internal state
+2|contract|3|@P ERROR:  55P03: canceling statement due to lock timeout
+2|contract|3|@P ERROR:  23503: insert or update on table "action_items" violates foreign key constraint "x_fkey"
+2|contract|3|@P ERROR:  23514: new row for relation "action_items" violates check constraint "x_check"
+2|contract|3|@P ERROR:  22012: division by zero
+2|contract|3|@P ERROR:  P0001: FAIL T02 looks like a check but is not the contract's SQLSTATE
+2|contract|3|@P ERROR:  P0001: review_proposal: the done transition of c0200001 wrote 0 rows.
+2|contract|3|@P ERROR:  TF001: T02 the contract's SQLSTATE without the FAIL marker
+2|contract|3|@P ERROR:  canceling statement due to statement timeout
+2|contract|3|@P ERROR:  FAIL T02 a FAIL message with no SQLSTATE at all (the display before this rule)
+2|contract|3|@P ERROR:  42601: syntax error at or near "x"\n@P ERROR:  TF001: FAIL T02 a later assertion does not outrank the first error
+2|contract|3|@P NOTICE:  00000: PASS T01 x
+2|contract|3|
+2|contract|2|psql: error: connection to server at "127.0.0.1", port 1 failed
+2|contract|1|psql: fatal
+2|contract|124|@P ERROR:  TF001: FAIL T02 y: z
+2|contract|137|@P ERROR:  TF001: FAIL T02 y: z
+0|classify|1|migrations applied\nPASS T01 x\nERROR TF001: FAIL T08 a named check: got 2\nFAIL ARCHIVE PROPOSALS SQL TEST: FAIL T08 a named check: got 2
+0|classify|1|PASS C1 x\nFAIL C2: the second run did not wait
+0|classify|1|PASS I helper list\nFAIL integration: MCP review: a keep is recorded
+2|classify|1|ERROR 57014: canceling statement due to statement timeout\nFAIL ARCHIVE PROPOSALS SQL TEST: canceling statement due to statement timeout
+2|classify|1|ERROR 42601: syntax error at or near "selec"\nFAIL ARCHIVE PROPOSALS SQL TEST: syntax error at or near "selec"
+2|classify|1|ERROR 42883: function public.no_such_function() does not exist\nFAIL ARCHIVE PROPOSALS SQL TEST: function public.no_such_function() does not exist
+2|classify|1|ERROR: canceling statement due to statement timeout\nFAIL ARCHIVE PROPOSALS SQL TEST: canceling statement due to statement timeout
+2|classify|1|ERROR (no SQLSTATE): something\nFAIL ARCHIVE PROPOSALS SQL TEST: something
+2|classify|1|ERROR 23503: insert or update on table "action_items" violates foreign key constraint\nFAIL ARCHIVE PROPOSALS SQL TEST: insert or update on table
+2|classify|1|ERROR TF001: not a fail message\nFAIL ARCHIVE PROPOSALS SQL TEST: x
+2|classify|1|ERROR: FAIL T38 the old display shape, with no SQLSTATE
+2|classify|1|FAIL C1: the first review did not record\nNEVER-RAN: a helper query did not execute
+2|classify|1|NEVER-RAN: the script stopped before its last check
+2|classify|1|something died
+2|classify|1|
+2|classify|1|PASS T01 x\n  FAIL indented is not a verdict line
+1|classify|0|ARCHIVE PROPOSALS SQL TEST COMPLETE (mutation x)
+2|classify|124|FAIL C2: printed before the deadline killed the run
+2|classify|2|NEVER-RAN: initdb failed
+2|classify|3|FAIL x
+2|classify|137|FAIL x
+0|kind|TF001|assertion
+0|kind|57014|interruption
+0|kind|57P01|interruption
+0|kind|08006|interruption
+0|kind|53200|interruption
+0|kind|54001|interruption
+0|kind|58030|interruption
+0|kind|XX000|interruption
+0|kind|55P03|interruption
+0|kind|55000|behavioral
+0|kind|42601|behavioral
+0|kind|42883|behavioral
+0|kind|42P01|behavioral
+0|kind|23503|behavioral
+0|kind|23514|behavioral
+0|kind|22023|behavioral
+0|kind|40P01|behavioral
+0|kind|P0001|behavioral
+0|kind||unparseable
+0|kind|5701|unparseable
+0|kind|57014x|unparseable
+0|kind|tf001|unparseable
+CASES
+  rm -rf "$d"
+  [ "$n" = 81 ] || { echo "CONTRACT VERDICT SELFTEST FAILED: ran $n cases, expected 81 (a case was lost)"; return 1; }
+  if [ "$bad" -gt 0 ]; then echo "CONTRACT VERDICT SELFTEST FAILED ($bad of $n)"; return 1; fi
+  echo "CONTRACT VERDICT SELFTEST PASSED ($n cases)"; return 0
+}
+
+# No contract or sweep verdict is trusted unless the classifiers pass their own cases.
+trust_verdicts() {
+  local cst
+  cst=$(contract_selftest) || { echo "NEVER-RAN: the verdict classifiers failed their own self-test, so no verdict can be trusted: $(printf '%s\n' "$cst" | grep -m1 '^FAIL')"; exit 2; }
+}
+
 if [ "${1:-}" = "--all-mutations" ]; then
+  trust_verdicts
   caught=0; survived=0; never=0; n=0
   shm_before=$(ipcs -m 2>/dev/null | grep -c '^m')
   for m in ${OBAP_MUTATIONS:-$MUTATIONS}; do
@@ -164,8 +378,11 @@ CASES
   echo "VERDICT SELFTEST PASSED ($n cases)"; return 0
 }
 
+# Both sets of canned cases: the diff's verdicts and the SQL contract's.
 if [ "${1:-}" = "--verdict-selftest" ]; then
-  verdict_selftest; exit $?
+  verdict_selftest; vcode=$?
+  contract_selftest; ccode=$?
+  [ "$vcode" = 0 ] && [ "$ccode" = 0 ]; exit $?
 fi
 
 # build_load_sql <snapshot-dir> <work-dir>: write <work-dir>/load.sql from the
@@ -382,13 +599,39 @@ case "${1:-}" in
   "") ;;
   *) echo "NEVER-RAN: unknown argument $1"; exit 2;;
 esac
+trust_verdicts
+# OBAP_INJECT=<name>: a negative control for the verdicts themselves, used by
+# tf001-harness-selftest.sh. Each one makes this run end non-zero in a known way;
+# a run that reaches its last line with one set is NEVER-RAN.
+INJECT="${OBAP_INJECT:-}"
 PORT=$((55000 + RANDOM % 900))
 WORK="$(mktemp -d /tmp/obap.XXXXXX)"
 PIDS=""
 COMPLETED=0
 never() { echo "NEVER-RAN: $*"; exit 2; }
+# An interruption in either schedule connection's transcript: an error line whose
+# SQLSTATE is in INTERRUPTION_PREFIXES, or that carries no readable SQLSTATE.
+# Prints "<connection>: <line>" for the first one; prints nothing when clean.
+conn_interruption() {
+  local c line state
+  for c in A B; do
+    [ -f "$WORK/$c.out" ] || continue
+    while IFS= read -r line; do
+      state=$(printf '%s\n' "$line" | sed -nE 's/^(ERROR|FATAL|PANIC):  ([0-9A-Z]{5}): .*$/\2/p')
+      case "$(sqlstate_kind "$state")" in
+        interruption|unparseable) echo "$c: $(printf '%s' "$line" | cut -c1-160)"; return;;
+      esac
+    done < <(tr -d '\000' < "$WORK/$c.out" | grep -E '^(ERROR|FATAL|PANIC):')
+  done
+}
+# A behavioral failure, unless the check was made on something that did not
+# execute: a helper query that exited non-zero, or a schedule connection whose
+# statement was interrupted. Then nothing was judged.
 fail() {
-  if [ -s "$WORK/qfail" ]; then never "a helper query could not connect while checking: $* ($(head -1 "$WORK/qfail" | cut -c1-160))"; fi
+  local bad
+  if [ -s "$WORK/qfail" ]; then never "a helper query did not execute while checking: $* ($(head -1 "$WORK/qfail" | cut -c1-200))"; fi
+  bad=$(conn_interruption)
+  if [ -n "$bad" ]; then never "a schedule connection was interrupted while checking: $* ($bad)"; fi
   echo "FAIL $*"; exit 1
 }
 cleanup() {
@@ -413,7 +656,9 @@ if ! initdb -D "$WORK/pg" -A trust -U postgres -E UTF8 --locale=en_US.UTF-8 >"$W
   never "initdb failed: $(tail -1 "$WORK/initdb.log")"
 fi
 pg_ctl -D "$WORK/pg" -o "-p $PORT -c listen_addresses=127.0.0.1 -k $WORK -c deadlock_timeout=200ms -c timezone=UTC" -l "$WORK/pg.log" start -w >/dev/null || never "pg start failed: $(tail -1 "$WORK/pg.log")"
-PSQL=(psql -X -h 127.0.0.1 -p "$PORT" -U postgres -v ON_ERROR_STOP=1 -q)
+# VERBOSITY=verbose: every error line carries its SQLSTATE, which is what tells a
+# failed check from a cancelled statement or a syntax error.
+PSQL=(psql -X -h 127.0.0.1 -p "$PORT" -U postgres -v ON_ERROR_STOP=1 -v VERBOSITY=verbose -q)
 "${PSQL[@]}" -d postgres -c "create database obtest" >/dev/null || never "create database failed"
 
 "${PSQL[@]}" -d obtest <<'SQL' >/dev/null || never "stub schema failed"
@@ -556,10 +801,15 @@ if ! PGOPTIONS="-c client_min_messages=warning" "${PSQL[@]}" -d obtest -f "$SRC"
 fi
 echo "migrations applied"
 
+# A helper query on a fresh connection. These are the harness's own reads and
+# fixture writes; none is expected to raise under any mutant. So ANY non-zero exit
+# (1 = the SQL raised, including a cancelled statement; 2 = could not connect) means
+# the query did not execute: it is recorded, fail() then reports NEVER-RAN instead
+# of a failed check, and a run that reaches its end with one recorded is NEVER-RAN.
 q() {
   local out code
   out=$("${PSQL[@]}" -d obtest -At -c "$1" 2>&1); code=$?
-  if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then echo "psql exit $code: $out" >> "$WORK/qfail"; fi
+  if [ "$code" -ne 0 ]; then echo "psql exit $code: $(printf '%s' "$out" | head -1)" >> "$WORK/qfail"; fi
   printf '%s\n' "$out"
 }
 
@@ -626,16 +876,72 @@ if [ "$MODE" = diff ]; then
   COMPLETED=1; exit 0
 fi
 
+# Negative controls (OBAP_INJECT). The contract ones edit a COPY of the contract;
+# the others plant a trigger that raises a statement cancellation (57014) on one
+# named row, so the interruption arrives through the real path being judged.
+CONTRACT="$TEST_SQL"
+inject_sql() { # anchor, replacement text: in a copy of the contract, exactly one site
+  CONTRACT="$WORK/contract.sql"; cp "$TEST_SQL" "$CONTRACT"
+  python3 - "$CONTRACT" "$1" "$2" <<'PY' || never "injection $INJECT did not apply: the contract does not hold its anchor exactly once"
+import sys
+p, a, b = sys.argv[1:4]
+s = open(p).read()
+if s.count(a) != 1: sys.exit(1)
+open(p, 'w').write(s.replace(a, b))
+PY
+}
+inject_trigger() { # timing/event, WHEN condition
+  "${PSQL[@]}" -d obtest >/dev/null 2>"$WORK/inject.err" <<SQL || never "injection $INJECT did not apply: $(head -1 "$WORK/inject.err")"
+create function public.obt_injected_cancel() returns trigger language plpgsql as \$f\$
+begin
+  raise exception using errcode = '57014', message = 'canceling statement due to statement timeout (injected by OBAP_INJECT=$INJECT)';
+end \$f\$;
+create trigger obt_injected_cancel $1 on public.action_items for each row when ($2) execute function public.obt_injected_cancel();
+SQL
+}
+POINT_ANCHOR="-- OBAP_INJECT_POINT (the runner's negative controls insert one statement here)
+"
+case "$INJECT" in
+  "") ;;
+  # The positive control: a check that runs to completion and does not hold.
+  assert_fail) inject_sql "$POINT_ANCHOR" "select pg_temp.ok('INJECTED a completed check that does not hold', 1 = 2, 'one is not two');
+";;
+  # Three errors that are not assertions and that no check was written for.
+  syntax_error) inject_sql "$POINT_ANCHOR" "selec 1;
+";;
+  undefined_function) inject_sql "$POINT_ANCHOR" "select public.obt_no_such_function();
+";;
+  raw_error) inject_sql "$POINT_ANCHOR" "select 1/0;
+";;
+  # A real statement_timeout.
+  sql_timeout) inject_sql "$POINT_ANCHOR" "set statement_timeout = 10;
+select pg_sleep(0.2);
+";;
+  # The contract's own backend terminated: the connection is lost mid-script.
+  backend_killed) inject_sql "$POINT_ANCHOR" "select pg_terminate_backend(pg_backend_pid());
+select pg_sleep(1);
+";;
+  # A statement that outlives the outer deadline.
+  sql_sleep) inject_sql "$POINT_ANCHOR" "select pg_sleep(600);
+";;
+  conn_cancel|helper_cancel|helper_stray) ;; # planted further down
+  *) never "unknown injection: $INJECT";;
+esac
+
 # --------------------------------------------------------------------------
-# 1. The single-connection contract.
+# 1. The single-connection contract. psql's exit 3 says only that a statement
+# raised; contract_verdict reads the SQLSTATE to tell a failed check (exit 1)
+# from everything else (NEVER-RAN).
 # --------------------------------------------------------------------------
 if [ -z "${ONLY_CONCURRENCY:-}" ]; then
-  OUT=$("${PSQL[@]}" -d obtest -f "$TEST_SQL" 2>&1); code=$?
-  echo "$OUT" | grep -E "PASS|PASSED|ERROR" | sed 's/^psql:.*NOTICE:  //; s/^psql:.*ERROR:  /ERROR: /'
-  case "$code" in
-    0) echo "$OUT" | grep -q "ARCHIVE PROPOSALS SQL TEST PASSED" || never "the SQL contract exited 0 without its PASSED line";;
-    3) echo "FAIL ARCHIVE PROPOSALS SQL TEST: $(echo "$OUT" | grep -m1 'ERROR' | sed 's/^psql:.*ERROR:  //' | cut -c1-200)"; exit 1;;
-    *) never "the SQL contract did not complete (psql exit $code): $(echo "$OUT" | tail -1 | cut -c1-160)";;
+  "${PSQL[@]}" -d obtest -f "$CONTRACT" >"$WORK/contract.out" 2>&1; code=$?
+  grep -E '^psql:.*:[0-9]+: (NOTICE|ERROR|FATAL):  ' "$WORK/contract.out" \
+    | sed -E 's/^psql:.*:[0-9]+: NOTICE:  00000: //; s/^psql:.*:[0-9]+: (ERROR|FATAL):  ([0-9A-Z]{5}): /\1 \2: /; s/^psql:.*:[0-9]+: (ERROR|FATAL):  /\1 (no SQLSTATE): /'
+  contract_verdict "$code" "$WORK/contract.out"
+  case $? in
+    0) echo "$CONTRACT_NAME PASSED";;
+    1) echo "FAIL $CONTRACT_NAME: $VERDICT"; exit 1;;
+    *) never "$VERDICT";;
   esac
 fi
 
@@ -646,7 +952,7 @@ fi
 SEQ=0
 open_conn() {
   mkfifo "$WORK/$1.in"
-  psql -X -h 127.0.0.1 -p "$PORT" -U postgres -d obtest -v ON_ERROR_STOP=0 -q -At < "$WORK/$1.in" > "$WORK/$1.out" 2>&1 &
+  psql -X -h 127.0.0.1 -p "$PORT" -U postgres -d obtest -v ON_ERROR_STOP=0 -v VERBOSITY=verbose -q -At < "$WORK/$1.in" > "$WORK/$1.out" 2>&1 &
   PIDS="$PIDS $!"
   case "$1" in A) exec 7>"$WORK/A.in";; B) exec 8>"$WORK/B.in";; esac
   send "$1" "set application_name = 'conn_$1';"
@@ -671,11 +977,22 @@ wait_blocked() {
   fail "$2: connection $1 completed without ever waiting on a lock"
 }
 clean() { tr -d '\000' < "$WORK/$1.out"; }
+# The end of a transcript on ONE line, for a FAIL message: a second line starting
+# "ERROR" would read to the sweep as an SQL error of its own.
+last2() { clean "$1" | tail -2 | tr '\n' ' '; }
 NOW0="2026-11-19 05:30:00+00"
 # Each schedule uses its own items, aged against a moment far after the contract's,
 # and asserts per item, so the contract's leftover rows cannot decide it.
 NOWC="2027-06-01 05:30:00+00"
 
+case "$INJECT" in
+  # C1's job run is cancelled on connection A when it writes its proposal.
+  conn_cancel) inject_trigger "before update" "new.description = 'c1 x'";;
+  # The helper query that inserts C1's items is cancelled.
+  helper_cancel) inject_trigger "before insert" "new.description = 'c1 x'";;
+  # A helper query that raises while every check goes on to hold.
+  helper_stray) q "select 1/0" >/dev/null;;
+esac
 open_conn A; open_conn B
 
 # C1: an item closed by an uncommitted transaction.
@@ -689,7 +1006,7 @@ sync_conn B
 send A "select 'run=' || public.run_archive_proposals('$NOWC');"
 wait_blocked A "C1 the job waits for the uncommitted close"
 send B "commit;"; sync_conn B; sync_conn A
-clean A | grep -qx "run=1" || fail "C1: expected run=1, got '$(clean A | tail -2)'"
+clean A | grep -qx "run=1" || fail "C1: expected run=1, got '$(last2 A)'"
 [ "$(q "select (archive_proposed_at is not null)::text || '|' || status from public.action_items where id = '$X1'")" = "true|open" ] || fail "C1: X was not proposed"
 [ "$(q "select (archive_proposed_at is null)::text || '|' || status || '|' || (select count(*) from public.auto_resolve_decisions where item_id = '$Y1' and layer = 'archive') from public.action_items where id = '$Y1'")" = "true|resolved|0" ] || fail "C1: the item closed during the run was proposed"
 echo "PASS C1 the job waited on the uncommitted close and then skipped the closed item"
@@ -704,11 +1021,14 @@ sync_conn A
 send B "select 'runB=' || public.run_archive_proposals('$NOWC');"
 wait_blocked B "C2 the second run waits for the first"
 send A "commit;"; sync_conn A; sync_conn B
-clean A | grep -qx "runA=2" || fail "C2: expected runA=2, got '$(clean A | tail -2)'"
-clean B | grep -qx "runB=0" || fail "C2: expected runB=0, got '$(clean B | tail -2)'"
+clean A | grep -qx "runA=2" || fail "C2: expected runA=2, got '$(last2 A)'"
+clean B | grep -qx "runB=0" || fail "C2: expected runB=0, got '$(last2 B)'"
 [ "$(q "select count(*) from public.auto_resolve_decisions where item_id in ('$X2', '$Y2') and layer = 'archive'")" = "2" ] || fail "C2: a proposal was written twice"
 echo "PASS C2 two concurrent runs: the second waited and wrote nothing; one proposal per item"
 
 [ "$(q "select count(*) from public.action_item_events where actor = 'sql'")" = "0" ] || fail "C: an sql-actor event"
+# Every check held. That is a pass only if everything the checks read executed.
+[ -s "$WORK/qfail" ] && never "every check held, but a helper query did not execute during the run ($(head -1 "$WORK/qfail" | cut -c1-200))"
+[ -n "$INJECT" ] && never "the injection $INJECT did not stop the run, so it did not fire"
 COMPLETED=1
 echo "ARCHIVE PROPOSALS TEST COMPLETE${MUTATE:+ (mutation $MUTATE)}"

@@ -4,6 +4,15 @@
 -- prints PASS <name> or raises FAIL <name>; the last line prints
 -- ARCHIVE PROPOSALS SQL TEST PASSED.
 --
+-- How a failure is told apart from everything else that stops this file (the
+-- rule action-item-review-sql-test.sql has had since the PR 25 Codex review, P2,
+-- 2026-11-18): a check that RAN and did not hold raises SQLSTATE TF001 with a
+-- message starting "FAIL ", from pg_temp.ok and from nowhere else. The runner
+-- counts only that as a completed failure. Any other error that stops this file
+-- (a syntax error, a missing function, a cancelled statement, a timeout, a lost
+-- resource, or an error no check was written for) is NEVER-RAN there. This file
+-- has no error handler, so nothing here can turn such an error into an answer.
+--
 -- Every run passes an explicit p_now so the fixtures do not depend on the clock.
 -- Fixtures that need two connections are in the shell script.
 
@@ -14,11 +23,14 @@ insert into public.agent_task_ledger (agent_code) values ('codex');
 insert into public.clients (name) values
   ('Jordan Lee'), ('Avery Jordans'), ('Paul Reyes'), ('Mira');
 
+-- The only place TF001 is raised. One line, so the runner's first error line
+-- carries the whole verdict.
 create function pg_temp.ok(p_name text, p_cond boolean, p_detail text default '')
 returns void language plpgsql as $$
 begin
   if p_cond is distinct from true then
-    raise exception 'FAIL %: %', p_name, p_detail;
+    raise exception using errcode = 'TF001',
+      message = regexp_replace(format('FAIL %s: %s', p_name, p_detail), E'[\n\r]+', ' ', 'g');
   end if;
   raise notice 'PASS %', p_name;
 end $$;
@@ -54,6 +66,8 @@ insert into public.thoughts (id, content, created_at) values
   ('e1000000-0000-4000-8000-000000000002', 'buy more black ink and needles', '2026-10-01 20:00:00+00'),
   -- One shape plus a dated header in the FUTURE: not a work report.
   ('e1000000-0000-4000-8000-000000000003', 'Jordan remodel session 2 (2026-12-12): send the revised koi', '2026-10-01 20:00:00+00');
+
+-- OBAP_INJECT_POINT (the runner's negative controls insert one statement here)
 
 -- ---------------------------------------------------------------------------
 -- The age, deadline and exemption fixtures, all evaluated by ONE run.

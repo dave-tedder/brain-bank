@@ -31,6 +31,25 @@
 //
 // Exit 0 with "REVIEW PROPOSAL INTEGRATION PASSED"; 1 on a failed assertion that
 // ran to completion; 2 when the bridge itself could not execute (NEVER-RAN).
+//
+// A database error is passed to the code under test only when it is an answer
+// from the functions (a refusal the RPC raises, a constraint, an unknown parameter
+// name). An interruption (a cancelled statement, a timeout, a lost connection or
+// resource: the SQLSTATE prefixes in OBRP_INTERRUPTION_PREFIXES, the runner's
+// list) or an error with no readable SQLSTATE is NEVER-RAN: no assertion may be
+// judged on it (PR 28 Codex review, P2, 2026-11-19; the rule and the mechanism are
+// action-item-review-integration.ts's, PR 25). The client library and the Slack
+// handler both swallow an exception thrown inside fetch, so every NeverRan is
+// also recorded, and fail() and the final line both refuse to give a verdict
+// once one exists.
+//
+// The same holds one step earlier, where there is no exit status at all (PR 28
+// Codex re-review 1, P2, 2026-11-19): psql() records a native failure to create
+// or run the subprocess (psql missing from PATH, not executable, the run
+// permission refused) before the rejection can reach the client library or a
+// handler. A psql that exits 0 without the output its statement must produce
+// (an RPC answer that is not JSON, a count that is not a number) is recorded the
+// same way: nothing says the statement ran.
 
 import { reviewProposal, type ReviewArgs } from "../../supabase/functions/_shared/proposal-review.ts";
 
@@ -60,17 +79,37 @@ console.error = (...a: unknown[]) => { logs.push("ERR " + a.map(String).join(" "
 console.warn = (...a: unknown[]) => { logs.push("WARN " + a.map(String).join(" ")); };
 const say = (s: string) => origLog(s);
 
-class NeverRan extends Error {}
+const INTERRUPTION_PREFIXES = (Deno.env.get("OBRP_INTERRUPTION_PREFIXES") ?? "").split(" ").filter(Boolean);
+if (INTERRUPTION_PREFIXES.length === 0) {
+  origLog("NEVER-RAN: OBRP_INTERRUPTION_PREFIXES is not set (run me from review-proposal-sql-test.sh)");
+  Deno.exit(2);
+}
+const neverRan: string[] = [];
+class NeverRan extends Error {
+  constructor(message: string) {
+    super(message);
+    neverRan.push(message);
+  }
+}
 
 // ---------- psql bridge ----------
+// Every statement the harness sends goes through here. Creating the command,
+// running it and decoding its output can each throw before any exit status
+// exists; that is an execution that did not happen, recorded as NeverRan HERE so
+// that no caller (the client library inside fetch, a handler, a discarded
+// promise) can turn the rejection into an answer.
 async function psql(query: string): Promise<{ code: number; out: string; err: string }> {
-  const cmd = new Deno.Command("psql", {
-    args: ["-h", "127.0.0.1", "-p", PORT!, "-U", "postgres", "-d", "obtest", "-X", "-q", "-A", "-t",
-      "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-c", query],
-    stdout: "piped", stderr: "piped",
-  });
-  const r = await cmd.output();
-  return { code: r.code, out: new TextDecoder().decode(r.stdout), err: new TextDecoder().decode(r.stderr) };
+  try {
+    const cmd = new Deno.Command("psql", {
+      args: ["-h", "127.0.0.1", "-p", PORT!, "-U", "postgres", "-d", "obtest", "-X", "-q", "-A", "-t",
+        "-v", "ON_ERROR_STOP=1", "-v", "VERBOSITY=verbose", "-c", query],
+      stdout: "piped", stderr: "piped",
+    });
+    const r = await cmd.output();
+    return { code: r.code, out: new TextDecoder().decode(r.stdout), err: new TextDecoder().decode(r.stderr) };
+  } catch (e) {
+    throw new NeverRan(`psql subprocess could not execute: ${String(e).slice(0, 300)}`);
+  }
 }
 
 // psql exit 2 = connection trouble, 1 = a server-reported error from the SQL.
@@ -99,10 +138,22 @@ async function bridgeRpc(fn: string, args: Record<string, unknown>): Promise<{ d
     return `${k} => ${lit(v)}`;
   }).join(", ");
   const r = await psql(`select coalesce(jsonb_agg(to_jsonb(x)), '[]'::jsonb)::text from public.${fn}(${named}) x`);
-  if (r.code === 0) return { data: JSON.parse(r.out.trim()), error: null, status: 200 };
+  if (r.code === 0) {
+    // The statement always yields one JSON array. Anything else under exit 0 is
+    // not an answer from the function.
+    let data: unknown;
+    try { data = JSON.parse(r.out.trim()); } catch {
+      throw new NeverRan(`rpc ${fn} gave no readable answer (psql exit 0, output is not JSON): ${r.out.trim().slice(0, 200)}`);
+    }
+    return { data, error: null, status: 200 };
+  }
   if (r.code === 1 || r.code === 3) {
     const m = /ERROR:\s+([0-9A-Z]{5}):\s+([^\n]*)/.exec(r.err);
-    return { data: null, error: { message: m ? m[2] : r.err.trim(), code: m ? m[1] : undefined }, status: 400 };
+    if (!m) throw new NeverRan(`rpc ${fn} failed with no readable SQLSTATE (psql exit ${r.code}): ${r.err.trim().slice(0, 300)}`);
+    if (INTERRUPTION_PREFIXES.some((p) => m[1].startsWith(p))) {
+      throw new NeverRan(`rpc ${fn} was interrupted (SQLSTATE ${m[1]}: ${m[2].slice(0, 200)}); it did not complete, so nothing is judged on it`);
+    }
+    return { data: null, error: { message: m[2], code: m[1] }, status: 400 };
   }
   throw new NeverRan(`rpc ${fn} could not execute (psql exit ${r.code}): ${r.err.trim().slice(0, 300)}`);
 }
@@ -237,7 +288,10 @@ const STATE_SQL = `select jsonb_build_object(
 type State = Record<string, Record<string, Record<string, unknown>>>;
 async function state(): Promise<State> { return JSON.parse(await sqlValue(STATE_SQL)); }
 async function telemetryCount(): Promise<number> {
-  return Number(await sqlValue("select count(*) from public.mcp_tool_invocations where tool_name = 'review_proposal'"));
+  const v = await sqlValue("select count(*) from public.mcp_tool_invocations where tool_name = 'review_proposal'");
+  // Number("") is 0: an empty answer must not read as "no telemetry rows".
+  if (!/^[0-9]+$/.test(v)) throw new NeverRan(`telemetry count gave no readable answer (psql exit 0, output is not a number): ${v.slice(0, 200)}`);
+  return Number(v);
 }
 function diff(a: State, b: State): string[] {
   const out: string[] = [];
@@ -263,6 +317,10 @@ function live(label: string, s: State, item: string, pendingRows: number) {
 
 let checks = 0;
 function fail(msg: string): never {
+  if (neverRan.length) {
+    say(`NEVER-RAN integration: ${neverRan[0]} (while checking: ${msg.slice(0, 200)})`);
+    Deno.exit(2);
+  }
   say(`FAIL integration: ${msg}`);
   if (unexpected.length) say(`  unexpected requests: ${unexpected.join(" | ")}`);
   for (const l of logs.slice(-15)) say(`  log: ${l.slice(0, 240)}`);
@@ -487,8 +545,13 @@ try {
 
   ok(unexpected.length === 0, "no review path made any request other than the review RPCs and telemetry", unexpected.join(" | "));
   ok(rpcLog.length > 40, `the bridge really executed the RPCs (${rpcLog.length} calls)`);
+  if (neverRan.length) throw new NeverRan(neverRan[0]);
 } catch (e) {
   if (e instanceof NeverRan) { say(`NEVER-RAN integration: ${e.message}`); Deno.exit(2); }
+  // An exception of another kind after a recorded incomplete execution (an
+  // answer that is not JSON because the tool reported the swallowed error): the
+  // record is the reason, the exception its consequence.
+  if (neverRan.length) { say(`NEVER-RAN integration: ${neverRan[0]} (then: ${String(e).slice(0, 160)})`); Deno.exit(2); }
   say(`NEVER-RAN integration: harness crashed: ${(e as Error).stack ?? e}`);
   Deno.exit(2);
 }

@@ -3,6 +3,17 @@
 -- against a throwaway local cluster. Every check prints PASS <name> or raises
 -- FAIL <name>; the last line prints REVIEW PROPOSAL SQL TEST PASSED.
 --
+-- How a failure is told apart from everything else that stops this file (the
+-- rule action-item-review-sql-test.sql has had since the PR 25 Codex review, P2,
+-- 2026-11-18): a check that RAN and did not hold raises SQLSTATE TF001 with a
+-- message starting "FAIL ", from pg_temp.ok and from nowhere else. The runner
+-- counts only that as a completed failure. Any other error that stops this file
+-- (a syntax error, a missing function, a cancelled statement, a timeout, a lost
+-- resource, or an error no check was written for) is NEVER-RAN there. So every
+-- error a mutant is expected to produce is caught by a handler and judged by a
+-- named check, and every WHEN OTHERS handler re-raises an interruption untouched
+-- instead of reporting it as the code's answer.
+--
 -- A DO block is one transaction, so a fixture that needs equal now() values for
 -- different reviews (round 15) lives inside one block. Fixtures that need two
 -- connections are in the shell script.
@@ -15,11 +26,25 @@ insert into public.thoughts (id) values
   ('e0000000-0000-4000-8000-000000000005');
 insert into public.agent_task_ledger (agent_code) values ('codex');
 
+-- The SQLSTATE prefixes that mean "interrupted, nothing was judged". One list,
+-- owned by the runner (INTERRUPTION_PREFIXES) and passed in, so the shell and
+-- this file cannot disagree.
+create temp table obt_interruption (prefix text primary key);
+insert into obt_interruption select unnest(string_to_array(:'interruption_prefixes', ' '));
+
+create function pg_temp.interruption(p_state text)
+returns boolean language sql stable as $$
+  select p_state is null or exists (select 1 from obt_interruption i where p_state like i.prefix || '%')
+$$;
+
+-- The only place TF001 is raised. One line, so the runner's first error line
+-- carries the whole verdict.
 create function pg_temp.ok(p_name text, p_cond boolean, p_detail text default '')
 returns void language plpgsql as $$
 begin
   if p_cond is distinct from true then
-    raise exception 'FAIL %: %', p_name, p_detail;
+    raise exception using errcode = 'TF001',
+      message = regexp_replace(format('FAIL %s: %s', p_name, p_detail), E'[\n\r]+', ' ', 'g');
   end if;
   raise notice 'PASS %', p_name;
 end $$;
@@ -108,6 +133,17 @@ begin
            where d.value ->> 'item_id' = p_item::text and d.value ->> 'outcome' = 'proposed') = p_pending,
     format('expected item %s with %s proposed rows in the snapshot', p_item, p_pending));
 end $$;
+
+-- T00: the harness's own classification, before it is relied on.
+select pg_temp.ok('T00 harness: the runner passed its interruption list',
+  (select count(*) >= 6 from obt_interruption), (select count(*)::text from obt_interruption));
+select pg_temp.ok('T00 harness: cancellation, connection, resource, limit, system and internal errors are interruptions',
+  (select bool_and(pg_temp.interruption(s)) from unnest(array['57014', '57P01', '08006', '53200', '54001', '58030', 'XX000', '55P03']) s)
+  and pg_temp.interruption(null));
+select pg_temp.ok('T00 harness: the errors a mutant is expected to produce are not interruptions',
+  not (select bool_or(pg_temp.interruption(s)) from unnest(array['23503', '23514', '22023', '22012', 'P0001', '42883', '42601', 'TF001']) s));
+
+-- OBRP_INJECT_POINT (the runner's negative controls insert one statement here)
 
 -- T01 item reference resolution, outside the lock.
 select pg_temp.item('c0010001-0000-4000-8000-000000000000');
@@ -437,22 +473,34 @@ begin
   begin
     perform pg_temp.rp('c0190001-0000-4000-8000-000000000000', 'keep', null, 'slack:', 'slack-signature');
     v_msg := 'accepted';
-  exception when others then v_msg := sqlerrm; end;
+  exception when others then
+    if pg_temp.interruption(sqlstate) then raise; end if;
+    v_msg := sqlerrm;
+  end;
   perform pg_temp.ok('T19 a Slack actor with no user id is refused', v_msg like 'A slack-signature actor must be%', v_msg);
   begin
     perform pg_temp.rp('c0190001-0000-4000-8000-000000000000', 'keep', null, 'operator', 'slack-signature');
     v_msg := 'accepted';
-  exception when others then v_msg := sqlerrm; end;
+  exception when others then
+    if pg_temp.interruption(sqlstate) then raise; end if;
+    v_msg := sqlerrm;
+  end;
   perform pg_temp.ok('T19 operator cannot claim the Slack source', v_msg like 'A slack-signature actor must be%', v_msg);
   begin
     perform pg_temp.rp('c0190001-0000-4000-8000-000000000000', 'keep', null, 'mallory', 'mcp-shared-key');
     v_msg := 'accepted';
-  exception when others then v_msg := sqlerrm; end;
+  exception when others then
+    if pg_temp.interruption(sqlstate) then raise; end if;
+    v_msg := sqlerrm;
+  end;
   perform pg_temp.ok('T19 an MCP actor that is neither operator nor a ledger code is refused', v_msg like 'Actor mallory is neither%', v_msg);
   begin
     perform pg_temp.rp('c0190001-0000-4000-8000-000000000000', 'keep', null, 'operator', 'header');
     v_msg := 'accepted';
-  exception when others then v_msg := sqlerrm; end;
+  exception when others then
+    if pg_temp.interruption(sqlstate) then raise; end if;
+    v_msg := sqlerrm;
+  end;
   perform pg_temp.ok('T19 an unknown actor source is refused', v_msg like 'Unknown actor source%', v_msg);
   perform pg_temp.ok('T19 refusals wrote nothing',
     (select outcome = 'proposed' from public.auto_resolve_decisions where id = 'd0190001-0000-4000-8000-000000000000'));
@@ -482,7 +530,10 @@ begin
     returns integer language plpgsql as $f$ begin return 0; end $f$;
     perform pg_temp.rp('c0200001-0000-4000-8000-000000000000', 'done');
     v_msg := 'no exception';
-  exception when others then v_msg := sqlerrm; end;
+  exception when others then
+    if pg_temp.interruption(sqlstate) then raise; end if;
+    v_msg := sqlerrm;
+  end;
   perform pg_temp.ok('T20 a zero-row transition raises', v_msg like 'review_proposal: the done transition of % wrote 0 rows.', v_msg);
   perform pg_temp.ok('T20 the decision row still reads proposed',
     (select outcome = 'proposed' and review_seq is null from public.auto_resolve_decisions where id = 'd0200001-0000-4000-8000-000000000000'));
@@ -689,7 +740,7 @@ end $$;
 
 -- T33 deferred items.
 do $$
-declare r record; s jsonb;
+declare r record; s jsonb; v_ans text;
 begin
   perform pg_temp.item('c0330001-0000-4000-8000-000000000000', 'deferred');
   perform pg_temp.prop('d0330001-0000-4000-8000-000000000000', 'c0330001-0000-4000-8000-000000000000', 'archive');
@@ -701,9 +752,18 @@ begin
   perform pg_temp.prop('d0330002-0000-4000-8000-000000000000', 'c0330002-0000-4000-8000-000000000000', 'recheck');
   s := pg_temp.state();
   perform pg_temp.live('T33 deferred recheck', s, 'c0330002-0000-4000-8000-000000000000', 1);
-  select * into r from pg_temp.rp('c0330002-0000-4000-8000-000000000000', 'done');
+  -- The call is made inside a handler: with the status guard gone the function
+  -- raises (P0001, the done transition wrote 0 rows) instead of answering, and
+  -- that raise has to be judged by this named check, not left to stop the file.
+  begin
+    select * into r from pg_temp.rp('c0330002-0000-4000-8000-000000000000', 'done');
+    v_ans := r.status || ': ' || r.message;
+  exception when others then
+    if pg_temp.interruption(sqlstate) then raise; end if;
+    v_ans := format('raised sqlstate=%s: %s', sqlstate, sqlerrm);
+  end;
   perform pg_temp.ok('T33 done on a deferred item is refused',
-    r.status = 'refused' and r.message = 'c0330002 is deferred; done needs an open item', r.message);
+    v_ans = 'refused: c0330002 is deferred; done needs an open item', v_ans);
   perform pg_temp.unchanged('T33 done on a deferred item: zero business writes', s);
   perform pg_temp.item('c0330003-0000-4000-8000-000000000000', 'deferred');
   perform pg_temp.prop('d0330003-0000-4000-8000-000000000000', 'c0330003-0000-4000-8000-000000000000', 'archive');
