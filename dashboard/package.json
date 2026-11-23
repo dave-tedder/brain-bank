@@ -11,10 +11,10 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.52",
+    "@ai-sdk/openai": "^3.0.145",
     "@supabase/supabase-js": "^2.47.10",
-    "ai": "^6.0.159",
-    "next": "^15.5.21",
+    "ai": "^6.0.336",
+    "next": "^15.5.29",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-force-graph-2d": "^1.29.1",
@@ -31,6 +31,6 @@
   },
   "overrides": {
     "postcss": "^8.5.23",
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.5"
   }
 }
