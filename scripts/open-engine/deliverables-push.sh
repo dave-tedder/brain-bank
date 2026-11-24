@@ -13,7 +13,10 @@
 # - Refuses to commit staged content matching obvious secret shapes.
 # - Commits as "deliverable: <files> [OE:<shortid>]" (or [OE:sweep]).
 # - pull --rebase then push; a push failure NEVER fails the caller — the lane
-#   records "@ UNPUSHED" in its receipt and the closeout sweep retries.
+#   records "@ UNPUSHED" in its receipt and the next run with no new files retries.
+# - That retry pushes ONLY when every unpushed commit touches nothing outside
+#   deliverables/ and none carries a secret shape. Otherwise the commits stay
+#   local and the JSON says so; NOTHING_TO_COMMIT never hides a stuck commit.
 # - Prints exactly one JSON line on stdout. Never prints secret values.
 
 set -euo pipefail
@@ -58,15 +61,84 @@ fi
 # Stage only deliverables/. Exclude iCloud dupe artifacts ("foo 2.md").
 git -C "$ROOT" add -A -- 'deliverables/' ':(exclude)deliverables/**/* [0-9]*.*' ':(exclude)deliverables/* [0-9]*.*' >/dev/null
 
-if git -C "$ROOT" diff --cached --quiet -- deliverables/; then
-  echo '{"pushed":false,"reason":"NOTHING_TO_COMMIT"}'
+# Secret-shape guard. Deliverables are client-facing drafts; a secret in one is
+# always a bug. Patterns are deliberately loose.
+# The text is read into a variable first, never piped into `grep -q`: grep exits
+# on the first match, git then dies of SIGPIPE on a large diff, and pipefail
+# turned that into "no match" (found 2026-11-24, a diff of 800 KB passed).
+SECRET_PATTERNS='sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sbp_[A-Za-z0-9]{10,}|x-brain-key[": ]+[A-Za-z0-9]'
+has_secret_shape() { # $1 text
+  grep -qE -- "$SECRET_PATTERNS" <<<"$1"
+}
+
+COMMIT_SHA=""
+BRANCH=""
+FILES_JSON="[]"
+to_json_list() { # stdin lines -> JSON array
+  python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))'
+}
+
+emit() {
+  # $1 pushed "true"/"false", $2 reason ("" for none)
+  python3 -c 'import json,sys; r=sys.argv[2]; o={"pushed":sys.argv[1]=="true","commit":sys.argv[3],"branch":sys.argv[4],"files":json.loads(sys.argv[5])};
+if r: o["reason"]=r
+print(json.dumps(o))' "$1" "$2" "$COMMIT_SHA" "$BRANCH" "$FILES_JSON"
+}
+
+# Rebase, push, emit, exit. Failures are reported, never fatal to the caller:
+# the commit exists locally and the next run with no new files retries it.
+rebase_push_and_exit() {
+  if ! git -C "$ROOT" pull --rebase -q >/dev/null 2>&1; then
+    git -C "$ROOT" rebase --abort >/dev/null 2>&1 || true
+    emit false "PUSH_FAILED_REBASE"
+    exit 0
+  fi
+  # The rebase may have rewritten the commit; ours is the newest local commit, so it remains HEAD (race-free, no message-tag grep).
+  COMMIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+  if git -C "$ROOT" push -q >/dev/null 2>&1; then
+    emit true ""
+  else
+    emit false "PUSH_FAILED"
+  fi
   exit 0
+}
+
+if git -C "$ROOT" diff --cached --quiet -- deliverables/; then
+  # Nothing new. A commit an earlier run failed to push may still be waiting.
+  AHEAD=0
+  if git -C "$ROOT" rev-parse -q --verify '@{u}' >/dev/null 2>&1; then
+    AHEAD="$(git -C "$ROOT" rev-list --count '@{u}..HEAD')"
+  fi
+  if [ "$AHEAD" -eq 0 ]; then
+    echo '{"pushed":false,"reason":"NOTHING_TO_COMMIT"}'
+    exit 0
+  fi
+
+  # --no-renames lists both sides of a move, so a file moved in from outside
+  # deliverables/ counts as outside. A merge is never retried: log prints no
+  # paths for one, so its contents would go unchecked.
+  MERGES="$(git -C "$ROOT" rev-list --merges --count '@{u}..HEAD')"
+  PATHS="$(git -C "$ROOT" -c core.quotePath=false log --no-renames --format= --name-only '@{u}..HEAD')"
+  OUTSIDE="$(grep -v '^deliverables/' <<<"$PATHS" | grep -c . || true)"
+  if [ "$MERGES" -ne 0 ] || [ "$OUTSIDE" -ne 0 ] || [ -z "$PATHS" ]; then
+    printf '{"pushed":false,"reason":"NOTHING_TO_COMMIT","detail":"%s unpushed commit(s) left alone: not deliverables-only"}\n' "$AHEAD"
+    exit 0
+  fi
+
+  PATCH="$(git -C "$ROOT" log -p --no-renames --format=%B '@{u}..HEAD')"
+  if has_secret_shape "$PATCH"; then
+    echo '{"pushed":false,"reason":"SECRET_SHAPE_BLOCKED","detail":"an unpushed commit matched a secret pattern; left local for attended review"}'
+    exit 0
+  fi
+
+  COMMIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+  BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
+  FILES_JSON="$(sort -u <<<"$PATHS" | to_json_list)"
+  rebase_push_and_exit
 fi
 
-# Secret-shape guard on the staged diff. Deliverables are client-facing drafts;
-# a secret in one is always a bug. Patterns are deliberately loose.
-SECRET_PATTERNS='sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|sbp_[A-Za-z0-9]{10,}|x-brain-key[": ]+[A-Za-z0-9]'
-if git -C "$ROOT" diff --cached -- deliverables/ | grep -qE "$SECRET_PATTERNS"; then
+PATCH="$(git -C "$ROOT" diff --cached -- deliverables/)"
+if has_secret_shape "$PATCH"; then
   # Unstage and leave the files on disk for attended review. Never print the match.
   git -C "$ROOT" reset -q -- deliverables/
   echo '{"pushed":false,"reason":"SECRET_SHAPE_BLOCKED","detail":"staged deliverables diff matched a secret pattern; unstaged for attended review"}'
@@ -84,28 +156,6 @@ git -C "$ROOT" commit -q -m "deliverable: $SUMMARY [OE:$SHORTID]"
 COMMIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
 BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)"
 
-FILES_JSON="$(git -C "$ROOT" show --name-only --pretty=format: HEAD -- deliverables/ | grep . | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+FILES_JSON="$(git -C "$ROOT" show --name-only --pretty=format: HEAD -- deliverables/ | to_json_list)"
 
-emit() {
-  # $1 pushed "true"/"false", $2 reason ("" for none)
-  python3 -c 'import json,sys; r=sys.argv[2]; o={"pushed":sys.argv[1]=="true","commit":sys.argv[3],"branch":sys.argv[4],"files":json.loads(sys.argv[5])};
-if r: o["reason"]=r
-print(json.dumps(o))' "$1" "$2" "$COMMIT_SHA" "$BRANCH" "$FILES_JSON"
-}
-
-# Rebase then push. Failures are reported, never fatal to the caller: the
-# commit exists locally and the closeout sweep retries the push.
-if ! git -C "$ROOT" pull --rebase -q >/dev/null 2>&1; then
-  git -C "$ROOT" rebase --abort >/dev/null 2>&1 || true
-  emit false "PUSH_FAILED_REBASE"
-  exit 0
-fi
-# The rebase may have rewritten the commit; ours is the newest local commit, so it remains HEAD (race-free, no message-tag grep).
-COMMIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
-
-if git -C "$ROOT" push -q >/dev/null 2>&1; then
-  emit true ""
-else
-  emit false "PUSH_FAILED"
-fi
-exit 0
+rebase_push_and_exit
