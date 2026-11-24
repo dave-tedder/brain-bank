@@ -8,6 +8,24 @@ Entries are written for operators considering a fork. If you see "Breaking" on a
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-24
+
+A security and reliability patch. Two of the three changes are security fixes, so upgrading is recommended: the dashboard carried two critical unauthenticated remote code execution advisories that apply to a Linux deployment, and the Open Engine secret guard could let a secret through on a large diff.
+
+No migration, Edge Function redeploy or configuration change is needed.
+
+**To upgrade:** redeploy the dashboard from this version so it installs the new lockfile, and pull `scripts/open-engine/deliverables-push.sh` on every machine that runs it.
+
+### Security
+
+- **Dashboard dependencies patched.** Clears 15 open advisories (3 critical, 6 high, 5 medium, 1 low), all in `dashboard/package-lock.json`. The most serious are two unauthenticated remote code execution advisories in the Next.js image optimizer (AVIF, GHSA-2xp9-vwfh-vxw4, and SVG, GHSA-2464-fhr4-w9xw). The dashboard's middleware deliberately excludes `/_next/image`, so that endpoint answers without a login. The third critical one (GHSA-p293-qw3h-jr36) affects Windows hosts only. `next` is now 15.5.29, the `sharp` override floor 0.35.5 (next pins sharp as an optional dependency, so a next bump alone does not carry it), `ai` 6.0.336 and `@ai-sdk/openai` 3.0.145 (which pull `@ai-sdk/provider-utils` 4.0.67), with `nanoid`, `source-map-js` and `zod` refreshed. (#40)
+
+- **The deliverables secret guard no longer fails open on a large diff.** `scripts/open-engine/deliverables-push.sh` piped `git diff` into `grep -q` under `pipefail`. When the diff was larger than the pipe buffer, grep exited on the first match, git died of SIGPIPE, and the guard read that as "no match". A fake key on the first line of an 800 KB file passed three times out of three. The guard now reads the text first. Present since the script shipped in v0.6.0, so if you run this lane with large deliverables, check what it has already pushed. (#41)
+
+### Fixed
+
+- **A deliverable commit that failed to push is retried.** With no new files, the script returned `NOTHING_TO_COMMIT` without looking for commits an earlier run had left unpushed, so the nightly sweep reported a quiet night while the commit stayed local. It now retries them, but only when every unpushed commit touches nothing outside `deliverables/`, none is a merge and none carries a secret shape. Otherwise it leaves them local and says how many in `detail`. An uncommitted edit to a tracked file still blocks the push, because `pull --rebase` refuses; the run now reports that as `PUSH_FAILED_REBASE` and the next one retries. (#41)
+
 ## [0.10.0] - 2026-11-22
 
 The loop-closing release. Brain Bank captured action items well and closed them badly: an item stayed open until auto-resolve happened to match a later note, nothing recorded why an item closed or why a resolve was refused, stale items had no exit but a human noticing them, and the task board had no honest way to close a card that should not finish. This release makes every close explicit and auditable, has the system propose closes instead of guessing them, and lets the operator answer any proposal in one word.
@@ -587,7 +605,8 @@ First pre-release snapshot. Everything below represents the initial open-sourcin
 - This snapshot preceded the public `v0.1.0` release, which shipped on 2026-04-30 after the deploy-from-scratch walkthrough was verified against fresh Supabase projects.
 - The dashboard was separate at this snapshot. It was later merged into this repository under `dashboard/` before `v0.1.0` shipped.
 
-[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/dave-tedder/brain-bank/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/dave-tedder/brain-bank/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/dave-tedder/brain-bank/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/dave-tedder/brain-bank/compare/v0.8.3...v0.9.0
 [0.8.3]: https://github.com/dave-tedder/brain-bank/compare/v0.8.2...v0.8.3
